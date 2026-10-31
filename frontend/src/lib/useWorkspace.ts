@@ -1,249 +1,266 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Project, Recipe, SessionEvent, Version } from './types';
+import type { Project, SessionEvent, Version } from './types';
 import { makeEvent, makeProject, NEUTRAL_RECIPE } from './types';
-import { getActiveId, getMedia, getProject, saveMedia, saveProject, setActiveId } from './storage';
+import { getActiveId, getMedia, getProject, saveImport, saveProject, setActiveId } from './storage';
 import { inspectVideo } from './media';
+import { AppError, asAppError } from './errors';
+import type { ErrorDetails } from './errors';
+import * as api from './api';
 
 export function useWorkspace() {
   const [project, setProject] = useState<Project | null>(null);
-  const [saveState, setSaveState] = useState<'saving' | 'saved' | 'error'>('saving');
+  const [saveState, setSaveState] = useState<'saving'|'saved'|'error'>('saving');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const current = useRef<Project | null>(null);
+  const [canCancel, setCanCancel] = useState(false);
+  const [progress,setProgress]=useState<string|null>(null);
+  const [error, setError] = useState<AppError | null>(null);
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
+  const current = useRef(project);
+  const operation = useRef(false);
+  const controller = useRef<AbortController | null>(null);
+  const lastFailure = useRef('');
+  const remoteImport=useRef<string|null>(null);
+  const resumed=useRef<string|null>(null);
   current.current = project;
-
+  const update = useCallback((fn: (previous: Project) => Project) => {
+    setProject(previous => {
+      if(!previous)return previous;
+      const next=fn(previous);
+      return next===previous?previous:{...next,updatedAt:new Date().toISOString()};
+    });
+  }, []);
+  const appendEvent = useCallback((event: Omit<SessionEvent,'id'|'timestamp'>) => {
+    const record = makeEvent(event);
+    update(p => ({ ...p, events: [...p.events, record] }));
+  }, [update]);
+  const reportError = useCallback((cause: unknown, stage: string, details: ErrorDetails = {}) => {
+    const failure = asAppError(cause, stage, { ...details, context: stage });
+    setError(failure);
+    const signature = JSON.stringify([current.current?.id, failure.code, failure.details]);
+    // A failed autosave must not create an endless save/error/event loop.
+    if (lastFailure.current !== signature) {
+      lastFailure.current = signature;
+      appendEvent({ actor: 'app', kind: 'error', title: failure.message, reason: failure.action,
+        details: { code: failure.code, ...failure.details } });
+    }
+  }, [appendEvent]);
   useEffect(() => {
     let cancelled = false;
-    const restore = async () => {
+    setError(null);
+    void (async () => {
       try {
-        const activeId = getActiveId();
-        const restored = activeId ? await getProject(activeId) : undefined;
+        const id = getActiveId();
+        const saved = id ? await getProject(id) : undefined;
+        if (id && !saved) throw new AppError('SESSION_MISSING', 'The active session could not be found.',
+          'Start a new session. Existing records have not been changed.', { projectId: id });
         if (!cancelled) {
-          const next = restored ?? makeProject();
-          setActiveId(next.id);
-          setProject(next);
+          const next = saved ?? makeProject();
+          setActiveId(next.id); setProject(next);
         }
-      } catch {
-        if (!cancelled) {
-          setProject(makeProject());
-          setError('Local storage is unavailable. This session cannot be saved in this browser.');
-          setSaveState('error');
-        }
+      } catch (cause) {
+        if (!cancelled) { setSaveState('error'); reportError(cause, 'storage.restore'); }
       }
-    };
-    void restore();
+    })();
     return () => { cancelled = true; };
-  }, []);
+  }, [restoreAttempt, reportError]);
 
   useEffect(() => {
-    if (!project) return;
+    if (!project || busy) return;
     let cancelled = false;
     setSaveState('saving');
     const timer = setTimeout(() => {
+      if (operation.current) return;
       void saveProject(project).then(() => {
-        if (!cancelled) setSaveState('saved');
-      }).catch(() => {
         if (!cancelled) {
-          setSaveState('error');
-          setError('Could not save locally. Browser storage may be full. Export your session log to keep a copy.');
+          setSaveState('saved');
+          setError(e => e?.details.context === 'storage.save' ? null : e);
+          lastFailure.current = '';
         }
+      }).catch(cause => {
+        if (!cancelled) { setSaveState('error'); reportError(cause, 'storage.save'); }
       });
     }, 250);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [project]);
-
-  // Also flush the most recent edit when the browser backgrounds this page.
+  }, [project, busy, reportError]);
   useEffect(() => {
     const flush = () => {
-      if (current.current) void saveProject(current.current).catch(() => {});
+      if (!current.current || operation.current || document.visibilityState !== 'hidden') return;
+      void saveProject(current.current).catch(cause => {
+        setSaveState('error'); reportError(cause, 'storage.save');
+      });
     };
     document.addEventListener('visibilitychange', flush);
     return () => document.removeEventListener('visibilitychange', flush);
-  }, []);
+  }, [reportError]);
+  useEffect(() => () => controller.current?.abort(), []);
 
-  const update = useCallback((fn: (previous: Project) => Project) => {
-    setProject(previous => previous
-      ? { ...fn(previous), updatedAt: new Date().toISOString() }
-      : previous);
-  }, []);
-
-  const appendEvent = useCallback((event: Omit<SessionEvent, 'id' | 'timestamp'>) => {
-    const record = makeEvent(event);
-    update(previous => ({ ...previous, events: [...previous.events, record] }));
-  }, [update]);
-
-  const newSession = async () => {
+  const switchSession = async (id?: string): Promise<boolean> => {
+    if (operation.current) return false;
+    operation.current = true; setBusy(true);
     try {
       if (current.current) await saveProject(current.current);
-      const next = makeProject();
+      const next = id ? await getProject(id) : makeProject();
+      if (!next) throw new AppError('SESSION_MISSING', 'The selected session was not found.', 'Choose another session.');
       await saveProject(next);
-      setActiveId(next.id);
-      setProject(next);
-      setError(null);
-    } catch {
-      setError('Could not create a saved session. Export the current log and check browser storage.');
-    }
+      setActiveId(next.id); current.current = next; setProject(next);
+      setError(null); lastFailure.current = '';
+      return true;
+    } catch (cause) { reportError(cause, 'storage.session'); return false; }
+    finally { operation.current = false; setBusy(false); }
   };
 
-  const openSession = async (id: string) => {
-    try {
-      if (current.current) await saveProject(current.current);
-      const next = await getProject(id);
-      if (!next) throw new Error('Session not found.');
-      setActiveId(next.id);
-      setProject(next);
-      setError(null);
-    } catch {
-      setError('This saved session could not be opened.');
-    }
+  const trackImport=(state:api.BackendState)=>{
+    setProgress(api.stageLabel(state.stage));
+    update(p=>({...p,pendingBackend:state}));
   };
-
-  const importVideo = async (file: File, kind: 'source' | 'rendered') => {
-    if (busy || !current.current) return;
-    setBusy(true);
-    setError(null);
-    const previous = current.current;
-    try {
-      const asset = await inspectVideo(file);
-      if (current.current?.id !== previous.id) return;
-      if (kind === 'rendered') {
-        if (!previous.source) throw new Error('Import your source video first.');
-        if (asset.width !== previous.source.width || asset.height !== previous.source.height
-          || Math.abs(asset.duration - previous.source.duration) > 0.15) {
-          throw new Error('For comparison, import a render with the same dimensions and duration as the source.');
-        }
-      }
-      await saveMedia(asset.id, file);
-      // Keep any text/control changes made while browser metadata was loading.
-      const latest = current.current;
-      if (!latest || latest.id !== previous.id) return;
-      await saveProject(latest);
-      const next = kind === 'source' && latest.source ? makeProject() : latest;
-      const version: Version = {
-        id: crypto.randomUUID(),
-        name: kind === 'source' ? 'Original' : 'Render ' + (next.versions.filter(v => v.kind === 'rendered').length + 1),
-        kind, createdAt: new Date().toISOString(), assetId: asset.id,
-        parentId: kind === 'rendered' ? next.versions.find(v => v.kind === 'source')?.id : undefined,
-        // An externally imported render has no verified recipe.
-        recipe: kind === 'source' ? { ...NEUTRAL_RECIPE } : null,
-      };
-      const result: Project = {
-        ...next, name: next.name === 'Untitled session' ? file.name.replace(/\.[^.]+$/, '') : next.name,
-        updatedAt: new Date().toISOString(),
-        source: kind === 'source' ? asset : next.source,
-        assets: [...next.assets, asset],
-        versions: [...next.versions, version],
-        selectedVersionId: version.id,
-        events: [...next.events, makeEvent({
-          actor: 'user', kind: 'activity',
-          title: kind === 'source' ? 'Source video imported' : 'Rendered version imported',
-          reason: kind === 'source'
-            ? 'Ready for local playback. No footage has been sent to Muse.'
-            : 'Imported an existing output for comparison. Its editing recipe is unknown.',
-          versionId: version.id,
-          details: { file: asset.name, width: asset.width, height: asset.height, duration: Number(asset.duration.toFixed(3)) },
-        })],
-      };
-      await saveProject(result);
-      setActiveId(result.id);
-      setProject(result);
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : 'Could not import the video.';
-      setError(message);
-      if (current.current?.id === previous.id) {
-        appendEvent({ actor: 'app', kind: 'error', title: 'Video import failed', reason: message });
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const saveDirection = (direction: string) => {
-    if (direction.trim() === current.current?.direction) return;
-    const record = makeEvent({
-      actor: 'user', kind: 'activity', title: 'Creative direction saved',
-      reason: direction.trim() || 'Creative direction cleared.',
-    });
-    update(previous => ({
-      ...previous, direction: direction.trim(), events: [...previous.events, record],
-    }));
-  };
-
-  const updateRecipe = (key: keyof Recipe, value: number) => {
-    update(previous => ({ ...previous, recipe: { ...previous.recipe, [key]: value } }));
-  };
-
-  const logControl = (label: string, from: number, to: number) => {
-    if (from === to) return;
-    appendEvent({
-      actor: 'user', kind: 'activity', title: label + ' draft changed',
-      reason: 'Saved as a recipe setting. The displayed video has not been re-rendered.',
-      details: { from, to },
-    });
-  };
-
-  const resetRecipe = () => {
-    const record = makeEvent({
-      actor: 'user', kind: 'activity', title: 'Recipe controls reset',
-      reason: 'All draft controls returned to neutral.',
-    });
-    update(previous => ({ ...previous, recipe: { ...NEUTRAL_RECIPE }, events: [...previous.events, record] }));
-  };
-
-  const saveDraft = () => {
-    if (!current.current?.source) return false;
-    const previous = current.current;
-    const lastDraft = previous.versions.filter(v => v.kind === 'draft').at(-1);
-    if (lastDraft && JSON.stringify(lastDraft.recipe) === JSON.stringify(previous.recipe)) {
-      setError('These settings are already saved in ' + lastDraft.name + '. Change a control to create another draft.');
-      return false;
-    }
-    const version: Version = {
-      id: crypto.randomUUID(), name: 'Draft ' + (previous.versions.filter(v => v.kind === 'draft').length + 1),
-      kind: 'draft', createdAt: new Date().toISOString(),
-      parentId: previous.selectedVersionId ?? undefined, recipe: { ...previous.recipe },
+  const finishSource=async(state:api.BackendState,attach:boolean,signal:AbortSignal)=>{
+    if(!state.source||!state.preview)throw api.backendError(state);
+    setProgress('Loading prepared preview');
+    const blob=await api.previewBlob(state,signal);
+    const inspected=await inspectVideo(new File([blob],state.filename+'.webm',{type:'video/webm'}),{signal});
+    if(signal.aborted)throw new AppError('MEDIA_ABORTED','Import cancelled.','The source remains on the backend.');
+    const latest=current.current;
+    if(!latest)return;
+    setCanCancel(false);
+    const next=attach||!latest.source?latest:makeProject();
+    const asset={...inspected,name:state.source.name,size:state.source.bytes,width:state.source.width,
+      height:state.source.height,duration:state.source.duration,type:'video/webm'};
+    const version:Version={
+      id:crypto.randomUUID(),name:'Original',kind:'source',createdAt:new Date().toISOString(),
+      assetId:asset.id,recipe:{...NEUTRAL_RECIPE},
     };
-    const record = makeEvent({
-      actor: 'user', kind: 'activity', title: version.name + ' saved',
-      reason: 'Stored the full recipe. A rendered preview is still needed.',
-      versionId: version.id, details: { ...version.recipe },
-    });
-    update(p => ({
-      ...p, versions: [...p.versions, version], selectedVersionId: version.id,
-      events: [...p.events, record],
-    }));
-    setError(null);
-    return true;
+    const versions=attach?next.versions.map(v=>v.kind==='source'?{...v,assetId:asset.id}:v):[version];
+    const result:Project={
+      ...next,name:next.name==='Untitled session'?state.source.name.replace(/\.[^.]+$/,''):next.name,
+      updatedAt:new Date().toISOString(),source:asset,
+      assets:attach?[...next.assets,asset]:[asset],versions,
+      selectedVersionId:attach?(versions.find(v=>v.kind==='source')?.id??version.id):version.id,
+      backend:state,pendingBackend:undefined,pendingAttach:undefined,
+      events:[...next.events,...state.events.filter(e=>!next.events.some(old=>old.id===e.id))]
+        .sort((a,b)=>Date.parse(a.timestamp)-Date.parse(b.timestamp)),
+    };
+    if(attach&&!versions.some(v=>v.kind==='source'))result.versions.push(version);
+    const previous={...latest,pendingBackend:undefined,pendingAttach:undefined};
+    await saveImport(result,asset.id,blob,previous);
+    setActiveId(result.id);current.current=result;setProject(result);setSaveState('saved');setError(null);
   };
-
-  const selectVersion = (version: Version) => {
-    update(previous => ({
-      ...previous, selectedVersionId: version.id,
-      recipe: version.recipe ? { ...version.recipe } : previous.recipe,
-    }));
+  const resumeImport=async(pending:api.BackendState,attach:boolean,retry=false)=>{
+    if(operation.current)return;
+    operation.current=true;setBusy(true);setCanCancel(true);setError(null);
+    const aborter=new AbortController();controller.current=aborter;remoteImport.current=pending.id;
+    try{
+      let state=await api.getState(pending.id,aborter.signal);
+      if(retry&&(state.status==='failed'||state.status==='cancelled')){
+        state=await api.command(state.id,'retry',{revision:state.revision});
+      }
+      const ready=await api.waitForSource(state,trackImport,aborter.signal);
+      await finishSource(ready,attach,aborter.signal);
+    }catch(cause){
+      if(cause instanceof AppError&&cause.code==='MEDIA_ABORTED'){
+        update(p=>({...p,pendingBackend:p.pendingBackend?{...p.pendingBackend,status:'cancelled'}:undefined}));
+        appendEvent({actor:'user',kind:'activity',title:'Import cancelled'});
+      }else reportError(cause,'backend.import');
+    }finally{controller.current=null;remoteImport.current=null;operation.current=false;setCanCancel(false);setBusy(false);setProgress(null);}
   };
+  useEffect(()=>{
+    const pending=project?.pendingBackend;
+    if(!pending||operation.current||resumed.current===pending.id||!api.activeJob(pending))return;
+    resumed.current=pending.id;
+    void resumeImport(pending,project?.pendingAttach??false);
+  },[project?.pendingBackend?.id,project?.id]);
 
+  const importVideo = async (file: File, kind: 'source'|'rendered', attach=false) => {
+    if(operation.current||!current.current)return;
+    operation.current=true;setBusy(true);setCanCancel(true);setError(null);
+    const aborter=new AbortController();controller.current=aborter;
+    try {
+      if(kind==='source'){
+        if(!file.size)throw new AppError('MEDIA_EMPTY','The selected file is empty.','Choose a video containing data.');
+        setProgress('Uploading source to the local backend');
+        const state=await api.upload(file,aborter.signal);
+        remoteImport.current=state.id;resumed.current=state.id;
+        const latest=current.current;
+        if(!latest)return;
+        const saved={...latest,pendingBackend:state,pendingAttach:attach};
+        await saveProject(saved);current.current=saved;setProject(saved);
+        const ready=await api.waitForSource(state,trackImport,aborter.signal);
+        await finishSource(ready,attach,aborter.signal);
+      }else{
+        setProgress('Inspecting imported render');
+        const asset=await inspectVideo(file,{signal:aborter.signal});
+        const latest=current.current;
+        if(!latest?.source)throw new AppError('SOURCE_REQUIRED','Import a source first.','Choose the original video.');
+        if(asset.width!==latest.source.width||asset.height!==latest.source.height||Math.abs(asset.duration-latest.source.duration)>.15){
+          throw new AppError('RENDER_MISMATCH','This render does not match the source.',
+            'Use matching dimensions and duration.',{sourceWidth:latest.source.width,sourceHeight:latest.source.height,
+              renderWidth:asset.width,renderHeight:asset.height,sourceDuration:latest.source.duration,renderDuration:asset.duration});
+        }
+        const version:Version={id:crypto.randomUUID(),name:'Render '+(latest.versions.filter(v=>v.kind==='rendered').length+1),
+          kind:'rendered',createdAt:new Date().toISOString(),assetId:asset.id,recipe:null,
+          parentId:latest.versions.find(v=>v.kind==='source')?.id};
+        const next={...latest,assets:[...latest.assets,asset],versions:[...latest.versions,version],selectedVersionId:version.id,
+          events:[...latest.events,makeEvent({actor:'user',kind:'activity',title:'Render imported',
+            reason:'Imported output. Recipe provenance is unknown.',details:{file:asset.name}})]};
+        setCanCancel(false);await saveImport(next,asset.id,file);
+        current.current=next;setProject(next);setSaveState('saved');
+      }
+    }catch(cause){
+      if(cause instanceof AppError&&cause.code==='MEDIA_ABORTED'){
+        update(p=>({...p,pendingBackend:p.pendingBackend?{...p.pendingBackend,status:'cancelled'}:undefined}));
+        appendEvent({actor:'user',kind:'activity',title:'Import cancelled',details:{file:file.name}});
+      }else reportError(cause,'media.import',{file:file.name,bytes:file.size,mime:file.type||'unknown'});
+    }finally{controller.current=null;remoteImport.current=null;operation.current=false;setCanCancel(false);setBusy(false);setProgress(null);}
+  };
+  const prepareExisting=async()=>{
+    const source=current.current?.source;
+    if(!source||current.current?.backend||operation.current)return;
+    try{
+      const blob=await getMedia(source.id);
+      if(!blob)throw new AppError('MEDIA_MISSING','The saved original is missing.','Import the original video again.');
+      await importVideo(new File([blob],source.name,{type:blob.type||source.type}),'source',true);
+    }catch(cause){reportError(cause,'backend.prepare');}
+  };
+  const saveDirection = (direction: string) => {
+    if (operation.current || direction.trim() === current.current?.direction) return;
+    const record = makeEvent({ actor:'user', kind:'activity', title:'Direction saved', reason:direction.trim() || 'Direction cleared.' });
+    update(p => ({ ...p, direction:direction.trim(), events:[...p.events,record] }));
+  };
+  const retrySave = async () => {
+    if (!current.current || operation.current) return;
+    setSaveState('saving');
+    try { await saveProject(current.current); setSaveState('saved'); setError(null); lastFailure.current = ''; }
+    catch (cause) { setSaveState('error'); reportError(cause, 'storage.save'); }
+  };
   return {
-    project, saveState, busy, error, setError, update, appendEvent, newSession, openSession,
-    importVideo, saveDirection, updateRecipe, logControl, resetRecipe, saveDraft, selectVersion,
+    project, busy, canCancel, progress, saveState, error, clearError:()=>setError(null), reportError,
+    update, appendEvent, importVideo, saveDirection, retrySave,
+    prepareExisting,
+    retryImport:()=>{const p=current.current;if(p?.pendingBackend)void resumeImport(p.pendingBackend,p.pendingAttach??false,true);},
+    cancelImport:()=>{
+      controller.current?.abort();
+      if(remoteImport.current)void api.cancel(remoteImport.current).catch(cause=>reportError(cause,'backend.cancel'));
+    },
+    newSession:()=>switchSession(), openSession:(id:string)=>switchSession(id),
+    retryRestore:()=>setRestoreAttempt(n=>n+1),
+    selectVersion:(version:Version)=>update(p=>({...p,selectedVersionId:version.id})),
   };
 }
 
 export function useAssetUrl(assetId?: string) {
-  const [result, setResult] = useState<{ id: string; url: string } | null>(null);
-  const [missing, setMissing] = useState(false);
+  const [result,setResult] = useState<{id:string;url:string}|null>(null);
+  const [error,setError] = useState<AppError|null>(null);
   useEffect(() => {
     let cancelled = false;
     let url: string | undefined;
-    setMissing(false);
+    setError(null);
     if (!assetId) { setResult(null); return; }
     void getMedia(assetId).then(blob => {
       if (cancelled) return;
-      if (!blob) { setMissing(true); return; }
-      url = URL.createObjectURL(blob);
-      setResult({ id: assetId, url });
-    }).catch(() => { if (!cancelled) setMissing(true); });
-    return () => { cancelled = true; if (url) URL.revokeObjectURL(url); };
-  }, [assetId]);
-  return { url: result && result.id === assetId ? result.url : undefined, missing };
+      if (!blob) throw new AppError('MEDIA_MISSING', 'The saved video file is missing.',
+        'Import the source again. The session log and metadata are still available.', {assetId});
+      url = URL.createObjectURL(blob); setResult({id:assetId,url});
+    }).catch(cause => { if (!cancelled) setError(asAppError(cause,'storage.media',{assetId})); });
+    return () => { cancelled = true; if(url) URL.revokeObjectURL(url); };
+  },[assetId]);
+  return {url:result?.id === assetId ? result?.url : undefined,error};
 }

@@ -4,6 +4,8 @@
       "additionalProperties": false,
       "properties": {
         "question_id": {
+          "maxLength": 160,
+          "minLength": 1,
           "title": "Question Id",
           "type": "string"
         },
@@ -19,6 +21,7 @@
         },
         "response": {
           "default": "",
+          "maxLength": 4000,
           "title": "Response",
           "type": "string"
         }

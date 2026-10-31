@@ -1,82 +1,54 @@
-# Take One editor
+# Take One frontend
 
-A React + TypeScript + Vite workspace for reviewing video, preparing grading recipes, and keeping a readable session log. It uses the dependencies already installed in this project.
+React + TypeScript + Vite. The screen contains video playback, creative direction/rubric interaction, version selection and a session log.
 
 ## Run
 
-From the project root:
+Start the backend from the project root:
 
-```bash
-cd frontend
-npm run dev
-```
+    .venv/bin/python -m uvicorn takeone.app:app --host 127.0.0.1 --port 8000
 
-Open **http://127.0.0.1:5173/**. Keep the terminal running; Ctrl+C stops the server. On a fresh checkout, run `npm ci` inside `frontend/` before starting. Use Node.js 20.x (20.19.0 or newer), or 22.12.0 or newer; Node.js 24 is installed in the original development environment.
+Then run in this directory:
 
-For a production build, run `npm run build` in this directory, then `npm run preview`. Preview serves the build at **http://127.0.0.1:4173/**.
+    npm run dev
 
-## Test
+Open http://127.0.0.1:5173/. On a fresh checkout, run npm ci first. Dev and preview proxy /api to port 8000; TAKEONE_API_TARGET can override the target for isolated tests.
 
-Follow the [manual testing checklist](../README.md#test-the-ui-manually) in the project README. It also includes optional FFmpeg commands to create a source/output pair for comparison.
+Other commands:
 
-Start with a local H.264 MP4 or WebM, save a creative direction and recipe draft, inspect the corresponding log entries, refresh after “Saved locally,” then export the log. Draft controls currently save values without changing the displayed pixels.
+    npm test
+    npm run build
+    npm run preview
 
-`npm run build` runs TypeScript checking and bundling. No frontend automated test runner is configured yet.
+See the [project README](../README.md) for configuration, tests and limits.
 
-## Available now
+## Connected behavior
 
-- Import a local video by choosing a file or dropping it on the viewer.
-- Play, pause, seek, mute, loop, change playback speed, and use fullscreen.
-- Save a creative direction and exposure, contrast, saturation, and RGB gain recipe drafts.
-- Select original footage, saved recipe drafts, and imported rendered versions.
-- Import an existing render with the source's dimensions and duration, then compare it with a synchronized before/after wipe.
-- Follow timestamped activity, filter decisions or issues, search the log, and inspect event details.
-- Save and reopen multiple sessions in the same browser, including their source media and imported renders.
-- Download the selected imported video or export a JSON session record containing direction, recipes, version relationships, media metadata, and events.
+Source uploads reach the local backend before browser decoding. The prepared VP9 preview is cached in IndexedDB. The original is retained unchanged on the backend. Pending preparation can resume; imported rendered files use local browser storage.
 
-The UI is responsive and supports keyboard playback controls. The shortcuts dialog is available in the desktop rail.
+Start analysis submits the request to the actual API. The panel presents one validated question at a time, supports options/free text/skip/delegation, and displays a downloadable brief. It discloses when content is sent to Meta. Upload or typing alone makes no model call.
 
-## Connection boundary
+Polling merges authoritative state/events into the browser session. Stable IDs prevent duplicate log rows. Refresh restores the pending question or brief. Backend errors preserve their code, recovery action and technical details.
 
-Muse, SAM, FFmpeg rendering, and the backend API are **not connected** to this frontend yet. No model requests or media uploads are made.
+Health and job status come from the backend. No simulated questions, progress or usage are included in normal startup. Automatic colorist generation, SAM and final rendering remain unavailable.
 
-Controls edit a **recipe draft**. They do not change the displayed pixels. A selected draft is explicitly labeled as showing source footage. Imported renders are labeled as imported outputs and have no claimed recipe provenance. Compatibility checks use browser media metadata, not FFprobe or technical color analysis.
+Legacy browser-only sessions can use Prepare source. Existing saved recipe drafts remain readable.
 
-The session panel is ready to display Muse decisions, including a short explanation from the normal edit response. It does not request or display hidden thinking. Its initial activity is real local application activity; no Muse decisions, model usage, render progress, or costs are fabricated.
+## Main files
 
-## Local storage and exports
+- api.ts: requests, errors, response validation, upload and polling.
+- useConsultation.ts: health, model commands, reconnect and log deduplication.
+- useWorkspace.ts: uploads, source preparation and local persistence.
+- media.ts: bounded first-frame/thumbnail inspection.
+- errors.ts: stable codes, messages, recovery actions and diagnostics.
+- storage.ts: IndexedDB transactions and state validation.
+- RubricPanel.tsx: prompt, question/answer controls and brief.
+- ErrorBoundary.tsx: recovery screen for rendering exceptions.
 
-`src/lib/storage.ts` uses IndexedDB to keep project records and video blobs in separate object stores. Autosave writes project metadata after changes. The active session ID is kept in localStorage. Replacing source footage starts another session and keeps the previous one.
+IndexedDB remains at schema version 1; backend state is optional, preserving legacy sessions. Export excludes thumbnails, video blobs and backend-private credentials.
 
-Storage belongs to the exact browser origin. Development at port 5173 and preview at port 4173 have different sessions; so do localhost and 127.0.0.1. Clearing site data removes locally stored media and sessions.
+## Verification boundary
 
-Exported JSON includes no video blobs, thumbnails, credentials, or object URLs. The log records are portable; restoring a workspace from exported JSON is not implemented. Sessions are reopened from this browser's storage.
+Automated frontend tests use Node's test library and the installed Vite compiler. Browser integration should exercise upload → Start → question → answer → brief.
 
-## Backend integration points
-
-- src/lib/types.ts: Project, Version, Recipe, and SessionEvent.
-- src/lib/useWorkspace.ts: project updates, version selection, and appendEvent.
-- src/components/SessionPanel.tsx: activities, decisions, brief reasons, details, search, and filtering.
-- src/components/Viewer.tsx: actual media playback and before/after comparison.
-
-A future backend adapter should attach actual rendered media and validated events to the current project. The recipe contract still needs the renderer's explicit color domain, operation order, parameter semantics, and source/version provenance.
-
-Example **event contract**, not a generated result:
-
-    {
-      "id": "event-unique-id",
-      "timestamp": "2026-10-31T16:00:00.000Z",
-      "actor": "muse",
-      "kind": "decision",
-      "title": "Reduce background saturation",
-      "reason": "Keep the motorcycle visually prominent while preserving its paint.",
-      "versionId": "candidate-unique-id",
-      "details": {
-        "operation": "saturation",
-        "region": "background",
-        "from": 1,
-        "to": 0.85
-      }
-    }
-
-Use the existing response's operation rationale as reason. The log itself needs no additional model call. Emit a completed action only after the backend confirms it succeeded; report failures as error events.
+tests.offline_app:app is a separate fixture-backed test server. Normal startup always uses the real Muse provider. Offline checks verify wiring and state behavior, not live model quality.

@@ -1,6 +1,6 @@
 import pytest
 
-from rubric import (
+from takeone_rubric_v1.rubric import (
     Answer, Candidate, CapabilityManifest, Dimension, Level,
     Observation, Option, Proposal, RubricInput, RubricSession,
 )
@@ -90,3 +90,18 @@ def test_rank_preservation_first_and_reject_duplicate_outcomes():
     selected = s.next_question(Proposal(candidates=[unsafe_dup, high_impact, preservation]))
     assert selected.id == "preservation"
     assert any(x["candidate_id"] == "bad" for x in s.rejected)
+
+
+def test_snapshot_and_literal_constraint_validation():
+    s = session()
+    s.next_question(Proposal(
+        candidates=[question()],
+        explicit_constraints=["keep the motorcycle recognizable", "Invented permission"],
+    ))
+    restored = RubricSession.restore(s.snapshot())
+    assert restored.pending.id == "q1"
+    assert "keep the motorcycle recognizable" in restored.inputs.explicit_constraints
+    assert "Invented permission" not in restored.inputs.explicit_constraints
+    restored.record_answer(Answer(question_id="q1", response_type="option", response="readable"))
+    again = RubricSession.restore(restored.snapshot())
+    assert again.brief().answers[0].question_id == "q1"

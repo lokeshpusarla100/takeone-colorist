@@ -151,6 +151,13 @@
       "title": "Candidates",
       "type": "array"
     },
+    "explicit_constraints": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Explicit Constraints",
+      "type": "array"
+    },
     "observation_gap": {
       "default": "",
       "title": "Observation Gap",

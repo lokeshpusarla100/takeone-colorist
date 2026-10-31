@@ -10,9 +10,13 @@ Implementation of only the **creative-intent question rubric**, not the video ed
 
 ## Local tests
 
+The local application integrates this module through takeone/service.py and takeone/provider.py.
+RubricSession.snapshot()/restore() persist pending questions, answers, directives and the budget.
+Proposal.explicit_constraints accepts literal user-request quotes; invented constraints are rejected.
+
 ```bash
-pip install pydantic pytest openai
-python -m pytest -q
+# From the repository root:
+.venv/bin/python -m pytest -q takeone_rubric_v1
 ```
 
 ## Integration boundary

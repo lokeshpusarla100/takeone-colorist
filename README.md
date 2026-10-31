@@ -1,100 +1,113 @@
 # Take One
 
-A video color grading workspace with a session log for editing activity, decisions, and short explanations.
+Local video preparation, a React editor, and a Muse-powered creative-direction consultation.
 
-The React editor UI is implemented. **Muse, SAM, the rendering pipeline, and the backend API are not connected to it yet.** You can test the UI without an API key, Python server, or model calls.
+    Upload original → prepare preview → enter request → Start analysis
+    → answer useful questions → save/download the creative brief
 
-## Run the editor
+Automatic colorist execution and SAM masking are not connected yet. A bounded global SDR tool exists on the backend, but this UI currently stops at the creative brief.
+
+## Configure
+
+Reuse the existing Python environment and frontend dependencies. For a fresh checkout:
+
+    python3.12 -m venv .venv
+    .venv/bin/python -m pip install -r requirements-lock.txt
+    npm --prefix frontend ci
+
+FFmpeg and FFprobe must be on PATH. Use Node.js 20.x (20.19.0 or newer), or 22.12.0 or newer.
+
+Edit the private root .env file:
+
+    MODEL_API_KEY=your_meta_api_key
+
+Do not put the key in frontend code or commit .env. See [.env.example](.env.example) for other settings. If the backend started without a key, adding one to .env is detected automatically. Restart for changes to an already loaded key or other settings. Source preparation and offline tests do not require a key; Muse calls require one and may incur usage.
+
+## Run
+
+Terminal 1, from the project root:
+
+    .venv/bin/python -m uvicorn takeone.app:app --host 127.0.0.1 --port 8000
+
+Terminal 2:
+
+    cd frontend
+    npm run dev
+
+Open http://127.0.0.1:5173/. API documentation: http://127.0.0.1:8000/docs.
+
+Use one backend process per workspace, without multiple Uvicorn workers. The backend takes an exclusive workspace lock and runs one media/model worker with a bounded queue. Bind to localhost; multi-user authentication is not implemented.
+
+For a frontend build preview, run npm run build and npm run preview inside frontend, while keeping the backend running. Open http://127.0.0.1:4173/.
+
+## Flow
+
+1. **Import video.** The unchanged original goes to the local backend. FFprobe records metadata/checksum; FFmpeg creates a VP9 display preview and a smaller silent MP4 for analysis.
+2. **Enter creative direction.** Describe the changes and preservation requirements. Leave blank to delegate a conservative direction.
+3. **Start analysis.** This sends the silent analysis video and request to Meta. Uploading or typing alone does not call Muse.
+4. **Clarify if needed.** The existing rubric validates evidence and available operations, then selects one question. Answer using an option, free text, Skip or You decide.
+5. **Review the brief.** The original request, approved outcomes, preservation constraints and unresolved limitations are saved. Download the brief or full session log.
+
+Default question budget: three, with a hard maximum of five. A clear request can receive zero questions. The five rubric dimensions are internal coverage categories.
+
+Existing browser-only sessions remain compatible. Use **Prepare source** to upload their saved original and connect to the backend.
+
+## Recovery and persistence
+
+- Backend files live under workspace/<project-id>/: original, metadata, previews, cached scene analysis, consultation state, brief and timestamped events.
+- Atomic state writes preserve pending questions and accepted answers. Refresh resumes the consultation.
+- Follow-up questions reuse cached observations rather than resending the video.
+- Command IDs and expected revisions protect against duplicate or stale answers.
+- Answers are saved before follow-up model calls. A failed request can be retried without resubmitting the answer.
+- Interrupted jobs are marked failed after backend restart. Billable requests are not automatically retried.
+- Cancellation stops local media processing. An in-flight remote request may finish and incur usage; completed analysis can be cached for resumption.
+- The frontend caches prepared previews in IndexedDB. It polls persisted backend state and deduplicates log events by ID.
+- Exported JSON includes consultation/version metadata, events and diagnostics, without video blobs, thumbnails or credentials.
+
+Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and ports 5173 and 4173, have separate storage. Backend files survive browser site-data clearing, but a backend-project browser is not implemented.
+
+## Limits
+
+- Default: 256 MiB per upload, 120 seconds, up to 4K.
+- HDR conversion and non-square-pixel sources are rejected explicitly until verified.
+- Source color interpretation remains known/unknown. Global grading capabilities are restricted to supported source metadata.
+- Browser previews are compressed 8-bit working views. Original precision is retained in the upload.
+- Scene understanding uses the complete silent proxy; it is not a calibrated color measurement.
+- The base global tool supports SDR display-domain contrast, saturation and gamma. Local grading, relighting, reconstruction and shot matching are unavailable.
+- Imported renders can be compared when dimensions and duration match; imported outputs have no verified recipe provenance.
+- Final rendering and autonomous review are not connected to the brief yet.
+
+## Check
 
 From the project root:
 
-```bash
-cd frontend
-npm run dev
-```
+    .venv/bin/python -m pytest -q tests takeone_rubric_v1
+    npm --prefix frontend test
+    npm --prefix frontend run build
 
-Open **http://127.0.0.1:5173/** in your browser. Keep the terminal running; press **Ctrl+C** to stop the server.
+Backend tests inject a fixture provider and exercise real upload, FFprobe/FFmpeg, question selection, answer forms, persistence, idempotency, retry, cancellation, limits and a global-tool pixel effect. They do not call Meta.
 
-On a fresh checkout, install the locked frontend dependencies first:
+Frontend tests cover media diagnostics, cancellation, resource cleanup, storage validation and API contracts. Live Muse connectivity and question quality need a separate run with the configured key.
 
-```bash
-cd frontend
-npm ci
-npm run dev
-```
-
-The installed Vite package requires Node.js 20.x (20.19.0 or newer), or Node.js 22.12.0 or newer. Node.js 24 is available in the original development environment; with nvm, you can select it using `nvm use 24`. Existing installations with `frontend/node_modules` can start directly with `npm run dev`.
-
-## Test the UI manually
-
-Use a short browser-compatible H.264 MP4 or WebM. MOV playback depends on the codecs inside the file.
-
-| Action | Expected behavior |
-| --- | --- |
-| Open the editor | The empty viewer appears, controls are disabled, and the session log contains “Workspace created.” |
-| Click **Import video** or drop a video on the viewer | The video opens, its dimensions and duration appear, an Original version is added, and the import is logged. |
-| Play, pause, seek, mute, change speed, loop, or enter fullscreen | The local video responds. On narrow screens, some transport controls are hidden. |
-| Open **Direction**, enter an instruction, and click **Save direction** | The direction is saved and appears in the session log. It is not sent to Muse yet. |
-| Change exposure, contrast, saturation, or RGB balance | Recipe values change and the committed adjustment is logged. **The video pixels stay unchanged until a renderer is connected.** |
-| Click **Save recipe draft** | A new draft appears in Version history. Selecting it shows the original footage with an explicit unrendered draft label. |
-| Refresh after **Saved locally** appears | The footage, direction, recipe drafts, versions, and log return in the same browser. |
-| Open **Sessions**, then **New session**, and reopen the previous session | Each session retains its own footage and activity. Sessions is in the desktop rail and the mobile footer. |
-| Search the log or select **Issues** / **Decisions** | The corresponding activity is shown. Decisions remains empty until real Muse decision events are connected. |
-| Click **Export log** | A JSON file downloads with direction, recipes, version relationships, media metadata, and events. It excludes video data and thumbnails. |
-
-Playback shortcuts: **Space** plays/pauses, **← / →** seeks one second, **M** toggles mute, and **F** toggles fullscreen. Shortcuts do not interrupt typing in form fields.
-
-### Compare a rendered video
-
-Import the source first, then click **Import render** beside Version history. Choose an existing output with the same dimensions and duration as the source; the UI allows up to 0.15 seconds of duration difference.
-
-Select the imported render and click the comparison icon beside the Original/Render buttons. Drag the wipe to compare the source and render at the same timestamp. **Download video** downloads that imported output.
-
-Imported renders have no verified recipe provenance. This UI does not generate a new graded video yet.
-
-### Optional test clips
-
-If FFmpeg is installed, these commands create a three-second synthetic source and a desaturated output. Run them from the project root. These are UI test fixtures, not Muse-generated results.
-
-```bash
-mkdir -p outputs/ui-test
-ffmpeg -f lavfi -i testsrc2=size=640x360:rate=24 -t 3 -c:v libx264 -pix_fmt yuv420p outputs/ui-test/source.mp4
-ffmpeg -i outputs/ui-test/source.mp4 -vf eq=saturation=0.4 -c:v libx264 -pix_fmt yuv420p outputs/ui-test/render.mp4
-```
-
-Import `outputs/ui-test/source.mp4` as the source and `outputs/ui-test/render.mp4` using **Import render**. FFmpeg asks before overwriting existing test files.
-
-## Check a production build
-
-From the project root:
-
-```bash
-cd frontend
-npm run build
-npm run preview
-```
-
-The build command runs TypeScript checking and creates `frontend/dist/`. Preview serves the build at **http://127.0.0.1:4173/**. The frontend currently has no committed automated test runner; use the manual checklist above for behavior checks.
-
-## Sessions and local files
-
-Sessions and media are saved in IndexedDB; localStorage identifies the active session. Use the same browser, host, and port to reopen them: `localhost`, `127.0.0.1`, the development port, and the preview port each have separate browser storage. Clearing site data removes the locally saved sessions and footage.
-
-Exported logs provide a portable activity record. Importing exported JSON to restore a project is not implemented yet.
-
-The root `.gitignore` excludes credentials, virtual environments, dependency folders, builds, caches, logs, and generated media directories. Put working footage, frames, masks, renders, and exported sessions under `workspace/` or `outputs/`. Lockfiles, schemas, source code, and documentation remain eligible for version control.
-
-## Project files
-
-- [Project plan](Take_One_Hackathon_Project_Plan.md): architecture, scope, and milestones.
-- [Frontend README](frontend/README.md): UI implementation details and future backend integration points.
-- [Creative-direction rubric](takeone_rubric_v1/README.md): standalone question/brief module; currently separate from the editor.
-- `requirements-lock.txt`: existing pinned Python environment dependencies.
+The test-only browser server is tests.offline_app:app. It returns explicitly labeled synthetic observations and is separate from normal startup. Passing offline tests does not establish live Muse quality.
 
 ## Troubleshooting
 
-- **Port 5173 is already in use:** open the existing editor first. To run another instance, use `npm run dev -- --port 5174` from `frontend/`; it will have separate session storage.
-- **Video will not open:** try an H.264 MP4 or WebM. Browser playback compatibility is checked during import.
-- **Controls do not change the picture:** expected at this stage. They save recipe drafts; backend rendering is still pending.
-- **Decisions is empty:** expected until Muse is connected. Imports, saved direction, control changes, and errors appear under All activity.
-- **A session does not reappear:** check that you are using the same browser and exact URL, and that browser storage is available.
+- **Backend unavailable:** start the Python server on port 8000. Vite proxies /api there.
+- **Meta key missing:** add it to root .env, then refresh the editor. Health reports only whether a key is configured.
+- **Model step failed:** inspect its code/action in the notice and log. Use Retry failed step; saved evidence and answers are retained.
+- **Source preparation failed:** inspect the media-tool diagnostic. Use Resume source preparation or import another source.
+- **Old session decoder failure:** use Prepare source to obtain a backend VP9 preview.
+- **Save failed:** keep the page open, export the log, then retry saving.
+- **Port 5173 occupied:** open the existing editor, or run npm run dev -- --port 5174 inside frontend. Each origin has separate sessions.
+- **Workspace in use:** stop the other backend or configure another TAKEONE_WORKSPACE.
+
+## Repository
+
+- [Frontend notes](frontend/README.md)
+- [Original project plan](Take_One_Hackathon_Project_Plan.md)
+- [Creative-direction rubric](takeone_rubric_v1/README.md)
+- takeone/: FastAPI application, media tools, Muse integration, jobs and persistence
+- requirements-lock.txt: existing pinned Python dependencies
+
+Credentials, working media, workspace state, dependencies, builds and caches are ignored by Git. Keep media and exports under workspace/ or outputs/. Source, schemas, documentation and lockfiles remain eligible for version control.

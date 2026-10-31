@@ -8,7 +8,10 @@ import os
 
 from openai import OpenAI
 
-from rubric import Proposal, RubricSession
+if __package__:
+    from .rubric import Proposal, RubricSession
+else:
+    from rubric import Proposal, RubricSession
 
 SYSTEM_INSTRUCTION = """You are Take One's cinematic Creative Director preparing an edit consultation.
 The input includes source observations, explicit user intent, available editing operations,
@@ -23,10 +26,12 @@ Give clear, neutral options and include only materially different intended outco
 Do not write editing parameters, claims of verified artistic quality, or instructions to
 alter factual identity. It is fine to return zero candidates. Do not repeat questions.
 A system controller will decide which ONE question to ask. Output only the requested schema.
+Extract explicit preservation constraints as exact quotes from user_request in explicit_constraints.
+Never invent or paraphrase those quotes. Normally ask 0-3 questions. A clear request needs none.
 """
 
 
-def propose(session: RubricSession, model: str = "muse-spark-1.3") -> Proposal:
+def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=None) -> Proposal:
     if session.pending is not None:
         raise RuntimeError("Finish current user question first")
     context = {
@@ -39,10 +44,11 @@ def propose(session: RubricSession, model: str = "muse-spark-1.3") -> Proposal:
         "resolved_preference_keys": sorted(session.resolved_keys),
         "rubric_budget_remaining": session.max_decisions - session.asked_count,
     }
-    api_key = os.getenv("MODEL_API_KEY")
-    if not api_key:
-        raise RuntimeError("MODEL_API_KEY not configured")
-    client = OpenAI(base_url="https://api.meta.ai/v1", api_key=api_key)
+    if client is None:
+        api_key = os.getenv("MODEL_API_KEY")
+        if not api_key:
+            raise RuntimeError("MODEL_API_KEY not configured")
+        client = OpenAI(base_url="https://api.meta.ai/v1", api_key=api_key, max_retries=0, timeout=90)
     completion = client.beta.chat.completions.parse(
         model=model,
         messages=[
@@ -50,6 +56,7 @@ def propose(session: RubricSession, model: str = "muse-spark-1.3") -> Proposal:
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ],
         response_format=Proposal,
+        max_completion_tokens=2400,
     )
     result = completion.choices[0].message.parsed
     if result is None:

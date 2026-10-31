@@ -20,6 +20,7 @@ export type MediaAsset = {
   width: number;
   height: number;
   thumbnail: string;
+  thumbnailError?: string;
 };
 
 export type Version = {
@@ -56,6 +57,9 @@ export type Project = {
   versions: Version[];
   selectedVersionId: string | null;
   events: SessionEvent[];
+  backend?: BackendState;
+  pendingBackend?: BackendState;
+  pendingAttach?: boolean;
 };
 
 export function makeEvent(event: Omit<SessionEvent, 'id' | 'timestamp'>): SessionEvent {
@@ -70,7 +74,7 @@ export function makeProject(): Project {
     source: null, assets: [], versions: [], selectedVersionId: null,
     events: [makeEvent({
       actor: 'app', kind: 'activity', title: 'Workspace created',
-      reason: 'Add your footage and creative direction. Activity will be saved with this session.',
+      reason: 'Session activity is saved locally.',
     })],
   };
 }
@@ -95,3 +99,4 @@ export function downloadBlob(blob: Blob, filename: string): void {
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+import type { BackendState } from './api';

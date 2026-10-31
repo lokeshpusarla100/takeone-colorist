@@ -78,14 +78,15 @@ class Candidate(StrictModel):
 
 class Proposal(StrictModel):
     candidates: list[Candidate] = Field(default_factory=list)
+    explicit_constraints: list[str] = Field(default_factory=list)
     observation_gap: str = ""  # Requires more inspection, not a user question.
     knowledge_gap: str = ""  # May justify skill/retrieval, not a user question.
 
 
 class Answer(StrictModel):
-    question_id: str
+    question_id: str = Field(min_length=1, max_length=160)
     response_type: Literal["option", "free_text", "skip", "delegate"]
-    response: str = ""
+    response: str = Field(default="", max_length=4000)
 
 
 class Directive(StrictModel):
@@ -146,6 +147,8 @@ class RubricSession:
             return "not a preference uncertainty"
         if c.target_key in self.resolved_keys:
             return "preference already resolved"
+        if c.id in {a.question_id for a in self.answers}:
+            return "question ID already used"
         if c.interaction == "preview" and not self.inputs.capabilities.supports_look_previews:
             return "preview operation is not available"
         if not c.decision_fork.strip():
@@ -173,6 +176,12 @@ class RubricSession:
         """Choose at most one *consequential* question per cycle; never batch ask."""
         if self.pending is not None:
             raise RuntimeError("answer/skip the pending question before proposing another")
+        for quote in proposal.explicit_constraints:
+            if quote.strip() and quote in self.inputs.user_request:
+                if quote not in self.inputs.explicit_constraints:
+                    self.inputs.explicit_constraints.append(quote)
+            else:
+                self.rejected.append({"candidate_id": "constraint", "reason": "constraint is not a literal user quote"})
         if self.asked_count >= self.max_decisions:
             self.events.append({"event": "stop", "reason": "question budget exhausted"})
             return None
@@ -252,3 +261,31 @@ class RubricSession:
             delegated_or_skipped=[a.question_id for a in self.answers if a.response_type in ("skip", "delegate")],
             unresolved=unresolved,
         )
+
+    def snapshot(self) -> dict:
+        return RubricSnapshot(
+            inputs=self.inputs, max_decisions=self.max_decisions, answers=self.answers,
+            directives=self.directives, resolved_keys=sorted(self.resolved_keys),
+            pending=self.pending, asked_count=self.asked_count, events=self.events, rejected=self.rejected,
+        ).model_dump(mode="json")
+
+    @classmethod
+    def restore(cls, value: dict):
+        state = RubricSnapshot.model_validate(value)
+        session = cls(state.inputs, state.max_decisions)
+        for name in ("answers", "directives", "pending", "asked_count", "events", "rejected"):
+            setattr(session, name, getattr(state, name))
+        session.resolved_keys = set(state.resolved_keys)
+        return session
+
+
+class RubricSnapshot(StrictModel):
+    inputs: RubricInput
+    max_decisions: int = Field(ge=0, le=5)
+    answers: list[Answer]
+    directives: list[Directive]
+    resolved_keys: list[str]
+    pending: Candidate | None
+    asked_count: int = Field(ge=0, le=5)
+    events: list[dict]
+    rejected: list[dict]

@@ -1,0 +1,191 @@
+{
+  "$defs": {
+    "Answer": {
+      "additionalProperties": false,
+      "properties": {
+        "question_id": {
+          "title": "Question Id",
+          "type": "string"
+        },
+        "response_type": {
+          "enum": [
+            "option",
+            "free_text",
+            "skip",
+            "delegate"
+          ],
+          "title": "Response Type",
+          "type": "string"
+        },
+        "response": {
+          "default": "",
+          "title": "Response",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id",
+        "response_type"
+      ],
+      "title": "Answer",
+      "type": "object"
+    },
+    "Dimension": {
+      "enum": [
+        "meaning",
+        "appearance",
+        "attention",
+        "boundaries",
+        "continuity"
+      ],
+      "title": "Dimension",
+      "type": "string"
+    },
+    "Directive": {
+      "additionalProperties": false,
+      "properties": {
+        "dimension": {
+          "$ref": "#/$defs/Dimension"
+        },
+        "scope": {
+          "title": "Scope",
+          "type": "string"
+        },
+        "outcome": {
+          "title": "Outcome",
+          "type": "string"
+        },
+        "provenance": {
+          "enum": [
+            "user_request",
+            "user_answer",
+            "model_default"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "strength": {
+          "enum": [
+            "hard",
+            "strong",
+            "optional"
+          ],
+          "title": "Strength",
+          "type": "string"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "verification_hint": {
+          "title": "Verification Hint",
+          "type": "string"
+        },
+        "operations_are_suggestions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Operations Are Suggestions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "dimension",
+        "scope",
+        "outcome",
+        "provenance",
+        "strength",
+        "source_id",
+        "verification_hint"
+      ],
+      "title": "Directive",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": "takeone-rubric-v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "initial_request": {
+      "title": "Initial Request",
+      "type": "string"
+    },
+    "directives": {
+      "items": {
+        "$ref": "#/$defs/Directive"
+      },
+      "title": "Directives",
+      "type": "array"
+    },
+    "explicit_constraints": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Explicit Constraints",
+      "type": "array"
+    },
+    "default_protections": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Default Protections",
+      "type": "array"
+    },
+    "technical_envelope": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Technical Envelope",
+      "type": "array"
+    },
+    "capabilities_used_for_questioning": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Capabilities Used For Questioning",
+      "type": "array"
+    },
+    "answers": {
+      "items": {
+        "$ref": "#/$defs/Answer"
+      },
+      "title": "Answers",
+      "type": "array"
+    },
+    "delegated_or_skipped": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Delegated Or Skipped",
+      "type": "array"
+    },
+    "unresolved": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Unresolved",
+      "type": "array"
+    },
+    "review_rule": {
+      "default": "Compare graded video with the source and this brief. Verify hard boundaries first; check technical artifacts over time; report evidence-linked deviations. Do not substitute the reviewer's personal aesthetic preference for user intent.",
+      "title": "Review Rule",
+      "type": "string"
+    }
+  },
+  "required": [
+    "initial_request",
+    "directives",
+    "explicit_constraints",
+    "default_protections",
+    "technical_envelope",
+    "capabilities_used_for_questioning",
+    "answers",
+    "delegated_or_skipped",
+    "unresolved"
+  ],
+  "title": "CreativeBrief",
+  "type": "object"
+}

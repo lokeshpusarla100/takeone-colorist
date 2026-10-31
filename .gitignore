@@ -1,0 +1,65 @@
+# Credentials and machine-local configuration
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+.aws/
+.codex/
+*.local
+*.pem
+*.key
+
+# Python environments, caches, and generated packages
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
+
+# JavaScript dependencies and build output
+node_modules/
+dist/
+build/
+.vite/
+.vite-temp/
+*.tsbuildinfo
+coverage/
+
+# Local project media, model outputs, session exports, and temporary artifacts
+/workspace/
+/outputs/
+/media/
+/uploads/
+/renders/
+/exports/
+/sessions/
+/logs/
+/tmp/
+/.cache/
+*.mp4
+*.mov
+*.webm
+*.mkv
+*.m4v
+*.avi
+*.mxf
+
+# Logs, editor backups, and operating-system metadata
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.idea/

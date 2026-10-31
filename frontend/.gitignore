@@ -1,0 +1,16 @@
+# Frontend dependencies and generated output
+node_modules/
+dist/
+.vite/
+.vite-temp/
+*.tsbuildinfo
+coverage/
+
+# Local configuration and logs (also covered by the project .gitignore)
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.local
+*.log

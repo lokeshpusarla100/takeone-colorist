@@ -1,0 +1,167 @@
+{
+  "$defs": {
+    "Candidate": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "dimension": {
+          "$ref": "#/$defs/Dimension"
+        },
+        "target_key": {
+          "title": "Target Key",
+          "type": "string"
+        },
+        "scope": {
+          "title": "Scope",
+          "type": "string"
+        },
+        "question": {
+          "title": "Question",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "uncertainty_type": {
+          "enum": [
+            "preference",
+            "observation",
+            "execution",
+            "knowledge"
+          ],
+          "title": "Uncertainty Type",
+          "type": "string"
+        },
+        "decision_fork": {
+          "title": "Decision Fork",
+          "type": "string"
+        },
+        "impact": {
+          "$ref": "#/$defs/Level"
+        },
+        "preservation_risk": {
+          "title": "Preservation Risk",
+          "type": "boolean"
+        },
+        "answerability": {
+          "$ref": "#/$defs/Level"
+        },
+        "interaction": {
+          "default": "question",
+          "enum": [
+            "question",
+            "preview"
+          ],
+          "title": "Interaction",
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/Option"
+          },
+          "maxItems": 3,
+          "minItems": 2,
+          "title": "Options",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "dimension",
+        "target_key",
+        "scope",
+        "question",
+        "evidence_ids",
+        "uncertainty_type",
+        "decision_fork",
+        "impact",
+        "preservation_risk",
+        "answerability",
+        "options"
+      ],
+      "title": "Candidate",
+      "type": "object"
+    },
+    "Dimension": {
+      "enum": [
+        "meaning",
+        "appearance",
+        "attention",
+        "boundaries",
+        "continuity"
+      ],
+      "title": "Dimension",
+      "type": "string"
+    },
+    "Level": {
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ],
+      "title": "Level",
+      "type": "string"
+    },
+    "Option": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "intended_outcome": {
+          "title": "Intended Outcome",
+          "type": "string"
+        },
+        "required_operations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Operations",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "intended_outcome"
+      ],
+      "title": "Option",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "candidates": {
+      "items": {
+        "$ref": "#/$defs/Candidate"
+      },
+      "title": "Candidates",
+      "type": "array"
+    },
+    "observation_gap": {
+      "default": "",
+      "title": "Observation Gap",
+      "type": "string"
+    },
+    "knowledge_gap": {
+      "default": "",
+      "title": "Knowledge Gap",
+      "type": "string"
+    }
+  },
+  "title": "Proposal",
+  "type": "object"
+}

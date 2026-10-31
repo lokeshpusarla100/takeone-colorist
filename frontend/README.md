@@ -24,7 +24,9 @@ See the [project README](../README.md) for configuration, tests and limits.
 
 ## Connected behavior
 
-Source uploads reach the local backend before browser decoding. The prepared VP9 preview is cached in IndexedDB. The original is retained unchanged on the backend. Pending preparation can resume; imported rendered files use local browser storage.
+Source uploads reach the local backend before browser decoding. Source acceptance uses verified backend metadata; it does not fetch or decode the prepared preview. The preview URL is saved in IndexedDB and playback streams independently from the backend. The original is retained unchanged on the backend. Pending preparation can resume; imported rendered files use local browser storage.
+
+A preview playback failure never invalidates a prepared source or blocks the rubric. Playback metadata has its own timeout and Retry playback action. A draft prompt is preserved when source preparation completes.
 
 Start analysis submits the request to the actual API. The panel presents one validated question at a time, supports options/free text/skip/delegation, and displays a downloadable brief. It discloses when content is sent to Meta. Upload or typing alone makes no model call.
 

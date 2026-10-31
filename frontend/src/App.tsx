@@ -28,6 +28,9 @@ export default function App() {
   </main>;
   const selected=project.versions.find(v=>v.id===project.selectedVersionId);
   const asset=project.assets.find(a=>a.id===selected?.assetId);
+  const viewerSource=project.source&&project.backend?.preview
+    ? {...project.source,playbackUrl:project.source.playbackUrl??project.backend.preview.url}
+    : project.source;
   const fileChange=(e:ChangeEvent<HTMLInputElement>,kind:'source'|'rendered')=>{
     const file=e.target.files?.[0];e.target.value='';if(file)void w.importVideo(file,kind);
   };
@@ -73,8 +76,9 @@ export default function App() {
     <div className="workspace">
       <main className="editor">
         {project.source&&<div className="media-info">{project.source.name} · {project.source.width} × {project.source.height} · {formatTime(project.source.duration)}</div>}
-        <Viewer source={project.source} selectedVersion={selected} selectedAsset={asset} busy={busy}
-          onChooseVideo={()=>sourceInput.current?.click()} onDropVideo={file=>void w.importVideo(file,'source')} onError={viewerError}/>
+        <Viewer source={viewerSource} selectedVersion={selected} selectedAsset={asset} busy={busy}
+          onChooseVideo={()=>sourceInput.current?.click()} onDropVideo={file=>void w.importVideo(file,'source')} onError={viewerError}
+          onPreviewReady={()=>{if(error?.details.stage==='media.playback')w.clearError();}}/>
         {project.source&&<div className="version-controls">
           <label>Version <select aria-label="Selected version" value={project.selectedVersionId??''} disabled={busy}
             onChange={e=>{const v=project.versions.find(item=>item.id===e.target.value);if(v)w.selectVersion(v);}}>

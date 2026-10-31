@@ -148,6 +148,7 @@
       "items": {
         "$ref": "#/$defs/Candidate"
       },
+      "maxItems": 3,
       "title": "Candidates",
       "type": "array"
     },

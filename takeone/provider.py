@@ -50,16 +50,20 @@ class MuseProvider:
                     "visible lighting/color relationships, motion and changes over time. Return a short summary and "
                     "timestamped observations with unique IDs, start/end seconds and uncertainty. Do not infer user "
                     "preferences or permissions. Do not invent numerical exposure/color measurements. Cite only "
-                    "times inside the supplied duration. Note limitations. Output the requested schema."
+                    "times inside the supplied duration. Use at most eight concise observations. "
+                    "Note limitations. Output the requested schema."
                 ),
                 input=[{"role": "user", "content": [
                     {"type": "input_text", "text": f"Inspect the entire silent clip. Duration: {duration:.3f} seconds."},
                     {"type": "input_file", "file_id": remote_id},
                 ]}],
-                text_format=SceneAnalysis, max_output_tokens=2600, store=False,
+                text_format=SceneAnalysis, reasoning={"effort": "low"}, max_output_tokens=2600, store=False,
             ))
             parsed = result.output_parsed
             if parsed is None:
+                if getattr(result, "status", None) == "incomplete":
+                    raise Problem("MUSE_RESPONSE_TRUNCATED", "Muse did not complete the scene analysis within its response limit.",
+                                  "The prepared source is kept. Retry the step explicitly; no automatic retry was made.", 502)
                 raise Problem("MUSE_INVALID_RESPONSE", "Muse returned no usable scene analysis.",
                               "Retry analysis. The source and preview have been kept.", 502)
             if any(o.end > duration + 0.25 for o in parsed.observations):
@@ -75,6 +79,14 @@ class MuseProvider:
     def call(operation):
         try:
             return operation()
+        except openai.LengthFinishReasonError as error:
+            usage = getattr(getattr(error, "completion", None), "usage", None)
+            raise Problem("MUSE_RESPONSE_TRUNCATED", "Muse reached its response limit before completing the rubric.",
+                          "Cached scene analysis and answers are kept. Retry this step; the video will not be resent.", 502,
+                          finish_reason="length", output_tokens=getattr(usage, "completion_tokens", None))
+        except openai.ContentFilterFinishReasonError:
+            raise Problem("MUSE_RESPONSE_UNAVAILABLE", "The provider did not return a usable response for this request.",
+                          "Review the request or try different footage. No incomplete response has been accepted.", 502)
         except openai.AuthenticationError:
             raise Problem("MUSE_AUTH_FAILED", "Meta rejected the API credentials.",
                           "Check MODEL_API_KEY and restart the backend.", 502)

@@ -28,6 +28,7 @@ alter factual identity. It is fine to return zero candidates. Do not repeat ques
 A system controller will decide which ONE question to ask. Output only the requested schema.
 Extract explicit preservation constraints as exact quotes from user_request in explicit_constraints.
 Never invent or paraphrase those quotes. Normally ask 0-3 questions. A clear request needs none.
+Return at most three concise candidates. Keep each question and explanation short.
 """
 
 
@@ -56,11 +57,12 @@ def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=Non
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
         ],
         response_format=Proposal,
-        max_completion_tokens=2400,
+        reasoning_effort="low",
+        max_tokens=4096,
     )
     result = completion.choices[0].message.parsed
     if result is None:
-        raise RuntimeError("Muse did not return a usable rubric proposal")
+        raise ValueError("Muse did not return a usable rubric proposal")
     session.events.append({
         "event": "muse_proposal",
         "model": model,

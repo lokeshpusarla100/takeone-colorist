@@ -61,7 +61,8 @@ Existing browser-only sessions remain compatible. Use **Prepare source** to uplo
 - Answers are saved before follow-up model calls. A failed request can be retried without resubmitting the answer.
 - Interrupted jobs are marked failed after backend restart. Billable requests are not automatically retried.
 - Cancellation stops local media processing. An in-flight remote request may finish and incur usage; completed analysis can be cached for resumption.
-- The frontend caches prepared previews in IndexedDB. It polls persisted backend state and deduplicates log events by ID.
+- The frontend saves source metadata and the backend preview URL in IndexedDB. Preview playback streams independently from the backend with byte-range support; a browser decoder timeout cannot block rubric analysis.
+- It polls persisted backend state and deduplicates log events by ID.
 - Exported JSON includes consultation/version metadata, events and diagnostics, without video blobs, thumbnails or credentials.
 
 Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and ports 5173 and 4173, have separate storage. Backend files survive browser site-data clearing, but a backend-project browser is not implemented.
@@ -89,6 +90,12 @@ Backend tests inject a fixture provider and exercise real upload, FFprobe/FFmpeg
 
 Frontend tests cover media diagnostics, cancellation, resource cleanup, storage validation and API contracts. Live Muse connectivity and question quality need a separate run with the configured key.
 
+An opt-in live check uses a one-second synthetic clip and at most two inference calls:
+
+    .venv/bin/python -m takeone.verify --live
+
+It can incur Meta usage. It uses a temporary workspace, never uploads personal footage, and attempts to delete its synthetic remote upload afterward. Normal automated tests make no live requests.
+
 The test-only browser server is tests.offline_app:app. It returns explicitly labeled synthetic observations and is separate from normal startup. Passing offline tests does not establish live Muse quality.
 
 ## Troubleshooting
@@ -98,6 +105,7 @@ The test-only browser server is tests.offline_app:app. It returns explicitly lab
 - **Model step failed:** inspect its code/action in the notice and log. Use Retry failed step; saved evidence and answers are retained.
 - **Source preparation failed:** inspect the media-tool diagnostic. Use Resume source preparation or import another source.
 - **Old session decoder failure:** use Prepare source to obtain a backend VP9 preview.
+- **Earlier import timed out in the browser:** refresh, then use Resume source preparation. The existing backend upload is reused; no re-upload or browser metadata inspection is needed.
 - **Save failed:** keep the page open, export the log, then retry saving.
 - **Port 5173 occupied:** open the existing editor, or run npm run dev -- --port 5174 inside frontend. Each origin has separate sessions.
 - **Workspace in use:** stop the other backend or configure another TAKEONE_WORKSPACE.

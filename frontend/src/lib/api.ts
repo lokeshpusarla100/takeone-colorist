@@ -141,7 +141,7 @@ export function backendError(state:BackendState) {
 }
 export async function waitForSource(initial:BackendState,onProgress:(s:BackendState)=>void,signal:AbortSignal) {
   let state=initial;
-  while(activeJob(state)) {
+  while(!state.preview&&activeJob(state)) {
     onProgress(state);
     await new Promise<void>((resolve,reject)=>{
       const abort=()=>{clearTimeout(timer);reject(new AppError('MEDIA_ABORTED','Import cancelled.','The original remains on the backend.'));};
@@ -152,7 +152,7 @@ export async function waitForSource(initial:BackendState,onProgress:(s:BackendSt
     state=await getState(state.id,signal);
   }
   onProgress(state);
-  if(state.status!=='ready')throw backendError(state);
+  if(!state.source||!state.preview)throw backendError(state);
   return state;
 }
 export async function previewBlob(state:BackendState,signal?:AbortSignal) {

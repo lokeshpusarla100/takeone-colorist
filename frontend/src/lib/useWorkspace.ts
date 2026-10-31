@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Project, SessionEvent, Version } from './types';
+import type { MediaAsset, Project, SessionEvent, Version } from './types';
 import { makeEvent, makeProject, NEUTRAL_RECIPE } from './types';
-import { getActiveId, getMedia, getProject, saveImport, saveProject, setActiveId } from './storage';
+import { getActiveId, getMedia, getProject, saveImport, savePreparedSource, saveProject, setActiveId } from './storage';
 import { inspectVideo } from './media';
 import { AppError, asAppError } from './errors';
 import type { ErrorDetails } from './errors';
 import * as api from './api';
+import { preparedSource } from './preparedSource';
 
 export function useWorkspace() {
   const [project, setProject] = useState<Project | null>(null);
@@ -114,24 +115,20 @@ export function useWorkspace() {
     update(p=>({...p,pendingBackend:state}));
   };
   const finishSource=async(state:api.BackendState,attach:boolean,signal:AbortSignal)=>{
-    if(!state.source||!state.preview)throw api.backendError(state);
-    setProgress('Loading prepared preview');
-    const blob=await api.previewBlob(state,signal);
-    const inspected=await inspectVideo(new File([blob],state.filename+'.webm',{type:'video/webm'}),{signal});
+    const asset=preparedSource(state);
+    setProgress('Saving prepared source');
     if(signal.aborted)throw new AppError('MEDIA_ABORTED','Import cancelled.','The source remains on the backend.');
     const latest=current.current;
     if(!latest)return;
     setCanCancel(false);
-    const next=attach||!latest.source?latest:makeProject();
-    const asset={...inspected,name:state.source.name,size:state.source.bytes,width:state.source.width,
-      height:state.source.height,duration:state.source.duration,type:'video/webm'};
+    const next=attach||!latest.source?latest:{...makeProject(),direction:latest.direction};
     const version:Version={
       id:crypto.randomUUID(),name:'Original',kind:'source',createdAt:new Date().toISOString(),
       assetId:asset.id,recipe:{...NEUTRAL_RECIPE},
     };
     const versions=attach?next.versions.map(v=>v.kind==='source'?{...v,assetId:asset.id}:v):[version];
     const result:Project={
-      ...next,name:next.name==='Untitled session'?state.source.name.replace(/\.[^.]+$/,''):next.name,
+      ...next,name:next.name==='Untitled session'?asset.name.replace(/\.[^.]+$/,''):next.name,
       updatedAt:new Date().toISOString(),source:asset,
       assets:attach?[...next.assets,asset]:[asset],versions,
       selectedVersionId:attach?(versions.find(v=>v.kind==='source')?.id??version.id):version.id,
@@ -141,7 +138,7 @@ export function useWorkspace() {
     };
     if(attach&&!versions.some(v=>v.kind==='source'))result.versions.push(version);
     const previous={...latest,pendingBackend:undefined,pendingAttach:undefined};
-    await saveImport(result,asset.id,blob,previous);
+    await savePreparedSource(result,previous);
     setActiveId(result.id);current.current=result;setProject(result);setSaveState('saved');setError(null);
   };
   const resumeImport=async(pending:api.BackendState,attach:boolean,retry=false)=>{
@@ -246,13 +243,16 @@ export function useWorkspace() {
   };
 }
 
-export function useAssetUrl(assetId?: string) {
+export function useAssetUrl(asset?: MediaAsset) {
+  const assetId=asset?.id;
+  const playbackUrl=asset?.playbackUrl;
   const [result,setResult] = useState<{id:string;url:string}|null>(null);
   const [error,setError] = useState<AppError|null>(null);
   useEffect(() => {
     let cancelled = false;
     let url: string | undefined;
     setError(null);
+    if(playbackUrl)return;
     if (!assetId) { setResult(null); return; }
     void getMedia(assetId).then(blob => {
       if (cancelled) return;
@@ -261,6 +261,6 @@ export function useAssetUrl(assetId?: string) {
       url = URL.createObjectURL(blob); setResult({id:assetId,url});
     }).catch(cause => { if (!cancelled) setError(asAppError(cause,'storage.media',{assetId})); });
     return () => { cancelled = true; if(url) URL.revokeObjectURL(url); };
-  },[assetId]);
-  return {url:result?.id === assetId ? result?.url : undefined,error};
+  },[assetId,playbackUrl]);
+  return {url:playbackUrl??(result?.id === assetId ? result?.url : undefined),error:playbackUrl?null:error};
 }

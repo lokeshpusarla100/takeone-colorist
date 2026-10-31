@@ -77,7 +77,7 @@ class Candidate(StrictModel):
 
 
 class Proposal(StrictModel):
-    candidates: list[Candidate] = Field(default_factory=list)
+    candidates: list[Candidate] = Field(default_factory=list, max_length=3)
     explicit_constraints: list[str] = Field(default_factory=list)
     observation_gap: str = ""  # Requires more inspection, not a user question.
     knowledge_gap: str = ""  # May justify skill/retrieval, not a user question.

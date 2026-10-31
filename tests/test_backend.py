@@ -369,3 +369,22 @@ def test_initial_key_setup_is_detected_without_restart(settings, tmp_path):
         response = c.get("/api/health")
         assert response.json()["muse_configured"] is True
         assert "offline-key-placeholder" not in response.text
+
+
+def test_truncated_rubric_has_a_specific_error_without_partial_content():
+    from openai import LengthFinishReasonError
+    from openai.types.chat import ChatCompletion
+    from takeone.provider import MuseProvider
+    completion = ChatCompletion.model_validate({
+        "id": "test", "object": "chat.completion", "created": 0, "model": "muse-spark-1.3",
+        "choices": [{"index": 0, "finish_reason": "length",
+                     "message": {"role": "assistant", "content": "private incomplete content"}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2400, "total_tokens": 2410},
+    })
+    def truncated():
+        raise LengthFinishReasonError(completion=completion)
+    with pytest.raises(Problem) as captured:
+        MuseProvider.call(truncated)
+    assert captured.value.code == "MUSE_RESPONSE_TRUNCATED"
+    assert captured.value.details["output_tokens"] == 2400
+    assert "private incomplete content" not in str(captured.value.public())

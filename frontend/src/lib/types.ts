@@ -21,6 +21,7 @@ export type MediaAsset = {
   height: number;
   thumbnail: string;
   thumbnailError?: string;
+  playbackUrl?: string;
 };
 
 export type Version = {

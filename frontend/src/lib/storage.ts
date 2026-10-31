@@ -47,7 +47,9 @@ export function validateProject(value: unknown): asserts value is Project {
   const recipe = (v: unknown) => obj(v) && ['exposure','contrast','saturation','red','green','blue'].every(k => num(v[k]));
   const asset = (v: unknown) => obj(v) && text(v.id) && text(v.name) && num(v.size) && (v.size as number) >= 0 && text(v.type)
     && num(v.width) && (v.width as number) > 0 && num(v.height) && (v.height as number) > 0
-    && num(v.duration) && (v.duration as number) > 0 && text(v.thumbnail);
+    && num(v.duration) && (v.duration as number) > 0 && text(v.thumbnail)
+    && (v.playbackUrl===undefined || (typeof v.playbackUrl==='string'
+      && /^\/api\/projects\/[0-9a-f-]{36}\/preview$/i.test(v.playbackUrl)));
   const valid = obj(value) && value.schemaVersion === 1 && text(value.id) && text(value.name)
     && date(value.createdAt) && date(value.updatedAt) && text(value.direction) && recipe(value.recipe)
     && (value.source === null || asset(value.source)) && Array.isArray(value.assets) && value.assets.every(asset)
@@ -113,6 +115,7 @@ async function write(project: Project, media?: { id: string; blob: Blob }, previ
   } catch (cause) { throw asAppError(cause, 'storage.save', { projectId: project.id }); }
 }
 export const saveProject = (project: Project) => write(project);
+export const savePreparedSource = (project: Project, previous?: Project) => write(project, undefined, previous);
 export const saveImport = (project: Project, id: string, blob: Blob, previous?:Project) => write(project, { id, blob },previous);
 export async function getProject(id: string) {
   const value = await read<unknown>('projects', id);

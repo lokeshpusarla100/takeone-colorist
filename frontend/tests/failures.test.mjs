@@ -7,7 +7,8 @@ const {mediaFailure,asAppError}=await load('errors');
 const {inspectVideo}=await load('media');
 const {validateProject}=await load('storage');
 const {makeProject}=await load('types');
-const {parseBackend,request}=await load('api');
+const {parseBackend,request,waitForSource}=await load('api');
+const {preparedSource}=await load('preparedSource');
 
 test('native media errors preserve different diagnoses and original details',()=>{
   for(const [code,expected] of [[1,'MEDIA_ABORTED'],[2,'MEDIA_READ_FAILED'],[3,'MEDIA_DECODE_FAILED'],[4,'MEDIA_UNSUPPORTED']]){
@@ -114,4 +115,36 @@ test('cancellation during JSON decoding is reported as cancellation',async t=>{
   const pending=request('/api/projects',{signal:controller.signal});
   setTimeout(()=>controller.abort(),1);
   await assert.rejects(pending,{code:'MEDIA_ABORTED'});
+});
+function readySource() {
+  const id=crypto.randomUUID();
+  return {id,revision:3,status:'ready',stage:'ready',filename:'test.mp4',request:'',
+    answered_count:0,max_questions:3,model_calls:0,question:null,brief:null,analysis:null,events:[],error:null,
+    source:{name:'test.mp4',bytes:100,width:720,height:1280,duration:40,sha256:'0'.repeat(64),
+      video_codec:'h264',audio_codec:null,technical_notes:[]},
+    preview:{url:'/api/projects/'+id+'/preview',width:720,height:1280,duration:40,bytes:80}};
+}
+test('a prepared source is accepted without creating a browser decoder or fetching the preview',t=>{
+  const previousDocument=globalThis.document;
+  const previousFetch=globalThis.fetch;
+  t.after(()=>{globalThis.document=previousDocument;globalThis.fetch=previousFetch;});
+  globalThis.document={createElement(){throw new Error('The browser decoder is unavailable');}};
+  globalThis.fetch=()=>{throw new Error('Preview playback is blocked');};
+  const state=readySource();
+  const source=preparedSource(state);
+  assert.equal(source.width,720);
+  assert.equal(source.playbackUrl,state.preview.url);
+  const project=makeProject();
+  project.source=source;project.assets=[source];project.backend=state;
+  validateProject(project);
+  assert.equal(project.backend.status,'ready');
+});
+test('source resumption uses existing prepared media without waiting for model work',async()=>{
+  const state={...readySource(),status:'analyzing',stage:'select_question'};
+  assert.equal(await waitForSource(state,()=>{},new AbortController().signal),state);
+});
+test('unprepared or invalid remote source metadata is rejected',()=>{
+  assert.throws(()=>preparedSource({...readySource(),preview:null}),{code:'API_RESPONSE_INVALID'});
+  const state=readySource();
+  assert.throws(()=>preparedSource({...state,preview:{...state.preview,url:'https://untrusted.invalid/video'}}),{code:'API_RESPONSE_INVALID'});
 });

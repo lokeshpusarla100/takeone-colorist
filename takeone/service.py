@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from takeone_rubric_v1.rubric import Answer, CapabilityManifest, Directive, Observation, RememberedDefault, RubricInput, RubricSession
 from .config import Settings
-from .contracts import Event, State, GradeRecipe, RenderCandidate, ConsultationSummary
+from .contracts import Event, State, GradeRecipe, RenderCandidate, ConsultationSummary, SegmentationRun
 from .errors import Problem, safe_problem
 from .media import capabilities, inspect_source, make_previews
 from .provider import MuseProvider
@@ -17,10 +17,11 @@ from . import rendering
 from .preferences import FeedbackEvidence, PreferenceStore, PromptMemoryGate
 from .preferences import context_values
 from .usage import usage_details
+from . import sam
 
 
 class Service:
-    def __init__(self, settings: Settings, provider=None):
+    def __init__(self, settings: Settings, provider=None, sam_provider=None):
         self.settings = settings
         self.store = Store(settings.workspace)
         self.process_lock = (self.store.root / ".backend.lock").open("a")
@@ -42,6 +43,7 @@ class Service:
                 "details":{"exception_type":type(cause).__name__}}
         self.prompt_gate = PromptMemoryGate(self.preferences, self.store.get)
         self.provider = provider or MuseProvider(settings, self.prompt_gate)
+        self.sam_provider = sam_provider or sam.SamProvider(settings)
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="takeone-job")
         self.slots = threading.BoundedSemaphore(4)
         self.cancels: dict[str, threading.Event] = {}
@@ -53,6 +55,9 @@ class Service:
             except Problem:
                 continue  # One damaged record must not make other projects inaccessible.
             if state.active_job:
+                for run in state.segmentations:
+                    if run.status in {"queued","preparing","streaming","overlay"}:
+                        run.status="failed"
                 state.active_job = None
                 state.status = "failed"
                 failure = Problem("JOB_INTERRUPTED", "The backend restarted during this operation.",
@@ -154,11 +159,11 @@ class Service:
         cancel = threading.Event()
         state.active_job = job_id
         state.job_kind = kind
-        state.status = "ingesting" if kind == "ingest" else "rendering" if kind == "render" else "analyzing"
+        state.status = "ingesting" if kind == "ingest" else "rendering" if kind == "render" else "segmenting" if kind=="segment" else "analyzing"
         state.stage = ("inspect_source" if kind == "ingest" else "plan_grade" if kind == "render"
-                       else "analyze_scene" if not state.analysis else "select_question")
+                       else "verify_segmentation_input" if kind=="segment" else "analyze_scene" if not state.analysis else "select_question")
         state.error = None
-        self.event(state, "Preparing source" if kind == "ingest" else "Grade queued" if kind == "render" else "Analysis queued")
+        self.event(state, "Preparing source" if kind == "ingest" else "Grade queued" if kind == "render" else "Segmentation queued" if kind=="segment" else "Analysis queued")
         try:
             self.store.save(state)
             self.cancels[state.id] = cancel
@@ -318,6 +323,11 @@ class Service:
             if (kind == "analysis" or (kind == "render" and (not target or not target.recipe))) and not self.provider.available():
                 raise Problem("MUSE_NOT_CONFIGURED", "The Meta API key is not configured.",
                               "Set MODEL_API_KEY in .env, then refresh the editor.", 503)
+            sam_target=next((r for r in state.segmentations if r.id==state.segmentation_target_id),None)
+            sam_directory=self.store.directory(project_id)/'segmentations'/sam_target.id if sam_target else None
+            cached_sam=sam_directory is not None and any((sam_directory/name).is_file() for name in ['manifest.json','stream-complete.json'])
+            if kind=="segment" and not cached_sam and not self.sam_provider.available():
+                raise Problem("SAM_NOT_CONFIGURED","The Meta key is not configured.","Set MODEL_API_KEY in .env.",503)
             state.receipts[command_id] = fingerprint
             self.submit(state, kind)
             return state
@@ -364,6 +374,117 @@ class Service:
                 self.store.save(state)
             return state
 
+    def segment(self,project_id,concept,revision,command_id,duration_seconds=None):
+        concept=" ".join(concept.split())
+        if not concept or len(concept)>120 or any(c in concept for c in [',',';','\n','<','>']):
+            raise Problem('SAM_CONCEPT_INVALID','Enter one short subject phrase.','For example: motorcycle. Use one concept per request.',422)
+        with self.store.lock:
+            state=self.store.get(project_id)
+            fingerprint=self.fingerprint('segment',[concept,duration_seconds])
+            if self.receipt(state,command_id,fingerprint):return state
+            self.check_revision(state,revision)
+            prior=next((r for r in state.segmentations if r.id==state.segmentation_target_id),None)
+            recoverable=state.status in {'failed','cancelled'} and state.job_kind=='segment' and prior is not None
+            if (state.status not in {'brief_ready','render_ready'} and not recoverable) or not state.preview or not state.source:
+                raise Problem('SAM_NOT_READY','Prepare the source and finish the brief before tracking a subject.','Finish the consultation first.',409)
+            if not self.sam_provider.available():
+                raise Problem('SAM_NOT_CONFIGURED','The Meta API key is not configured.','Use the same MODEL_API_KEY as Muse.',503)
+            run=SegmentationRun(id=str(uuid4()),concept=concept,model=self.settings.sam_model,
+                                return_status=prior.return_status if recoverable else state.status,
+                                duration_seconds=duration_seconds)
+            state.segmentations.append(run);state.segmentation_target_id=run.id
+            state.receipts[command_id]=fingerprint
+            self.event(state,'Subject tracking requested',concept,actor='user',segmentation_id=run.id)
+            self.submit(state,'segment')
+            return state
+
+    def run_segmentation(self,project_id,cancel):
+        state=self.store.get(project_id)
+        target=next((r for r in state.segmentations if r.id==state.segmentation_target_id),None)
+        if not target or not state.source:raise Problem('SAM_STATE_INVALID','Tracking has no matching source/run.','Refresh the project.',409)
+        directory=self.store.directory(project_id);output=directory/'segmentations'/target.id
+        output.mkdir(parents=True,exist_ok=True)
+        def update(status,stage,**values):
+            def change(s):
+                run=next(r for r in s.segmentations if r.id==target.id)
+                run.status=status;s.stage=stage
+                for name,value in values.items():setattr(run,name,value)
+            self.mutate(project_id,change)
+        update('preparing','verify_segmentation_input')
+        frame_map=sam.mapping(directory,state.source,self.settings,cancel)
+        input_path=directory/'analysis.mp4'
+        if target.duration_seconds is not None:
+            count=sum(f['time']<target.duration_seconds for f in frame_map['frames'])
+            frame_map['source_frame_count']=frame_map['frame_count']
+            frame_map['frames']=frame_map['frames'][:count];frame_map['frame_count']=count
+            input_path=output/'input.mp4'
+            if not input_path.is_file():
+                temporary=output/'input.partial.mp4'
+                sam.command([self.settings.ffmpeg,'-v','error','-y','-i',str(directory/'analysis.mp4'),
+                    '-an','-frames:v',str(count),'-c:v','libx264','-preset','veryfast','-crf','26',
+                    '-fps_mode','passthrough','-movflags','+faststart',str(temporary)],cancel,120)
+                temporary.replace(input_path)
+            inspected=sam.frame_info(input_path,self.settings,cancel)
+            if len(inspected['pts'])!=count or any(abs(f['proxy_pts']-t)>0.002 for f,t in zip(frame_map['frames'],inspected['pts'])):
+                raise Problem('SAM_EXCERPT_MAPPING','The excerpt changed frame mapping.','Inspect the prepared proxy.',422)
+            frame_map['proxy_sha256']=sam.checksum(input_path)
+        frame_map['scope']={'start_seconds':0,'requested_duration':target.duration_seconds,'full_source_frames':
+                            frame_map.get('source_frame_count',frame_map['frame_count'])}
+        previous_map=json.loads((output/'frame-map.json').read_text()) if (output/'frame-map.json').exists() else None
+        if (output/'stream-complete.json').exists() and previous_map!=frame_map:
+            raise Problem('SAM_SOURCE_CHANGED','The completed stream belongs to a different source mapping.','Start a new tracking run.',409)
+        sam.atomic(output/'frame-map.json',frame_map)
+        if (output/'manifest.json').is_file():
+            manifest=json.loads((output/'manifest.json').read_text())
+            if manifest['frame_map']!=frame_map:
+                raise Problem('SAM_SOURCE_CHANGED','The saved masks refer to different media.','Start a new tracking request.',409)
+        else:
+            upload=state.sam_upload or {}
+            remote=upload.get('file_id') if upload.get('sha256')==frame_map['proxy_sha256'] else None
+            def remember(file_id):
+                self.mutate(project_id,lambda s:setattr(s,'sam_upload',{'file_id':file_id,'sha256':frame_map['proxy_sha256']}))
+            def progress(snapshot):
+                if snapshot is None:
+                    update('preparing','decode_segmentation_masks');return
+                if isinstance(snapshot,dict):
+                    update('streaming','segment_subject',received_frames=snapshot['received_frames']);return
+                masks=[r for r in snapshot.records if r.kind=='mask']
+                update('preparing','decode_segmentation_masks',mask_count=len(masks),frame_count=frame_map['frame_count'],
+                       frames_with_masks=len({r.frame.frame_index for r in masks if r.frame}))
+            request_id=str(uuid4())
+            def requested():
+                def change(s):
+                    s.sam_calls+=1
+                    self.event(s,'Tracking subject with SAM',actor='muse',model=self.settings.sam_model,
+                               request_id=request_id,segmentation_id=target.id)
+                self.mutate(project_id,change)
+                update('streaming','segment_subject',frame_count=frame_map['frame_count'])
+            def usage(value):
+                self.mutate(project_id,lambda s:self.event(s,'SAM request usage',actor='muse',
+                    model=self.settings.sam_model,request_id=request_id,video_frames_processed=value.get('video_frames_processed'),
+                    token_usage=True,**usage_details(value)))
+            result=self.sam_provider.segment(input_path,target.concept,remote,remember,cancel,progress,
+                output/'raw.txt',usage,requested)
+            manifest=sam.persist_result(result,frame_map,output,cancel)
+        self.check_cancel(cancel)
+        if manifest['mask_count']:
+            update('overlay','render_mask_overlay')
+            sam.overlay(input_path,output,manifest,self.settings,cancel)
+        self.check_cancel(cancel)
+        def ready(s):
+            run=next(r for r in s.segmentations if r.id==target.id)
+            run.status='ready' if manifest['mask_count'] else 'empty'
+            run.frame_count=frame_map['frame_count'];run.mask_count=manifest['mask_count']
+            run.frames_with_masks=manifest['frames_with_masks'];run.tracks=manifest['tracks'];run.error=None
+            prefix=f'/api/projects/{project_id}/segmentations/{run.id}'
+            run.preview_url=prefix+'/preview' if run.status=='ready' else None
+            run.manifest_url=prefix+'/manifest'
+            s.status=run.return_status;s.stage='segmentation_ready';s.active_job=None
+            self.event(s,'Subject masks ready' if run.status=='ready' else 'No matching subject found',
+                       'Review object IDs and the moving overlay. Regional grading is not enabled.',
+                       mask_count=run.mask_count,frames_with_masks=run.frames_with_masks,frame_count=run.frame_count)
+        self.mutate(project_id,ready)
+
     def count_call(self, project_id, title):
         request_id = str(uuid4())
         def change(state):
@@ -398,6 +519,8 @@ class Service:
                 self.ingest(project_id, cancel)
             elif kind == "render":
                 self.render_grade(project_id, cancel)
+            elif kind == "segment":
+                self.run_segmentation(project_id,cancel)
             else:
                 self.analyze(project_id, cancel)
         except Exception as cause:
@@ -423,6 +546,11 @@ class Service:
                         if target:
                             target.status = "cancelled" if failure.code == "JOB_CANCELLED" else "failed"
                             target.error = failure.public()
+                    if kind=="segment":
+                        target=next((r for r in state.segmentations if r.id==state.segmentation_target_id),None)
+                        if target:
+                            target.status='cancelled' if failure.code=='JOB_CANCELLED' else 'failed'
+                            target.error=failure.public()
                     self.event(state, failure.message, failure.action, kind="activity" if state.status == "cancelled" else "error",
                                code=failure.code, **failure.details)
                 self.mutate(project_id, failed)

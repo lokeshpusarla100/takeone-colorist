@@ -33,7 +33,7 @@ export default function RenderPanel({state,health,sending,online,direction,onGen
       </>}
       {!!selected.validation?.warnings.length&&<ul className="render-warnings">{selected.validation.warnings.map((w,i)=><li key={i}>{w}</li>)}</ul>}
       <details><summary>Recipe and checks</summary><pre>{JSON.stringify({recipe:selected.recipe,validation:selected.validation},null,2)}</pre></details>
-      <p className="inline-help">Media checks passed. Aesthetic quality and preservation still require your moving-video review. SAM and automatic critique are not connected.</p>
+      <p className="inline-help">Media checks passed. Aesthetic quality and preservation still require your moving-video review. Subject masks are available separately; regional grading and automatic critique are not enabled.</p>
     </div>}
   </section>;
 }

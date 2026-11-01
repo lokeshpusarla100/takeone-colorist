@@ -118,7 +118,7 @@ Do not repeat the installation sequence merely because a new chat lacks context.
 ### 2.3 Implementation handoff (1 November)
 
 - The React editor and local FastAPI backend now handle upload/previews, rubric questions and answers, persisted Creative Briefs, version comparison and session logs.
-- An explicit global-grade generation path connects the brief to a bounded contrast/gamma/saturation recipe and original-source render. Localized grading, SAM and automatic critique remain pending. Real-footage visual acceptance is not established by this handoff.
+- An explicit global-grade generation path connects the brief to a bounded contrast/gamma/saturation recipe and original-source render. Hosted SAM subject tracking now has a separate diagnostic mask/overlay path. Localized grading and automatic critique remain pending. Real-footage grading acceptance is not established by this handoff.
 - Current-video feedback creates a brief revision independently of cross-project memory. Applying it to pixels requires an explicit subsequent generation action.
 - Capture-only preference memory is implemented as described in Section 26: empty initial collection, separate feedback/interpretation layers, owner/profile isolation, atomic JSON, deduplication, edit/delete controls and replay-safe tombstones.
 - Capture defaults on; application defaults off and is unavailable through the normal API. Prepared future application requires deployment capability, profile enablement and explicit opt-in for a new project. No iteration count enables it.
@@ -495,6 +495,10 @@ The first video test must establish:
 5. A playable overlay showing tracking quality.
 
 ### 11.2 Selective use
+
+**Implemented integration (1 November):** An explicit subject phrase and five-second/full-clip choice call hosted sam-3.1 using the existing Meta key. The backend verifies a constant-frame-rate, upright source/proxy frame mapping, persists streamed events before decoding, and writes masks, visibility intervals, gaps and a playable diagnostic overlay. Completed network results can be replayed locally after decoding/overlay failure. Source media and the frozen brief remain unchanged; no object is automatically selected and no mask is applied to a regional grade.
+
+The live five-second excerpt test of the supplied motorcycle video returned one ID and masks on all 150 frames. A preceding full-clip attempt ended incomplete; it is retained as a failed run, not tracking validation. Full-clip robustness, occlusion/cut handling and preservation-sensitive mask quality remain unverified. See docs/SAM_INTEGRATION.md for evidence and limits.
 
 Call SAM only when an intended operation needs isolation. Global grading does not require segmentation.
 

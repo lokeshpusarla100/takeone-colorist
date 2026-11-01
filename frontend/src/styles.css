@@ -48,6 +48,7 @@ dialog{width:min(480px,calc(100% - 32px));max-height:85vh;background:#202622;col
 .rubric-question textarea{margin:8px 0}.creative-brief p,.creative-brief li{font-size:13px;line-height:1.6;overflow-wrap:anywhere}.creative-brief h3{margin:16px 0 8px}.creative-brief ul{padding-left:20px;margin:10px 0}.creative-brief .inline-help{margin-top:16px}
 .editor:has(.rubric-question) .video-container video{max-height:30vh}
 .render-panel{margin-top:24px;padding-top:20px;border-top:1px solid #414a3e}.render-panel>.inline-help{margin-bottom:14px}
+.sam-panel{margin-top:24px;padding-top:20px;border-top:1px solid #414a3e;display:flex;flex-direction:column;gap:12px;font-size:13px}.sam-panel input{flex:1;min-width:120px}.sam-result video{display:block;width:100%;max-height:55vh;background:#101314;margin:12px 0}.sam-panel a{color:#c6d5bb}.sam-panel pre{max-height:240px;overflow:auto}
 .render-result{font-size:13px;line-height:1.6}.render-result p{margin:10px 0}.recipe-values{display:flex;gap:22px;flex-wrap:wrap}
 .recipe-values div{display:flex;gap:8px}.recipe-values dt{text-transform:capitalize;color:#b1bfa8}.recipe-values dd{margin:0;font-variant-numeric:tabular-nums}
 .render-warnings{border:1px solid #806d48;padding:10px 10px 10px 28px;color:#e1cba6;border-radius:4px}.render-result pre{max-height:360px;overflow:auto}

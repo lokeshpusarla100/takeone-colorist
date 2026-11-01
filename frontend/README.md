@@ -38,7 +38,9 @@ Question flow is one at a time: saving an answer triggers a fresh relevance chec
 
 Conflicting workspace changes and model commands disable while local work, backend jobs, selections or cancellation commands are pending. Repeated submit/cancel/selection requests are also guarded in the consultation hook. Playback, tab navigation and exports remain available. Mutating controls unlock after success/failure/cancellation; editing a brief does not mark an earlier rendered version as a render of the new brief.
 
-Health and job status come from the backend. No simulated questions, progress or usage are included in normal startup. After a brief is ready, Generate graded video explicitly requests a bounded global recipe and render. Selected source frames and the brief go to Meta; FFmpeg renders the original. Completed versions can be compared and downloaded. SAM, local edits and automatic critique remain unavailable. Render/media checks do not establish visual quality.
+Health and job status come from the backend. No simulated questions, progress or usage are included in normal startup. After a brief is ready, Generate graded video explicitly requests a bounded global recipe and render. Selected source frames and the brief go to Meta; FFmpeg renders the original. Completed versions can be compared and downloaded. Subject masks use hosted SAM as a separate explicit action; regional edits and automatic critique remain unavailable. Render/media checks do not establish visual quality.
+
+Subject masks defaults to a five-second excerpt, with an explicit full-clip option. It accepts one subject phrase, shows received versus validated frames, supports cancellation and saved runs, and provides a playable overlay plus manifest. All matched object IDs are shown; none is silently selected for grading. Network streaming, local decoding and overlay generation are separate progress stages. Completed streams retry locally without another model call; partial streams require an explicit remote retry. See [SAM integration](../docs/SAM_INTEGRATION.md).
 
 Legacy browser-only sessions can use Prepare source. Existing saved recipe drafts remain readable.
 
@@ -62,6 +64,7 @@ The selected profile and category/scene/purpose labels are next-upload defaults 
 - storage.ts: IndexedDB transactions and state validation.
 - RubricPanel.tsx: prompt, question/answer controls and brief.
 - RenderPanel.tsx: explicit global-grade request, progress, recipe and render checks.
+- SamPanel.tsx: explicit subject/scope selection, tracking progress, saved mask runs, diagnostic overlay and manifest.
 - TokenUsage.tsx / tokenUsage.ts: project usage totals, per-request breakdown, pending/unknown counts and legacy event compatibility.
 - ProgressPanel.tsx / workflow.ts: backend-stage progress, waiting/completion states and processing locks.
 - SessionPanel.tsx: keyboard-accessible Progress/Session log tabs and activity filtering.

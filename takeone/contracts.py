@@ -138,11 +138,29 @@ class ConsultationSummary(StrictModel):
     rejected_count: int = Field(ge=0)
 
 
+class SegmentationRun(StrictModel):
+    id: str
+    concept: str
+    model: str
+    created_at: str = Field(default_factory=now)
+    status: Literal["queued","preparing","streaming","overlay","ready","empty","failed","cancelled"] = "queued"
+    return_status: Literal["brief_ready","render_ready"] = "brief_ready"
+    duration_seconds: float | None = None
+    received_frames: int = 0
+    frame_count: int = 0
+    frames_with_masks: int = 0
+    mask_count: int = 0
+    tracks: list[dict] = Field(default_factory=list)
+    preview_url: str | None = None
+    manifest_url: str | None = None
+    error: dict | None = None
+
+
 class State(StrictModel):
     schema_version: int = 1
     id: str
     revision: int = 0
-    status: Literal["ingesting", "ready", "analyzing", "awaiting_answer", "brief_ready", "rendering", "render_ready", "failed", "cancelled"]
+    status: Literal["ingesting", "ready", "analyzing", "awaiting_answer", "brief_ready", "rendering", "render_ready", "segmenting", "failed", "cancelled"]
     stage: str
     created_at: str = Field(default_factory=now)
     updated_at: str = Field(default_factory=now)
@@ -177,6 +195,10 @@ class State(StrictModel):
     memory_influences: list[dict] = Field(default_factory=list)
     feedback: list[dict] = Field(default_factory=list)
     brief_revision: int = 0
+    segmentations: list[SegmentationRun] = Field(default_factory=list)
+    segmentation_target_id: str | None = None
+    sam_upload: dict | None = None
+    sam_calls: int = 0
 
     def public(self):
-        return self.model_dump(mode="json", exclude={"rubric", "receipts", "remote_file_id", "active_job", "job_kind", "history", "render_target_id", "memory_binding", "memory_outbox"})
+        return self.model_dump(mode="json", exclude={"rubric", "receipts", "remote_file_id", "active_job", "job_kind", "history", "render_target_id", "memory_binding", "memory_outbox", "sam_upload", "segmentation_target_id"})

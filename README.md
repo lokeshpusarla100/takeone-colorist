@@ -6,7 +6,7 @@ Local video preparation, a React editor, Muse-powered creative direction, and ca
     → answer useful questions → save/download the creative brief
     → request a global grade → compare versions → download
 
-The code connects the saved brief to an explicit **Generate graded video** action for bounded global SDR contrast, saturation and gamma. This is one treatment across the clip. SAM masking, local corrections, shot matching and automatic visual critique remain unavailable. The generation path's presence does not establish acceptable visual quality on real footage; review the moving result before accepting it.
+The code connects the saved brief to an explicit **Generate graded video** action for bounded global SDR contrast, saturation and gamma. This is one treatment across the clip. Hosted SAM subject tracking provides diagnostic masks and an overlay as a separate action. Regional grading, local corrections, shot matching and automatic visual critique remain unavailable. Review the moving results before accepting them.
 
 ## Configure
 
@@ -89,6 +89,14 @@ Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and por
 The sidebar has **Progress** and **Session log** tabs. Progress shows real source-preparation, video-analysis, clarification, brief and optional-grade stages. It distinguishes processing from waiting for your answer, and uses an indeterminate indicator rather than an estimated percentage. The brief records whether questioning ended because no questions were proposed, validation rejected candidates, or the configured limit was reached. New zero-question responses include a short Muse explanation when supplied; older sessions without one are labeled accordingly.
 
 Importing/replacing media, switching sessions, renaming, changing versions/preferences, and submitting direction/feedback or another generation are disabled during conflicting processing or command submission. Cancel remains available for active work until cancellation is requested. Playback, dashboard tabs and log export remain usable. Controls unlock when processing finishes, fails or is cancelled.
+
+## Subject tracking with SAM
+
+After the brief is ready, use **Subject masks · SAM**. Enter one subject phrase, such as motorcycle, choose **First 5 seconds** (default) or **Full clip**, and click **Track subject**. It uses the existing MODEL_API_KEY with hosted sam-3.1 and may incur per-frame usage. No local model weights or second API key are required.
+
+The backend verifies source/proxy frame counts, timestamps and scale-only geometry before upload. This first path supports constant-frame-rate, upright sources. SAM's explicit frame/object IDs are retained; gaps remain gaps and no object is automatically selected for editing. Download the manifest or inspect the moving, colour-coded overlay. Masks use analysis-proxy resolution and are not yet applied to a regional grade.
+
+Network events are saved before local decoding, so a completed response can be replayed after a decode/overlay failure without another SAM request. Incomplete streams remain failed and require an explicit new remote attempt. Local decoding can take substantially longer than downloading the response. See [SAM integration and validation](docs/SAM_INTEGRATION.md) for APIs, limits and the bounded live test.
 
 ## Token usage
 

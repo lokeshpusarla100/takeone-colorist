@@ -12,6 +12,7 @@ import { useConsultation } from './lib/useConsultation';
 import RubricPanel from './components/RubricPanel';
 import RenderPanel from './components/RenderPanel';
 import MemoryView from './components/MemoryView';
+import SamPanel from './components/SamPanel';
 import { mutationLocked } from './lib/workflow';
 
 export default function App() {
@@ -84,7 +85,7 @@ export default function App() {
     {error&&<ErrorNotice error={error} onDismiss={w.clearError} onRetry={error.code.startsWith('STORAGE')?()=>void w.retrySave():undefined}/>}
     {busy&&<div className="operation-status" role="status"><span>{w.progress??'Saving session…'}</span>{w.canCancel&&<button onClick={w.cancelImport}>Cancel import</button>}</div>}
     {!busy&&project.pendingBackend&&<div className="operation-status">
-      <span>Source preparation is saved on the backend.</span><button disabled={sending||!!project.backend&&['analyzing','rendering'].includes(project.backend.status)} onClick={w.retryImport}>Resume source preparation</button>
+      <span>Source preparation is saved on the backend.</span><button disabled={sending||!!project.backend&&['analyzing','rendering','segmenting'].includes(project.backend.status)} onClick={w.retryImport}>Resume source preparation</button>
     </div>}
     <div className="workspace">
       <main className="editor">
@@ -121,6 +122,9 @@ export default function App() {
           sending={sending||busy||!!project.pendingBackend} direction={direction}
           onGenerate={()=>{w.clearError();void consultation.generate();}}
           onRetry={()=>{w.clearError();void consultation.retry();}} onCancel={()=>void consultation.cancel()}/>
+        <SamPanel key={project.id} state={project.backend} health={consultation.health} online={consultation.online}
+          locked={locked} sending={sending} onTrack={(concept,durationSeconds)=>{w.clearError();void consultation.segment(concept,durationSeconds);}}
+          onCancel={()=>void consultation.cancel()} onRetry={()=>{w.clearError();void consultation.retry();}}/>
         {project.backend?.brief&&<section className="project-feedback">
           <label htmlFor="video-feedback">Feedback on this video</label>
           <textarea id="video-feedback" value={feedback} disabled={locked} maxLength={4000} rows={2} onChange={e=>setFeedback(e.target.value)}

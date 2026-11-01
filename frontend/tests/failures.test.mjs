@@ -13,7 +13,7 @@ const {tokenUsage}=await load('tokenUsage');
 const {mutationLocked,runProgress}=await load('workflow');
 
 test('mutating workspace actions lock during local, remote and command processing',()=>{
-  for(const status of ['ingesting','analyzing','rendering'])assert.equal(mutationLocked({status}),true);
+  for(const status of ['ingesting','analyzing','rendering','segmenting'])assert.equal(mutationLocked({status}),true);
   for(const status of ['ready','awaiting_answer','brief_ready','render_ready','failed','cancelled'])assert.equal(mutationLocked({status}),false);
   assert.equal(mutationLocked(undefined,true),true);
   assert.equal(mutationLocked({status:'ready'},false,true),true);
@@ -37,6 +37,9 @@ test('progress distinguishes waiting for a single answer from model processing a
   const changedBrief=runProgress({...state,status:'brief_ready',stage:'brief_ready',brief:{},candidates:[{status:'ready'}]});
   assert.equal(changedBrief.steps[4].phase,'pending');
   assert.match(changedBrief.steps[4].detail,/earlier version/);
+  const tracking=runProgress({...state,status:'segmenting',stage:'segment_subject',brief:{},segmentations:[{status:'streaming',frame_count:12,frames_with_masks:4}]});
+  assert.equal(tracking.working,true);
+  assert.equal(tracking.steps[5].phase,'active');
 });
 test('progress reports persisted failures and source preparation without fake completion',()=>{
   const pending=runProgress(undefined,true,'Uploading source');

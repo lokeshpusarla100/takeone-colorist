@@ -3,7 +3,7 @@ import { tokenUsage } from '../lib/tokenUsage';
 
 const format=(n:number|null)=>n===null?'—':n.toLocaleString();
 export default function TokenUsage({state}:{state?:BackendState}){
-  const active=state&&['analyzing','rendering'].includes(state.status)?state.stage:undefined;
+  const active=state&&['analyzing','rendering','segmenting'].includes(state.status)?state.stage:undefined;
   const usage=tokenUsage(state?.events??[],active);
   return <section className="token-usage" aria-labelledby="token-usage-heading">
     <h3 id="token-usage-heading">Token usage · this project</h3>
@@ -25,11 +25,13 @@ export default function TokenUsage({state}:{state?:BackendState}){
             <th scope="row">{i+1}. {row.label}<small>{new Date(row.timestamp).toLocaleTimeString()}
               {row.model&&` · ${row.model}`}
               {row.running?' · Running':row.input===null||row.output===null||row.total===null?' · Not fully reported':''}</small></th>
-            <td>{format(row.input)}</td><td>{format(row.output)}</td><td>{format(row.total)}</td>
+            <td>{format(row.input)}</td><td>{format(row.output)}</td><td>{format(row.total)}
+              {row.processedFrames!=null&&<small>{format(row.processedFrames)} video frames reported</small>}</td>
           </tr>)}</tbody>
         </table></div>
       </details>
     </>}
     <p className="inline-help">Provider-reported counts, not a billing balance or context-window meter.</p>
+    {!!state?.sam_calls&&<p className="inline-help">SAM video usage is per frame; missing token counts do not imply a free request.</p>}
   </section>;
 }

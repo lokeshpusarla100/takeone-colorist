@@ -24,6 +24,7 @@ class Settings:
     memory_root: Path | None = None
     # Rollout capability, deliberately not enabled by an environment variable.
     memory_application_available: bool = False
+    sam_model: str = "sam-3.1"
 
     @classmethod
     def from_env(cls):

@@ -33,13 +33,17 @@ class StartCommand(Command):
 class AnswerCommand(Command):
     answer: Answer
 
+class SegmentCommand(Command):
+    concept: str = Field(min_length=1,max_length=120)
+    duration_seconds: float | None = Field(default=None,ge=1,le=120)
 
-def create_app(settings: Settings | None = None, provider=None):
+
+def create_app(settings: Settings | None = None, provider=None, sam_provider=None):
     settings = settings or Settings.from_env()
 
     @asynccontextmanager
     async def lifespan(application):
-        application.state.service = Service(settings, provider)
+        application.state.service = Service(settings, provider,sam_provider)
         yield
         await asyncio.to_thread(application.state.service.close)
 
@@ -101,6 +105,7 @@ def create_app(settings: Settings | None = None, provider=None):
             "max_duration_seconds": settings.max_duration,
             "max_questions": settings.max_questions,
             "grading_connected": True,
+            "sam_model":settings.sam_model,"segmentation_connected":True,
         }
 
     @application.post("/api/projects", status_code=202)
@@ -197,6 +202,26 @@ def create_app(settings: Settings | None = None, provider=None):
     @application.post("/api/projects/{project_id}/render", status_code=202)
     def generate(project_id: UUID, body: Command):
         return service().generate(str(project_id), body.revision, str(body.command_id)).public()
+
+    @application.post('/api/projects/{project_id}/segment',status_code=202)
+    def segment(project_id:UUID,body:SegmentCommand):
+        return service().segment(str(project_id),body.concept,body.revision,str(body.command_id),body.duration_seconds).public()
+
+    def segmentation_file(project_id,run_id,filename):
+        state=service().store.get(str(project_id))
+        run=next((r for r in state.segmentations if r.id==str(run_id)),None)
+        path=service().store.directory(str(project_id))/'segmentations'/str(run_id)/filename
+        if not run or run.status not in {'ready','empty'} or not path.is_file():
+            raise Problem('SAM_RESULT_NOT_READY','This mask result is not available.','Wait for completion or inspect its saved error.',409)
+        return path
+
+    @application.get('/api/projects/{project_id}/segmentations/{run_id}/preview')
+    def mask_preview(project_id:UUID,run_id:UUID):
+        return FileResponse(segmentation_file(project_id,run_id,'overlay.webm'),media_type='video/webm')
+
+    @application.get('/api/projects/{project_id}/segmentations/{run_id}/manifest')
+    def mask_manifest(project_id:UUID,run_id:UUID):
+        return FileResponse(segmentation_file(project_id,run_id,'manifest.json'),media_type='application/json')
 
     def candidate_file(project_id: UUID, candidate_id: UUID, filename: str):
         state = service().store.get(str(project_id))

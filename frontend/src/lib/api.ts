@@ -25,7 +25,7 @@ export type RenderCandidate = {
 };
 export type BackendState = {
   id:string;revision:number;
-  status:'ingesting'|'ready'|'analyzing'|'awaiting_answer'|'brief_ready'|'rendering'|'render_ready'|'failed'|'cancelled';
+  status:'ingesting'|'ready'|'analyzing'|'awaiting_answer'|'brief_ready'|'rendering'|'render_ready'|'segmenting'|'failed'|'cancelled';
   stage:string;filename:string;request:string;answered_count:number;max_questions:number;model_calls:number;
   source:null|{name:string;bytes:number;sha256:string;width:number;height:number;duration:number;
     video_codec:string;audio_codec:string|null;technical_notes:string[]};
@@ -39,10 +39,17 @@ export type BackendState = {
   selected_candidate_id?:string|null;
   owner_id?:string|null;profile_id?:string;preference_context?:Record<string,string>;
   memory_capture_error?:{message:string}|null;
+  sam_calls?:number;
+  segmentations?:{id:string;concept:string;model:string;status:'queued'|'preparing'|'streaming'|'overlay'|'ready'|'empty'|'failed'|'cancelled';
+    duration_seconds?:number|null;received_frames?:number;
+    frame_count:number;frames_with_masks:number;mask_count:number;
+    tracks:{object_id:string;visible_frames:number;intervals:number[][]}[];
+    preview_url:string|null;manifest_url:string|null;error:null|{message:string}}[];
 };
 export type Health = {
   status:string;model:string;muse_configured:boolean;ffmpeg_available:boolean;ffprobe_available:boolean;
   max_upload_bytes:number;max_duration_seconds:number;max_questions:number;grading_connected:boolean;
+  sam_model?:string;segmentation_connected?:boolean;
 };
 const record=(value:unknown):value is Record<string,unknown>=>typeof value==='object'&&value!==null;
 const text=(value:unknown)=>typeof value==='string';
@@ -62,7 +69,7 @@ function invalidResponse():never {
 }
 export function parseBackend(value:unknown):BackendState {
   if(!record(value)||!uuid(value.id)||!Number.isInteger(value.revision)||Number(value.revision)<0
-    ||!['ingesting','ready','analyzing','awaiting_answer','brief_ready','rendering','render_ready','failed','cancelled'].includes(value.status as string)
+    ||!['ingesting','ready','analyzing','awaiting_answer','brief_ready','rendering','render_ready','segmenting','failed','cancelled'].includes(value.status as string)
     ||!text(value.stage)||!text(value.filename)||!text(value.request)||!finite(value.answered_count)
     ||!finite(value.max_questions)||!finite(value.model_calls)||!Array.isArray(value.events)||!value.events.every(validEvent)){
     return invalidResponse();
@@ -91,7 +98,15 @@ export function parseBackend(value:unknown):BackendState {
     ||!Number.isInteger(value.consultation.proposed_count)||Number(value.consultation.proposed_count)<0
     ||!Number.isInteger(value.consultation.rejected_count)||Number(value.consultation.rejected_count)<0))return invalidResponse();
   if(value.status==='brief_ready'&&!value.brief)return invalidResponse();
-  if(['ready','awaiting_answer','brief_ready','rendering','render_ready'].includes(value.status as string)&&(!value.source||!value.preview))return invalidResponse();
+  if(['ready','awaiting_answer','brief_ready','rendering','render_ready','segmenting'].includes(value.status as string)&&(!value.source||!value.preview))return invalidResponse();
+  if(value.segmentations!==undefined&&(!Array.isArray(value.segmentations)||!value.segmentations.every(s=>{
+    if(!record(s)||!uuid(s.id)||!text(s.concept)||!text(s.model)
+      ||!['queued','preparing','streaming','overlay','ready','empty','failed','cancelled'].includes(s.status as string)
+      ||![s.frame_count,s.frames_with_masks,s.mask_count].every(n=>Number.isSafeInteger(n)&&Number(n)>=0)
+      ||!Array.isArray(s.tracks)||!s.tracks.every(t=>record(t)&&text(t.object_id)&&finite(t.visible_frames)&&Array.isArray(t.intervals)))return false;
+    const prefix='/api/projects/'+value.id+'/segmentations/'+s.id;
+    return (s.preview_url===null||s.preview_url===prefix+'/preview')&&(s.manifest_url===null||s.manifest_url===prefix+'/manifest');
+  })))return invalidResponse();
   if(value.candidates!==undefined&&(!Array.isArray(value.candidates)||!value.candidates.every(c=>{
     if(!record(c)||!uuid(c.id)||!text(c.name)||!text(c.created_at)
       ||!['planning','rendering','ready','failed','cancelled'].includes(c.status as string))return false;
@@ -111,7 +126,7 @@ export function parseBackend(value:unknown):BackendState {
   if(value.status==='render_ready'&&!value.selected_candidate_id)return invalidResponse();
   return value as unknown as BackendState;
 }
-export const activeJob=(s:BackendState)=>s.status==='ingesting'||s.status==='analyzing'||s.status==='rendering';
+export const activeJob=(s:BackendState)=>s.status==='ingesting'||s.status==='analyzing'||s.status==='rendering'||s.status==='segmenting';
 export function stageLabel(stage:string) {
   const labels:Record<string,string>={
     inspect_source:'Inspecting source metadata',prepare_preview:'Preparing video previews',
@@ -119,6 +134,9 @@ export function stageLabel(stage:string) {
     awaiting_answer:'Waiting for your answer',brief_ready:'Creative brief ready',ready:'Source ready',
     cancelling:'Cancelling; an in-flight request may still finish',queue:'Waiting for the worker',
     plan_grade:'Preparing the global grading recipe',render_grade:'Rendering and validating the video',render_ready:'Rendered video ready',
+    verify_segmentation_input:'Verifying source/proxy frame mapping',segment_subject:'SAM is tracking the subject',
+    render_mask_overlay:'Rendering the mask diagnostic overlay',segmentation_ready:'Subject tracking complete',
+    decode_segmentation_masks:'Validating and decoding saved SAM masks locally',
   };
   return labels[stage]??stage;
 }
@@ -168,7 +186,7 @@ export async function upload(file:File,signal:AbortSignal) {
   form.append('profile_id',nextProfile());form.append('preference_context',JSON.stringify(nextContext()));
   return parseBackend(await request<unknown>('/api/projects',{method:'POST',body:form,signal},120000));
 }
-export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback',body:Record<string,unknown>) {
+export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment',body:Record<string,unknown>) {
   return parseBackend(await request<unknown>('/api/projects/'+id+'/'+kind,{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({...body,command_id:crypto.randomUUID()}),

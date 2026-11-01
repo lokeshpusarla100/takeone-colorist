@@ -1,20 +1,23 @@
 import type { SessionEvent } from './types';
 
-type Stage='analysis'|'rubric'|'colorist';
+type Stage='analysis'|'rubric'|'colorist'|'sam';
 export type UsageRow={
   id:string;timestamp:string;label:string;model:string|null;
   input:number|null;output:number|null;total:number|null;cached:number|null;reasoning:number|null;
   reported:boolean;running:boolean;
+  processedFrames?:number|null;
 };
 const starts:Record<string,Stage>={
   'Inspecting video with Muse':'analysis','Selecting a useful clarification':'rubric',
   'Muse is preparing a global grading recipe':'colorist',
+  'Tracking subject with SAM':'sam',
 };
 const usageTitles:Record<string,Stage>={
   'Scene analysis usage':'analysis','Scene analysis saved':'analysis',
   'Muse request usage':'rubric','Colorist request usage':'colorist',
+  'SAM request usage':'sam',
 };
-const labels:Record<Stage,string>={analysis:'Video analysis',rubric:'Rubric',colorist:'Colorist'};
+const labels:Record<Stage,string>={analysis:'Video analysis',rubric:'Rubric',colorist:'Colorist',sam:'SAM masks'};
 const count=(value:unknown):number|null=>typeof value==='number'&&Number.isSafeInteger(value)&&value>=0?value:null;
 const text=(value:unknown):string|null=>typeof value==='string'&&value?value:null;
 
@@ -56,10 +59,11 @@ export function tokenUsage(events:SessionEvent[],activeStage?:string){
     row.output=count(details.output_tokens)??count(details.completion_tokens);
     row.total=count(details.total_tokens)??(row.input!==null&&row.output!==null?row.input+row.output:null);
     row.cached=count(details.cached_tokens);row.reasoning=count(details.reasoning_tokens);
+    row.processedFrames=count(details.video_frames_processed);
     row.model=text(details.model)??row.model;
   }
   // Only the latest outstanding model request may be running. Old failures stay unknown.
-  if(latestRequest&&!latestRequest.reported&&['analyze_scene','select_question','plan_grade','cancelling'].includes(activeStage??'')){
+  if(latestRequest&&!latestRequest.reported&&['analyze_scene','select_question','plan_grade','segment_subject','cancelling'].includes(activeStage??'')){
     latestRequest.running=true;
   }
   const sum=(key:'input'|'output'|'total'|'cached'|'reasoning')=>{

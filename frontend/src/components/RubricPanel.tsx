@@ -38,15 +38,15 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
       <button disabled={disabled||!state?.preview||!online||!health?.muse_configured
         ||(!changed&&!!state&&['awaiting_answer','brief_ready','render_ready','failed','cancelled'].includes(state.status))}
         onClick={onStart}>{changed&&state?.request?'Start with new direction':'Start analysis'}</button></div>}
-    {working&&<div className="consultation-status" role="status"><span>{stageLabel(state.stage)}</span><button disabled={sending||state.stage==='cancelling'} onClick={onCancel}>Cancel</button></div>}
+    {working&&state.status!=='rendering'&&<div className="consultation-status" role="status"><span>{stageLabel(state.stage)}</span><button disabled={sending||!online||state.stage==='cancelling'} onClick={onCancel}>Cancel</button></div>}
     {state&&(state.status==='failed'||state.status==='cancelled')&&<div className="consultation-actions">
       <span>{state.status==='cancelled'?'The operation was cancelled. Saved answers are kept.':'The last step failed. Saved evidence and answers are kept.'}</span>
-      <button disabled={busy||sending||!online} onClick={onRetry}>Retry failed step</button>
+      <button disabled={disabled||!online} onClick={onRetry}>Retry failed step</button>
     </div>}
     {question&&changed&&<p className="inline-help">The request has changed. Start with the new direction to update the questions.</p>}
     {question&&!changed&&<div className="rubric-question" key={question.id} ref={questionRef}>
-      <p className="question-count">{state?.answered_count} answered · up to {state?.max_questions} questions</p>
-      <fieldset disabled={disabled}>
+      <p className="question-count">{state?.answered_count} answered · up to {state?.max_questions} questions, one at a time</p>
+      <fieldset disabled={disabled||!online}>
         <legend tabIndex={-1}>{question.question}</legend>
         {question.options.map(option=><label className="question-option" key={option.id}>
           <input type="radio" name={'question-'+question.id} checked={choice===option.id} onChange={()=>setChoice(option.id)}/>
@@ -57,11 +57,11 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
       </fieldset>
       <p className="question-reason"><strong>Why this matters: </strong>{question.decision_fork}</p>
       <div className="actions">
-        <button disabled={disabled||!choice||(choice==='__other'&&!other.trim())}
+        <button disabled={disabled||!online||!choice||(choice==='__other'&&!other.trim())}
           onClick={()=>onAnswer(question.id,choice==='__other'?'free_text':'option',choice==='__other'?other.trim():choice)}>
           {sending?'Saving answer…':'Continue'}</button>
-        <button disabled={disabled} onClick={()=>onAnswer(question.id,'delegate','')}>You decide</button>
-        <button disabled={disabled} onClick={()=>onAnswer(question.id,'skip','')}>Skip</button>
+        <button disabled={disabled||!online} onClick={()=>onAnswer(question.id,'delegate','')}>You decide</button>
+        <button disabled={disabled||!online} onClick={()=>onAnswer(question.id,'skip','')}>Skip</button>
       </div>
     </div>}
     {brief&&<section className="creative-brief" aria-labelledby="brief-heading">

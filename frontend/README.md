@@ -32,6 +32,12 @@ Start analysis submits the request to the actual API. The panel presents one val
 
 Polling merges authoritative state/events into the browser session. Stable IDs prevent duplicate log rows. Refresh restores the pending question or brief. Backend errors preserve their code, recovery action and technical details.
 
+The Run dashboard defaults to Progress, with a separate Session log tab and shared token panel. Progress follows actual processing stages, distinguishes waiting for a user answer, and displays the persisted consultation stopping reason. It does not estimate a completion percentage. The tabs support keyboard navigation.
+
+Question flow is one at a time: saving an answer triggers a fresh relevance check with prior decisions and cached observations. Zero questions remains valid for sufficiently specified requests; a short completion explanation is requested and stored separately from the brief directives. Existing sessions without that explanation remain compatible.
+
+Conflicting workspace changes and model commands disable while local work, backend jobs, selections or cancellation commands are pending. Repeated submit/cancel/selection requests are also guarded in the consultation hook. Playback, tab navigation and exports remain available. Mutating controls unlock after success/failure/cancellation; editing a brief does not mark an earlier rendered version as a render of the new brief.
+
 Health and job status come from the backend. No simulated questions, progress or usage are included in normal startup. After a brief is ready, Generate graded video explicitly requests a bounded global recipe and render. Selected source frames and the brief go to Meta; FFmpeg renders the original. Completed versions can be compared and downloaded. SAM, local edits and automatic critique remain unavailable. Render/media checks do not establish visual quality.
 
 Legacy browser-only sessions can use Prepare source. Existing saved recipe drafts remain readable.
@@ -57,6 +63,8 @@ The selected profile and category/scene/purpose labels are next-upload defaults 
 - RubricPanel.tsx: prompt, question/answer controls and brief.
 - RenderPanel.tsx: explicit global-grade request, progress, recipe and render checks.
 - TokenUsage.tsx / tokenUsage.ts: project usage totals, per-request breakdown, pending/unknown counts and legacy event compatibility.
+- ProgressPanel.tsx / workflow.ts: backend-stage progress, waiting/completion states and processing locks.
+- SessionPanel.tsx: keyboard-accessible Progress/Session log tabs and activity filtering.
 - MemoryView.tsx: scoped preference management and supporting evidence.
 - preferenceApi.ts / preferenceContext.ts: memory API and next-upload profile/context defaults.
 - ErrorBoundary.tsx: recovery screen for rendering exceptions.

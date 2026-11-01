@@ -208,6 +208,12 @@
       "maxItems": 10,
       "title": "Memory Used Ids",
       "type": "array"
+    },
+    "completion_reason": {
+      "default": "",
+      "maxLength": 1200,
+      "title": "Completion Reason",
+      "type": "string"
     }
   },
   "title": "Proposal",

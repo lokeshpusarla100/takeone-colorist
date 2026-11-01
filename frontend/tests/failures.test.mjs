@@ -10,6 +10,43 @@ const {makeProject}=await load('types');
 const {parseBackend,request,waitForSource}=await load('api');
 const {preparedSource}=await load('preparedSource');
 const {tokenUsage}=await load('tokenUsage');
+const {mutationLocked,runProgress}=await load('workflow');
+
+test('mutating workspace actions lock during local, remote and command processing',()=>{
+  for(const status of ['ingesting','analyzing','rendering'])assert.equal(mutationLocked({status}),true);
+  for(const status of ['ready','awaiting_answer','brief_ready','render_ready','failed','cancelled'])assert.equal(mutationLocked({status}),false);
+  assert.equal(mutationLocked(undefined,true),true);
+  assert.equal(mutationLocked({status:'ready'},false,true),true);
+  assert.equal(mutationLocked({status:'ready'},false,false,{status:'ingesting'}),true);
+});
+test('progress distinguishes waiting for a single answer from model processing and completion',()=>{
+  const state={status:'awaiting_answer',stage:'awaiting_answer',source:{},preview:{},analysis:{},
+    brief:null,answered_count:1,max_questions:5};
+  const waiting=runProgress(state);
+  assert.equal(waiting.working,false);
+  assert.equal(waiting.steps[2].phase,'waiting');
+  assert.match(waiting.steps[2].detail,/answer 2/);
+  const processing=runProgress({...state,status:'analyzing',stage:'select_question'});
+  assert.equal(processing.working,true);
+  assert.equal(processing.steps[2].phase,'active');
+  assert.equal(processing.steps[3].phase,'pending');
+  const complete=runProgress({...state,status:'brief_ready',stage:'brief_ready',brief:{}});
+  assert.equal(complete.working,false);
+  assert.equal(complete.steps[2].phase,'complete');
+  assert.equal(complete.steps[4].phase,'pending');
+  const changedBrief=runProgress({...state,status:'brief_ready',stage:'brief_ready',brief:{},candidates:[{status:'ready'}]});
+  assert.equal(changedBrief.steps[4].phase,'pending');
+  assert.match(changedBrief.steps[4].detail,/earlier version/);
+});
+test('progress reports persisted failures and source preparation without fake completion',()=>{
+  const pending=runProgress(undefined,true,'Uploading source');
+  assert.equal(pending.heading,'Uploading source');
+  assert.equal(pending.steps[0].phase,'active');
+  const failed=runProgress({status:'failed',stage:'analyze_scene',source:{},preview:{},analysis:null,error:{action:'Retry explicitly.'}});
+  assert.equal(failed.working,false);
+  assert.equal(failed.steps[1].phase,'failed');
+  assert.equal(failed.note,'Retry explicitly.');
+});
 
 const usageEvent=(id,title,details={})=>({id,title,details,actor:'muse',kind:'activity',timestamp:'2026-11-01T10:00:00Z'});
 test('token usage deduplicates event receipts and keeps cached/reasoning counts within totals',()=>{
@@ -156,6 +193,10 @@ test('malformed or inconsistent backend state is rejected before it reaches stor
   assert.throws(()=>parseBackend({...state,status:'awaiting_answer'}),{code:'API_RESPONSE_INVALID'});
   assert.throws(()=>parseBackend({...state,events:[{id:'bad'}]}),{code:'API_RESPONSE_INVALID'});
   assert.throws(()=>parseBackend({...state,preview:{url:'https://untrusted.invalid/video',width:2,height:2,duration:1,bytes:1}}),{code:'API_RESPONSE_INVALID'});
+  const consultation={reason:'no_candidates',message:'No additional questions proposed.',model_explanation:'Direction is specific.',proposed_count:0,rejected_count:0};
+  assert.equal(parseBackend({...state,consultation}).consultation.reason,'no_candidates');
+  assert.throws(()=>parseBackend({...state,consultation:{...consultation,reason:'invented'}}),{code:'API_RESPONSE_INVALID'});
+  assert.throws(()=>parseBackend({...state,consultation:{...consultation,proposed_count:-1}}),{code:'API_RESPONSE_INVALID'});
 });
 test('cancellation during JSON decoding is reported as cancellation',async t=>{
   const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});

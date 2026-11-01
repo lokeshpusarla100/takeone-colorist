@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from takeone_rubric_v1.rubric import Answer, CapabilityManifest, Directive, Observation, RememberedDefault, RubricInput, RubricSession
 from .config import Settings
-from .contracts import Event, State, GradeRecipe, RenderCandidate
+from .contracts import Event, State, GradeRecipe, RenderCandidate, ConsultationSummary
 from .errors import Problem, safe_problem
 from .media import capabilities, inspect_source, make_previews
 from .provider import MuseProvider
@@ -196,6 +196,7 @@ class Service:
             state.request = request
             state.rubric = None
             state.question = None
+            state.consultation = None
             state.brief = None
             state.answered_count = 0
             state.model_calls = 0
@@ -225,6 +226,7 @@ class Service:
                 raise Problem("ANSWER_INVALID", str(error), "Answer the displayed question using a valid option or free text.", 422)
             state.rubric = session.snapshot()
             state.question = None
+            state.consultation = None
             state.answered_count = len(session.answers)
             state.receipts[command_id] = fingerprint
             event = self.event(state, "Answer saved", answer.response or answer.response_type, actor="user",
@@ -511,7 +513,20 @@ class Service:
                                    if e.get("event") == "muse_proposal"), None)
             self.record_usage(project_id,request_id,"rubric",proposal_usage,proposal_call)
         self.check_cancel(cancel)
+        rejection_start = len(session.rejected)
         question = session.next_question(proposal)
+        if question:
+            reason,message="question_selected","A clarification is ready. Your answer will inform the next decision."
+        elif session.asked_count >= session.max_decisions:
+            reason,message="question_limit","The question limit was reached. No additional clarification call was made."
+        elif not proposal.candidates:
+            reason="no_candidates"
+            message="Muse proposed no further clarification questions." if session.answers else "Muse proposed no clarification questions."
+        else:
+            reason,message="no_valid_candidates","The proposed questions did not pass evidence, feasibility or repetition checks."
+        summary=ConsultationSummary(reason=reason,message=message,
+            model_explanation=proposal.completion_reason if reason=="no_candidates" else "",
+            proposed_count=len(proposal.candidates),rejected_count=len(session.rejected)-rejection_start)
         brief = None if question else session.brief()
         if brief:
             if proposal.observation_gap:
@@ -522,6 +537,7 @@ class Service:
         def selected(state):
             state.rubric = session.snapshot()
             state.question = question
+            state.consultation = summary
             state.brief = brief
             if brief:
                 state.brief_revision += 1
@@ -539,6 +555,9 @@ class Service:
                 self.event(state, question.question, question.decision_fork, actor="muse", kind="decision", question_id=question.id)
             else:
                 self.event(state, "Creative brief ready", "The original request, answers, boundaries and limitations have been saved.", actor="muse")
+                self.event(state,"Consultation completed",summary.message,stop_reason=summary.reason,
+                           model_explanation=summary.model_explanation,proposed_count=summary.proposed_count,
+                           rejected_count=summary.rejected_count)
             if session.rejected:
                 self.event(state, "Question validation completed", rejected_count=len(session.rejected))
         self.mutate(project_id, selected)

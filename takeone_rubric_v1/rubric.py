@@ -110,6 +110,7 @@ class Proposal(StrictModel):
     observation_gap: str = ""  # Requires more inspection, not a user question.
     knowledge_gap: str = ""  # May justify skill/retrieval, not a user question.
     memory_used_ids: list[str] = Field(default_factory=list, max_length=10)
+    completion_reason: str = Field(default="", max_length=1200)
 
 
 class Answer(StrictModel):
@@ -322,7 +323,8 @@ class RubricSession:
             else:
                 approved.append(candidate)
         if not approved:
-            self.events.append({"event": "stop", "reason": "no actionable preference fork"})
+            self.events.append({"event": "stop", "reason": "no actionable preference fork",
+                                "explanation":proposal.completion_reason})
             return None
         order = {Level.HIGH: 3, Level.MEDIUM: 2, Level.LOW: 1}
         # Ordinal heuristic, NOT calibrated expected value of information.

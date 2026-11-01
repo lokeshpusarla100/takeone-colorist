@@ -323,6 +323,10 @@ Normally ask **0–3 consequential questions**, with a hard consultation budget 
 
 Each question supports selectable options, free text/Other, Skip, and You decide. Skip does not authorize an unrestricted transformation. Delegation uses visible defaults within existing boundaries.
 
+**Implemented interaction (1 November):** The controller displays one question, saves its answer, and requests fresh candidates with the previous question/options/outcome before selecting a follow-up. The configured limit is a ceiling, not a batch size or mandatory count. The prompter checks for unresolved supported tradeoffs even when broad look adjectives were provided. Zero-candidate responses request a concise user-facing completion reason; the project persists that separately from creative directives. Progress distinguishes no proposal, validation rejection and question-limit completion. These mechanics are fixture-tested; revised live Muse question quality requires separate evaluation.
+
+The editor's Run dashboard has Progress and Session log tabs. It shows actual stages without fabricated percentages. Conflicting imports, session/profile/version changes, direction/feedback edits and generation actions lock during processing; playback, exports and tab navigation remain available, with cancellation guarded against repeated submission.
+
 Free-text answers require interpretation and provenance. If interpretation changes a consequential permission, reflect that interpretation back or retain the stricter boundary. Do not force free text into an arbitrary option.
 
 A missing hard permission after the budget ends blocks that operation; it does not justify ignoring the constraint. Continue with a feasible conservative treatment where possible.

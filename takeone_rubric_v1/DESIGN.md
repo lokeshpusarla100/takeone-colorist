@@ -71,6 +71,10 @@ Request **structured** `Proposal` JSON (official `muse-spark-1.3` structured-out
 
 Muse may return zero candidates. Observation gaps require more visual/signal inspection; execution gaps require technical trials; knowledge gaps may justify reference lookup. **Only missing preferences become rubric questions.**
 
+When proposing zero candidates, Muse is asked for completion_reason: a concise user-facing explanation of why no supported preference fork remains. It is an outcome summary, not private reasoning, and never becomes an editing directive or preference-memory event. The application distinguishes this case from questions rejected by validation and stopping at the configured limit. Old responses without an explanation remain readable.
+
+Broad adjectives alone do not necessarily settle treatment strength, saturation, readability or preservation tradeoffs. The prompter considers such remaining choices against actual capabilities and prior answers. It may propose several internal alternatives, but the controller presents only one question; the next call happens after its answer, not as a fixed question sequence.
+
 ### Controller: `RubricSession`
 
 - Reject candidates unsupported by listed evidence or capability IDs.

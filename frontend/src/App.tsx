@@ -12,6 +12,7 @@ import { useConsultation } from './lib/useConsultation';
 import RubricPanel from './components/RubricPanel';
 import RenderPanel from './components/RenderPanel';
 import MemoryView from './components/MemoryView';
+import { mutationLocked } from './lib/workflow';
 
 export default function App() {
   const w=useWorkspace();
@@ -31,13 +32,15 @@ export default function App() {
   if(!project) return <main className="startup"><h1>Take One</h1>
     {error?<><ErrorNotice error={error}/><div className="actions"><button onClick={w.retryRestore}>Retry opening session</button><button disabled={busy} onClick={()=>void w.newSession()}>New session</button></div></>:<p role="status">Opening session…</p>}
   </main>;
+  const sending=consultation.sending||consultation.selecting||consultation.cancelling;
+  const locked=mutationLocked(project.backend,busy,sending,project.pendingBackend);
   const selected=project.versions.find(v=>v.id===project.selectedVersionId);
   const asset=project.assets.find(a=>a.id===selected?.assetId);
   const viewerSource=project.source&&project.backend?.preview
     ? {...project.source,playbackUrl:project.source.playbackUrl??project.backend.preview.url}
     : project.source;
   const fileChange=(e:ChangeEvent<HTMLInputElement>,kind:'source'|'rendered')=>{
-    const file=e.target.files?.[0];e.target.value='';if(file)void w.importVideo(file,kind);
+    const file=e.target.files?.[0];e.target.value='';if(file&&!locked)void w.importVideo(file,kind);
   };
   const exportLog=()=>{
     try {
@@ -50,6 +53,7 @@ export default function App() {
     } catch(cause){reportError(cause,'session.export');}
   };
   const openSessions=async()=>{
+    if(locked)return;
     try {await saveProject(project);setSessions(true);}catch(cause){reportError(cause,'storage.sessions');}
   };
   const downloadVideo=async()=>{
@@ -64,14 +68,14 @@ export default function App() {
     }catch(cause){reportError(cause,'media.download');}
   };
   return <div className="app-shell">
-    <input className="visually-hidden" ref={sourceInput} type="file" accept="video/*,.mov,.mkv,.m4v" aria-label="Import source video" disabled={busy} onChange={e=>fileChange(e,'source')}/>
-    <input className="visually-hidden" ref={renderInput} type="file" accept="video/*,.mov,.mkv,.m4v" aria-label="Import rendered video" disabled={busy} onChange={e=>fileChange(e,'rendered')}/>
+    <input className="visually-hidden" ref={sourceInput} type="file" accept="video/*,.mov,.mkv,.m4v" aria-label="Import source video" disabled={locked} onChange={e=>fileChange(e,'source')}/>
+    <input className="visually-hidden" ref={renderInput} type="file" accept="video/*,.mov,.mkv,.m4v" aria-label="Import rendered video" disabled={locked} onChange={e=>fileChange(e,'rendered')}/>
     <header className="app-header"><h1>Take One</h1><label className="visually-hidden" htmlFor="project-name">Session name</label>
-      <input id="project-name" maxLength={80} value={project.name} disabled={busy} onChange={e=>w.update(p=>({...p,name:e.target.value}))}
+      <input id="project-name" maxLength={80} value={project.name} disabled={locked} onChange={e=>w.update(p=>({...p,name:e.target.value}))}
         onBlur={()=>{if(!project.name.trim())w.update(p=>({...p,name:'Untitled session'}));}}/>
       <span className={'save-state '+w.saveState} role="status">{w.saveState==='saved'?'Saved locally':w.saveState==='saving'?'Saving…':'Save failed'}</span>
-      <div className="actions"><button onClick={()=>setMemoryOpen(true)}>Preferences</button><button disabled={busy} onClick={()=>void openSessions()}>Sessions</button>
-        <button disabled={busy} onClick={()=>sourceInput.current?.click()}>Import video</button><button onClick={exportLog}>Export log</button></div>
+      <div className="actions"><button disabled={locked} onClick={()=>setMemoryOpen(true)}>Preferences</button><button disabled={locked} onClick={()=>void openSessions()}>Sessions</button>
+        <button disabled={locked} onClick={()=>sourceInput.current?.click()}>Import video</button><button onClick={exportLog}>Export log</button></div>
     </header>
     <div className="connection-note">{consultation.online
       ? 'Backend connected · '+(consultation.health?.muse_configured?'Muse configured':'Meta API key missing')
@@ -80,19 +84,19 @@ export default function App() {
     {error&&<ErrorNotice error={error} onDismiss={w.clearError} onRetry={error.code.startsWith('STORAGE')?()=>void w.retrySave():undefined}/>}
     {busy&&<div className="operation-status" role="status"><span>{w.progress??'Saving session…'}</span>{w.canCancel&&<button onClick={w.cancelImport}>Cancel import</button>}</div>}
     {!busy&&project.pendingBackend&&<div className="operation-status">
-      <span>Source preparation is saved on the backend.</span><button onClick={w.retryImport}>Resume source preparation</button>
+      <span>Source preparation is saved on the backend.</span><button disabled={sending||!!project.backend&&['analyzing','rendering'].includes(project.backend.status)} onClick={w.retryImport}>Resume source preparation</button>
     </div>}
     <div className="workspace">
       <main className="editor">
         {project.source&&<div className="media-info">{project.source.name} · {project.source.width} × {project.source.height} · {formatTime(project.source.duration)}</div>}
-        <Viewer source={viewerSource} selectedVersion={selected} selectedAsset={asset} busy={busy}
+        <Viewer source={viewerSource} selectedVersion={selected} selectedAsset={asset} busy={locked}
           onChooseVideo={()=>sourceInput.current?.click()} onDropVideo={file=>void w.importVideo(file,'source')} onError={viewerError}
           onPreviewReady={()=>{if(error?.details.stage==='media.playback')w.clearError();}}/>
         {project.source&&<div className="version-controls">
-          <label>Version <select aria-label="Selected version" value={project.selectedVersionId??''} disabled={busy}
+          <label>Version <select aria-label="Selected version" value={project.selectedVersionId??''} disabled={locked}
             onChange={e=>{
               const v=project.versions.find(item=>item.id===e.target.value);
-              if(!v)return;
+              if(!v||locked)return;
               w.selectVersion(v);
               w.appendEvent({actor:'user',kind:'activity',title:'Preview selection',details:{version_id:v.id,name:v.name}});
               void consultation.captureSelection({kind:'version_selected',
@@ -100,11 +104,11 @@ export default function App() {
             }}>
             {project.versions.map(v=><option key={v.id} value={v.id}>{v.name}{v.kind==='draft'?' (unrendered)':v.kind==='rendered'?v.candidateId?' (graded)':' (imported)':''}</option>)}
           </select></label>
-          <button disabled={busy} onClick={()=>renderInput.current?.click()}>Import render</button>
+          <button disabled={locked} onClick={()=>renderInput.current?.click()}>Import render</button>
           {selected?.kind==='rendered'&&<button onClick={()=>void downloadVideo()}>Download video</button>}
         </div>}
-        <RubricPanel state={project.backend} health={consultation.health} online={consultation.online} busy={busy}
-          sending={consultation.sending} hasSource={!!project.source} direction={direction} onDirection={setDirection}
+        <RubricPanel state={project.backend} health={consultation.health} online={consultation.online} busy={busy||!!project.pendingBackend}
+          sending={sending} hasSource={!!project.source} direction={direction} onDirection={setDirection}
           onSaveDirection={()=>w.saveDirection(direction)}
           onStart={()=>{w.saveDirection(direction);w.clearError();void consultation.start(direction);}}
           onAnswer={(id,type,response)=>{w.clearError();void consultation.answer(id,type,response);}}
@@ -114,18 +118,18 @@ export default function App() {
             catch(cause){reportError(cause,'brief.export');}
           }}/>
         <RenderPanel state={project.backend} health={consultation.health} online={consultation.online}
-          sending={consultation.sending} direction={direction}
+          sending={sending||busy||!!project.pendingBackend} direction={direction}
           onGenerate={()=>{w.clearError();void consultation.generate();}}
           onRetry={()=>{w.clearError();void consultation.retry();}} onCancel={()=>void consultation.cancel()}/>
         {project.backend?.brief&&<section className="project-feedback">
           <label htmlFor="video-feedback">Feedback on this video</label>
-          <textarea id="video-feedback" value={feedback} maxLength={4000} rows={2} onChange={e=>setFeedback(e.target.value)}
+          <textarea id="video-feedback" value={feedback} disabled={locked} maxLength={4000} rows={2} onChange={e=>setFeedback(e.target.value)}
             placeholder="Describe the change you want. This updates this video's brief even while personalization is off."/>
           <div className="actions">
-            <button disabled={busy||consultation.sending||project.backend.status==='rendering'||project.backend.status==='analyzing'||!feedback.trim()}
+            <button disabled={locked||!consultation.online||!feedback.trim()}
               onClick={()=>{void consultation.feedback({kind:'feedback',original_wording:feedback,dimension:'appearance',preference_key:'appearance'})
                 .then(saved=>{if(saved)setFeedback('');});}}>Save feedback</button>
-            {selected?.kind==='rendered'&&<button onClick={()=>void consultation.captureSelection({
+            {selected?.kind==='rendered'&&<button disabled={locked||!consultation.online} onClick={()=>void consultation.captureSelection({
               kind:'version_rejected',version_id:selected.candidateId??'client:'+selected.id,original_wording:'',
             })}>Reject selected version</button>}
           </div>
@@ -133,7 +137,8 @@ export default function App() {
         </section>}
         {project.backend?.memory_capture_error&&<p className="inline-help" role="status">Preference capture needs attention: {project.backend.memory_capture_error.message}. Current-video feedback is retained.</p>}
       </main>
-      <SessionPanel key={project.id} events={project.events} state={project.backend} onExport={exportLog}/>
+      <SessionPanel key={project.id} events={project.events} state={project.pendingBackend??project.backend} onExport={exportLog}
+        localBusy={busy} localProgress={w.progress} sending={sending} online={consultation.online}/>
     </div>
     {notice&&<p className="notice" role="status">{notice}</p>}
     {sessions&&<WorkspaceDialog mode="sessions" activeId={project.id} onClose={()=>setSessions(false)} onSelect={w.openSession} onNew={w.newSession}/>}

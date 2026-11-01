@@ -130,6 +130,14 @@ class RenderCandidate(StrictModel):
     error: dict | None = None
 
 
+class ConsultationSummary(StrictModel):
+    reason: Literal["question_selected", "question_limit", "no_candidates", "no_valid_candidates"]
+    message: str
+    model_explanation: str = ""
+    proposed_count: int = Field(ge=0)
+    rejected_count: int = Field(ge=0)
+
+
 class State(StrictModel):
     schema_version: int = 1
     id: str
@@ -143,6 +151,7 @@ class State(StrictModel):
     preview: Preview | None = None
     analysis: SceneAnalysis | None = None
     question: Candidate | None = None
+    consultation: ConsultationSummary | None = None
     brief: CreativeBrief | None = None
     request: str = ""
     answered_count: int = 0

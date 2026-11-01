@@ -28,7 +28,16 @@ Do not write editing parameters, claims of verified artistic quality, or instruc
 alter factual identity. It is fine to return zero candidates. Do not repeat questions.
 A system controller will decide which ONE question to ask. Output only the requested schema.
 Extract explicit preservation constraints as exact quotes from user_request in explicit_constraints.
-Never invent or paraphrase those quotes. Normally ask 0-3 questions. A clear request needs none.
+Never invent or paraphrase those quotes. Ask one useful question at a time, within rubric_budget_remaining.
+After each answer, reconsider the remaining choices using previous_decisions and the full chosen outcome.
+Do not prepare a fixed sequence or ask every dimension. A sufficiently specific request may need none.
+Words such as cinematic, cold, or dark express a direction; they do not necessarily resolve treatment
+strength, saturation, subject readability or preservation tradeoffs. If alternative supported outcomes
+still materially differ and the user has not chosen between them, propose the most useful clarification.
+Do not repeat a tradeoff already answered or explicitly settled by the request.
+When returning zero candidates, provide completion_reason: a short user-facing explanation of why
+no further supported preference decision needs clarification. Summarize the result, not private reasoning.
+Do not present unavailable tools as resolved user choices; report observation/knowledge gaps separately.
 Return at most three concise candidates. Keep each question and explanation short.
 Read previous_decisions, including the full question, alternatives, and chosen outcome.
 Do not re-open the same visual preference under a new target_key or a different control.
@@ -88,6 +97,7 @@ def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=Non
         "event": "muse_proposal",
         "model": model,
         "candidate_count": len(result.candidates),
+        "completion_reason": result.completion_reason,
         "usage": completion.usage.model_dump() if completion.usage else None,
     })
     return result

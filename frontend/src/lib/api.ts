@@ -32,6 +32,8 @@ export type BackendState = {
   preview:null|{url:string;width:number;height:number;duration:number;bytes:number};
   analysis:null|{summary:string;caveats:string[]};
   question:Question|null;brief:Brief|null;events:SessionEvent[];
+  consultation?:null|{reason:'question_selected'|'question_limit'|'no_candidates'|'no_valid_candidates';
+    message:string;model_explanation:string;proposed_count:number;rejected_count:number};
   error:null|{code:string;message:string;action:string;details:ErrorDetails};
   candidates?:RenderCandidate[];
   selected_candidate_id?:string|null;
@@ -83,6 +85,11 @@ export function parseBackend(value:unknown):BackendState {
   if(value.error!==null&&(!record(value.error)||!text(value.error.code)||!text(value.error.message)
     ||!text(value.error.action)||!details(value.error.details)))return invalidResponse();
   if(value.status==='awaiting_answer'&&!value.question)return invalidResponse();
+  if(value.consultation!==undefined&&value.consultation!==null&&(!record(value.consultation)
+    ||!['question_selected','question_limit','no_candidates','no_valid_candidates'].includes(value.consultation.reason as string)
+    ||!text(value.consultation.message)||!text(value.consultation.model_explanation)
+    ||!Number.isInteger(value.consultation.proposed_count)||Number(value.consultation.proposed_count)<0
+    ||!Number.isInteger(value.consultation.rejected_count)||Number(value.consultation.rejected_count)<0))return invalidResponse();
   if(value.status==='brief_ready'&&!value.brief)return invalidResponse();
   if(['ready','awaiting_answer','brief_ready','rendering','render_ready'].includes(value.status as string)&&(!value.source||!value.preview))return invalidResponse();
   if(value.candidates!==undefined&&(!Array.isArray(value.candidates)||!value.candidates.every(c=>{

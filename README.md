@@ -53,6 +53,8 @@ For a frontend build preview, run npm run build and npm run preview inside front
 
 Default question budget: three, with a hard maximum of five. A clear request can receive zero questions. The five rubric dimensions are internal coverage categories.
 
+Questions are adaptive: one question → save your answer → reevaluate remaining choices → ask one useful follow-up or finish. Follow-ups reuse cached video observations and include earlier questions, alternatives and chosen outcomes. The app does not ask five questions in one batch or render after every answer. Broad look words do not automatically settle treatment strength or preservation tradeoffs.
+
 Existing browser-only sessions remain compatible. Use **Prepare source** to upload their saved original and connect to the backend.
 
 ## Recovery and persistence
@@ -81,6 +83,12 @@ Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and por
 - The base global tool supports SDR display-domain contrast, saturation and gamma. Local grading, relighting, reconstruction and shot matching are unavailable.
 - Imported renders can be compared when dimensions and duration match; imported outputs have no verified recipe provenance.
 - A global-grade render path is connected to the brief. Autonomous review, localized edits and a broader final-delivery pipeline remain outside this implementation; media checks do not establish aesthetic quality or preservation.
+
+## Run dashboard
+
+The sidebar has **Progress** and **Session log** tabs. Progress shows real source-preparation, video-analysis, clarification, brief and optional-grade stages. It distinguishes processing from waiting for your answer, and uses an indeterminate indicator rather than an estimated percentage. The brief records whether questioning ended because no questions were proposed, validation rejected candidates, or the configured limit was reached. New zero-question responses include a short Muse explanation when supplied; older sessions without one are labeled accordingly.
+
+Importing/replacing media, switching sessions, renaming, changing versions/preferences, and submitting direction/feedback or another generation are disabled during conflicting processing or command submission. Cancel remains available for active work until cancellation is requested. Playback, dashboard tabs and log export remain usable. Controls unlock when processing finishes, fails or is cancelled.
 
 ## Token usage
 

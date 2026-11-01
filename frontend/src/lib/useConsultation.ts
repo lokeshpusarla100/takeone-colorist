@@ -9,8 +9,12 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
   const [health,setHealth]=useState<api.Health|null>(null);
   const [online,setOnline]=useState(false);
   const [sending,setSending]=useState(false);
+  const [selecting,setSelecting]=useState(false);
+  const [cancelling,setCancelling]=useState(false);
   const [refresh,setRefresh]=useState(0);
   const inFlight=useRef(false);
+  const selectionInFlight=useRef(false);
+  const cancelInFlight=useRef(false);
   const reported=useRef('');
   const current=useRef(project);current.current=project;
   useEffect(()=>{
@@ -55,7 +59,7 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
   },[project?.backend?.id,refresh,apply,online]);
   const send=async(kind:'analyze'|'answers'|'retry'|'render'|'feedback',body:Record<string,unknown>)=>{
     const source=current.current;
-    if(!source?.backend||inFlight.current)return false;
+    if(!source?.backend||inFlight.current||selectionInFlight.current||cancelInFlight.current||api.activeJob(source.backend))return false;
     inFlight.current=true;setSending(true);
     const id=source.backend.id;
     try{
@@ -68,11 +72,15 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
     }finally{inFlight.current=false;setSending(false);setRefresh(n=>n+1);}
   };
   const stop=async()=>{
-    if(!project?.backend)return;
-    try{apply(await api.cancel(project.backend.id));setRefresh(n=>n+1);}
-    catch(cause){reportError(cause,'backend.cancel');}
+    const source=current.current;
+    if(!source?.backend||!api.activeJob(source.backend)||cancelInFlight.current||source.backend.stage==='cancelling')return;
+    const id=source.backend.id;
+    cancelInFlight.current=true;setCancelling(true);
+    try{const state=await api.cancel(id);if(current.current?.backend?.id===id)apply(state);setRefresh(n=>n+1);}
+    catch(cause){if(current.current?.backend?.id===id)reportError(cause,'backend.cancel');}
+    finally{cancelInFlight.current=false;setCancelling(false);}
   };
-  return {health,online,sending,
+  return {health,online,sending,selecting,cancelling,
     start:(request:string)=>send('analyze',{request}),
     answer:(questionId:string,responseType:string,response:string)=>send('answers',{
       answer:{question_id:questionId,response_type:responseType,response},
@@ -82,11 +90,13 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
     feedback:(evidence:Record<string,unknown>)=>send('feedback',{evidence}),
     captureSelection:async(evidence:Record<string,unknown>)=>{
       const source=current.current;
-      if(!source?.backend)return;
+      if(!source?.backend||api.activeJob(source.backend)||selectionInFlight.current||inFlight.current||cancelInFlight.current)return;
+      selectionInFlight.current=true;setSelecting(true);
       try{
         const state=await api.command(source.backend.id,'feedback',{revision:source.backend.revision,evidence});
         if(current.current?.backend?.id===state.id)apply(state);
-      }catch(cause){reportError(cause,'memory.selection');}
+      }catch(cause){if(current.current?.backend?.id===source.backend.id)reportError(cause,'memory.selection');}
+      finally{selectionInFlight.current=false;setSelecting(false);}
     },
     refresh:()=>setRefresh(n=>n+1),
     unavailable:()=>reportError(new AppError('SOURCE_NOT_PREPARED','Prepare the source before analysis.',

@@ -20,7 +20,7 @@ export default function RenderPanel({state,health,sending,online,direction,onGen
     <p className="inline-help">Generate sends four selected source frames and the saved brief to Meta. The render uses the original footage. One global treatment applies across the clip.</p>
     {changed&&<p className="inline-help">The direction has changed. Complete its updated brief before generating a grade.</p>}
     {running&&<div className="consultation-status" role="status"><span>{stageLabel(state.stage)}</span>
-      <button disabled={sending||state.stage==='cancelling'} onClick={onCancel}>Cancel render</button></div>}
+      <button disabled={sending||!online||state.stage==='cancelling'} onClick={onCancel}>Cancel render</button></div>}
     {latest&&(latest.status==='failed'||latest.status==='cancelled')&&state.status!=='render_ready'&&
       <div className="consultation-actions"><span>{latest.name}: {latest.error?.message??latest.status}</span>
         <button disabled={busy||!online} onClick={onRetry}>Retry render</button></div>}

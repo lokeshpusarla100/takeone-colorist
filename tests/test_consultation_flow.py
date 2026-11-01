@@ -78,15 +78,43 @@ def test_zero_questions_has_explicit_saved_reason_without_filling_budget(setting
         assert saved['consultation']==state['consultation']
 
 
-def test_validator_rejections_are_distinguished_from_no_proposal(settings,video):
+def test_invalid_tool_contract_fails_explicitly_instead_of_completing_consultation(settings,video):
     muse=FakeMuse();muse.operation='unsupported_mask'
     with client(settings,muse) as c:
         state=start(c,upload(c,video))
-        assert state['status']=='brief_ready'
-        assert state['consultation']['reason']=='no_valid_candidates'
-        assert state['consultation']['proposed_count']==1
-        assert state['consultation']['rejected_count']==1
-        assert state['consultation']['model_explanation']==''
+        assert state['status']=='failed' and state['brief'] is None
+        assert state['error']['code']=='RUBRIC_PROTOCOL_ERROR'
+        assert 'unavailable' in state['error']['details']['contract_error']
+        attempt=state['question_proposals'][-1]
+        assert attempt['proposal']['candidates'][0]['id']=='q1'
+        assert attempt['selected_id'] is None and attempt['error']
+        muse.operation='global_grade'
+        retried=c.post('/api/projects/'+state['id']+'/retry',json={'command_id':str(uuid4()),'revision':state['revision']})
+        assert retried.status_code==202
+        ready=wait(c,state['id'])
+        assert ready['status']=='awaiting_answer' and muse.analysis_calls==1
+        assert len(ready['question_proposals'])==2
+
+
+def test_same_topic_followup_is_shown_and_full_proposals_survive_export_state(settings,video):
+    class Followup(FakeMuse):
+        def propose(self,session):
+            if not session.answers:return super().propose(session)
+            self.proposal_calls+=1
+            first=session.questions[0]
+            return Proposal(candidates=[Candidate.model_validate({**first.model_dump(mode='json'),
+                'id':'followup','preference_family':'contrast_texture',
+                'question':'Keep dark shadow detail with gentle contrast, or use punchier texture?',
+            })])
+    with client(settings,Followup()) as c:
+        first=start(c,upload(c,video))
+        second=answer(c,first,'natural')
+        assert second['status']=='awaiting_answer' and second['question']['id']=='followup'
+        assert second['question']['target_key']==first['question']['target_key']
+        proposals=c.get('/api/projects/'+first['id']).json()['question_proposals']
+        assert len(proposals)==2 and proposals[-1]['selected_id']=='followup'
+        assert proposals[-1]['proposal']['candidates'][0]['question']==second['question']['question']
+        assert all(p['selection_policy']=='muse_order' for p in proposals)
 
 
 def test_question_limit_is_explained_without_another_call(settings,video):

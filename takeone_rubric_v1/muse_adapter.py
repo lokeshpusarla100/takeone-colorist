@@ -26,7 +26,10 @@ would alter the feasible edit; never introduce operations outside the provided m
 Give clear, neutral options and include only materially different intended outcomes.
 Do not write editing parameters, claims of verified artistic quality, or instructions to
 alter factual identity. It is fine to return zero candidates. Do not repeat questions.
-A system controller will decide which ONE question to ask. Output only the requested schema.
+You choose the next question. Return zero or ONE candidate; it will be shown directly, without
+Python ranking or semantic duplicate filtering. Multiple candidates are legacy-compatible only;
+if supplied, the first is the chosen question. Output only the requested schema.
+Give each follow-up a new question ID. Option IDs must be unique within that question.
 Extract explicit preservation constraints as exact quotes from user_request in explicit_constraints.
 Never invent or paraphrase those quotes. Ask one useful question at a time, within rubric_budget_remaining.
 After each answer, reconsider the remaining choices using previous_decisions and the full chosen outcome.
@@ -38,7 +41,9 @@ Do not repeat a tradeoff already answered or explicitly settled by the request.
 When returning zero candidates, provide completion_reason: a short user-facing explanation of why
 no further supported preference decision needs clarification. Summarize the result, not private reasoning.
 Do not present unavailable tools as resolved user choices; report observation/knowledge gaps separately.
-Return at most three concise candidates. Keep each question and explanation short.
+Assess Meaning, Appearance, Attention, Boundaries, Continuity and the technical envelope each turn.
+Use that assessment to choose a relevant unresolved decision; do not force one question per category.
+Tool limits are constraints, not user preferences. Keep each question and explanation short.
 Read previous_decisions, including the full question, alternatives, and chosen outcome.
 Do not re-open the same visual preference under a new target_key or a different control.
 Use preference_family consistently. tonal_readability covers dark/moody/deep shadows versus
@@ -70,7 +75,7 @@ def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=Non
         "answers": [a.model_dump() for a in session.answers],
         "previous_decisions": session.answered_decisions(),
         "current_video_feedback": session.inputs.project_feedback,
-        "resolved_preference_keys": sorted(session.resolved_keys),
+        "previously_addressed_keys": sorted(session.resolved_keys),
         "rubric_budget_remaining": session.max_decisions - session.asked_count,
     }
     if context_filter:

@@ -629,29 +629,41 @@ class Service:
                                          for v in self.prompt_gate.default_data(state.id)]
         proposal_usage = None
         proposal_call = None
+        proposal_request_id = None
         if session.asked_count >= session.max_decisions:
             from takeone_rubric_v1.rubric import Proposal
             proposal = Proposal()
         else:
             request_id = self.count_call(project_id, "Selecting a useful clarification")
+            proposal_request_id = request_id
             proposal_call = self.store.get(project_id).model_calls
             event_start = len(session.events)
             proposal = self.provider.propose(session)
             proposal_usage = next((e.get("usage") for e in reversed(session.events[event_start:])
                                    if e.get("event") == "muse_proposal"), None)
             self.record_usage(project_id,request_id,"rubric",proposal_usage,proposal_call)
+            self.mutate(project_id,lambda s:s.question_proposals.append({
+                "request_id":request_id,"proposal":proposal.model_dump(mode="json"),
+                "selection_policy":"muse_order","selected_id":None,"error":None}))
         self.check_cancel(cancel)
         rejection_start = len(session.rejected)
-        question = session.next_question(proposal)
+        try:
+            question = session.next_question(proposal)
+        except ValueError as error:
+            detail=str(error)
+            def invalid(s):
+                if proposal_request_id:
+                    next(p for p in s.question_proposals if p['request_id']==proposal_request_id)['error']=detail
+            self.mutate(project_id,invalid)
+            raise Problem('RUBRIC_PROTOCOL_ERROR','Muse returned a question with an invalid data or tool reference.',
+                          'Retry the saved question step. Answers are kept and no brief was finalized.',502,contract_error=detail)
         if question:
             reason,message="question_selected","A clarification is ready. Your answer will inform the next decision."
         elif session.asked_count >= session.max_decisions:
             reason,message="question_limit","The question limit was reached. No additional clarification call was made."
-        elif not proposal.candidates:
+        else:
             reason="no_candidates"
             message="Muse proposed no further clarification questions." if session.answers else "Muse proposed no clarification questions."
-        else:
-            reason,message="no_valid_candidates","The proposed questions did not pass evidence, feasibility or repetition checks."
         summary=ConsultationSummary(reason=reason,message=message,
             model_explanation=proposal.completion_reason if reason=="no_candidates" else "",
             proposed_count=len(proposal.candidates),rejected_count=len(session.rejected)-rejection_start)
@@ -665,6 +677,8 @@ class Service:
         def selected(state):
             state.rubric = session.snapshot()
             state.question = question
+            if proposal_request_id:
+                next(p for p in state.question_proposals if p['request_id']==proposal_request_id)['selected_id']=question.id if question else None
             state.consultation = summary
             state.brief = brief
             if brief:

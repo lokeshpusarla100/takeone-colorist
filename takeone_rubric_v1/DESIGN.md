@@ -12,12 +12,12 @@
                                         |
                          [Muse Spark 1.3: propose forks]
                                         |
-                        [Deterministic rubric controller]
-                          |  reject invented evidence
-                          |  reject non-preference gaps
-                          |  reject unsupported operations
-                          |  reject duplicate/resolved questions
-                          |  select highest-consequence fork
+                        [Session + data/tool contract checks]
+                          |  known evidence/tool IDs
+                          |  unique question/option IDs
+                          |  preserve exact answers
+                          |  enforce interaction budget
+                          |  show Muse's selected question
                                         |
                            [one question OR no question]
                                         |
@@ -71,28 +71,25 @@ Request **structured** `Proposal` JSON (official `muse-spark-1.3` structured-out
 
 Muse may return zero candidates. Observation gaps require more visual/signal inspection; execution gaps require technical trials; knowledge gaps may justify reference lookup. **Only missing preferences become rubric questions.**
 
-When proposing zero candidates, Muse is asked for completion_reason: a concise user-facing explanation of why no supported preference fork remains. It is an outcome summary, not private reasoning, and never becomes an editing directive or preference-memory event. The application distinguishes this case from questions rejected by validation and stopping at the configured limit. Old responses without an explanation remain readable.
+When proposing zero candidates, Muse is asked for completion_reason: a concise user-facing explanation of why no supported preference fork remains. It is an outcome summary, not private reasoning, and never becomes an editing directive or preference-memory event. Questioning can also stop at the configured limit. Invalid data/tool contracts fail explicitly instead of becoming a completed consultation. Historical validation-rejection stops remain readable.
 
-Broad adjectives alone do not necessarily settle treatment strength, saturation, readability or preservation tradeoffs. The prompter considers such remaining choices against actual capabilities and prior answers. It may propose several internal alternatives, but the controller presents only one question; the next call happens after its answer, not as a fixed question sequence.
+Broad adjectives alone do not necessarily settle treatment strength, saturation, readability or preservation tradeoffs. Muse considers those choices and the six coverage areas against actual capabilities and prior answers, and is asked to return zero or one question. Legacy multi-candidate lists use its first item. The next call happens after the answer, not as a fixed sequence.
 
 ### Controller: `RubricSession`
 
-- Reject candidates unsupported by listed evidence or capability IDs.
-- Reject candidates with identical outcomes or a preference slot already answered.
-- Rank eligible candidates using ordinal preservation risk → visual impact → answerability. This ranking is a **heuristic, not calibrated value of information**.
-- Select **one** candidate; UI shows the question/options plus *Other*, *Skip*, *You decide*.
-- After an answer, store exact wording/selected outcome with provenance, mark the slot resolved, and request **fresh candidates** if more input is genuinely useful. Do not ask a pre-generated batch.
-- Stop if no eligible candidate remains or the question budget is exhausted.
+- Check known evidence/capability/memory IDs, unique question/option IDs and nonempty required fields. Invalid contracts raise an error.
+- Display Muse's first supplied question. Python does not infer overlap, compare outcome meaning, rank candidates or suppress repeated topics.
+- After an answer, store exact wording/selected outcome with provenance and ask Muse to reassess the remaining choices. Its prompt owns relevance, repetition and priority.
+- Stop when Muse supplies no question or the configured question budget is exhausted.
 - `brief()` creates a typed `CreativeBrief` carrying approved outcomes, explicit constraints, default protections, technical limits, answer provenance and review rule. Downstream operations remain *suggestions* until a real renderer verifies them.
 
 ### Outputs
 
 Follow-up requests now include the previous question, all alternatives, response type and selected
 outcome. Question history persists in snapshots; older snapshots use their saved directives and
-decision forks as a fallback. The controller checks preference families within the same scope,
-so renaming a darkness/detail choice from contrast to gamma does not create a new user decision.
-Different regional scopes and genuinely different color or texture preferences remain eligible.
-The legacy English text fallback is deliberately narrow; this is not a universal paraphrase classifier.
+decision forks as a fallback. Preference-family tags are passed through only when supplied by the
+model; there is no English keyword inference or same-scope family rejection. Muse decides whether
+a follow-up repeats an earlier choice. A new question needs a unique protocol ID, but may reuse a topic.
 
 The model is instructed to ask about visible outcomes, use ordinary language and stop when useful
 preferences are resolved. No extra model verification call is added. Briefs coordinate related
@@ -106,7 +103,7 @@ The brief passes to both the **Colorist** (plans edits) and **Critic** (checks c
 
 ### Diagnostic events
 
-`RubricSession.events` records `question_selected`, `answer`, `stop`, and (when the Meta adapter is used) `muse_proposal`, including usage metadata when available. `RubricSession.rejected` records candidate IDs and rejection reasons. The larger application may relay these as SSE events; this package does not run a server or store persistent histories.
+`RubricSession.events` records questions, answers, stops and proposal usage. Legacy rejection history and literal-constraint/memory-provenance checks remain readable. The application persists full structured proposals and selected IDs or contract errors in State.question_proposals, included in exports. No private reasoning content is requested or stored. This package does not itself run a server.
 
 ## Example behavior: rainy motorcycle clip
 
@@ -119,7 +116,7 @@ Muse proposes:
 - **Attention fork:** keep motorcycle readable vs permit silhouette.
 - **Unsupported fork:** add physically accurate light reflections to the motorcycle using 3D relighting.
 
-Controller rejects the unsupported fork and can prioritize the attention question if preserving recognizability is important. When the user selects "Readable", the brief records this as a user-approved *outcome*, not a hardcoded `+0.6 EV` adjustment.
+Muse chooses the attention question when preserving recognizability makes it most useful. An unavailable tool reference produces an explicit contract error rather than a Python-selected replacement or completed brief. When the user selects "Readable", the brief records that outcome with provenance rather than inventing an exposure adjustment.
 
 The colorist later determines feasible adjustments; the critic checks readability against the same brief, on moving footage.
 
@@ -147,7 +144,7 @@ Prepared future fields include Candidate.memory_refs and memory_conflict, Propos
 
 ## Verification status
 
-- Offline automated tests validate selection, schema parsing, answer provenance, unsupported operations, missing evidence, duplication and budget.
+- Offline checks verify model-order selection, acceptance of overlapping topics/wording, schema parsing, answer provenance, tool/ID contract errors, full proposal persistence and the question ceiling. They do not prove live creative quality.
 - Preference integration tests use local fixtures and mocked SDK requests, with no billable calls. They verify prompt isolation and current-video feedback, not live model compliance, question relevance, or visual-quality improvement.
 - Meta API docs: https://dev.meta.ai/docs/cookbook/structured-output and https://dev.meta.ai/docs/video-understanding
 - Research basis: user-supplied report *Deep Research Mission — Designing a Universal Creative-Direction Rubric for Autonomous Cinematic Color Grading*, particularly its “Final universal rubric”, “Adaptive question selection”, “Executable creative direction” and “Recommended v1” sections.

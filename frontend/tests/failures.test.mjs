@@ -200,6 +200,9 @@ test('malformed or inconsistent backend state is rejected before it reaches stor
   assert.equal(parseBackend({...state,consultation}).consultation.reason,'no_candidates');
   assert.throws(()=>parseBackend({...state,consultation:{...consultation,reason:'invented'}}),{code:'API_RESPONSE_INVALID'});
   assert.throws(()=>parseBackend({...state,consultation:{...consultation,proposed_count:-1}}),{code:'API_RESPONSE_INVALID'});
+  const proposal={request_id:crypto.randomUUID(),selection_policy:'muse_order',proposal:{candidates:[]},selected_id:null,error:null};
+  assert.equal(parseBackend({...state,question_proposals:[proposal]}).question_proposals.length,1);
+  assert.throws(()=>parseBackend({...state,question_proposals:[{...proposal,request_id:'bad'}]}),{code:'API_RESPONSE_INVALID'});
 });
 test('cancellation during JSON decoding is reported as cancellation',async t=>{
   const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});

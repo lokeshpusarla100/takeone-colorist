@@ -39,6 +39,8 @@ export type BackendState = {
   selected_candidate_id?:string|null;
   owner_id?:string|null;profile_id?:string;preference_context?:Record<string,string>;
   memory_capture_error?:{message:string}|null;
+  question_proposals?:{request_id:string;selection_policy:string;selected_id:string|null;error:string|null;
+    proposal:Record<string,unknown>}[];
   sam_calls?:number;
   segmentations?:{id:string;concept:string;model:string;status:'queued'|'preparing'|'streaming'|'overlay'|'ready'|'empty'|'failed'|'cancelled';
     duration_seconds?:number|null;received_frames?:number;
@@ -97,6 +99,9 @@ export function parseBackend(value:unknown):BackendState {
     ||!text(value.consultation.message)||!text(value.consultation.model_explanation)
     ||!Number.isInteger(value.consultation.proposed_count)||Number(value.consultation.proposed_count)<0
     ||!Number.isInteger(value.consultation.rejected_count)||Number(value.consultation.rejected_count)<0))return invalidResponse();
+  if(value.question_proposals!==undefined&&(!Array.isArray(value.question_proposals)||!value.question_proposals.every(p=>
+    record(p)&&uuid(p.request_id)&&p.selection_policy==='muse_order'&&record(p.proposal)
+    &&(p.selected_id===null||text(p.selected_id))&&(p.error===null||text(p.error)))))return invalidResponse();
   if(value.status==='brief_ready'&&!value.brief)return invalidResponse();
   if(['ready','awaiting_answer','brief_ready','rendering','render_ready','segmenting'].includes(value.status as string)&&(!value.source||!value.preview))return invalidResponse();
   if(value.segmentations!==undefined&&(!Array.isArray(value.segmentations)||!value.segmentations.every(s=>{

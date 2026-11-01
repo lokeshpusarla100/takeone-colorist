@@ -1,13 +1,12 @@
 """Take One creative-direction rubric v1.
 
 Scope: preference elicitation + brief assembly; never edits video or authorizes
-unsupported operations. The Muse adapter supplies proposals. This module validates
-and ranks them, records user decisions and exports a traceable creative brief.
+unsupported operations. The Muse adapter supplies proposals. This module checks data/tool contracts,
+records user decisions and exports a traceable creative brief. Muse chooses the next question.
 """
 from __future__ import annotations
 
 from enum import Enum
-import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -88,7 +87,7 @@ class Option(StrictModel):
 class Candidate(StrictModel):
     id: str
     dimension: Dimension
-    target_key: str  # semantic slot; avoids re-asking an already resolved preference
+    target_key: str  # Model-supplied topic metadata; not a Python rejection key.
     preference_family: PreferenceFamily = PreferenceFamily.OTHER
     scope: str
     question: str
@@ -161,47 +160,9 @@ DEFAULT_PROTECTIONS = [
 ]
 
 
-def normalized(value: str) -> str:
-    return re.sub(r"[\W_]+", " ", value.casefold()).strip()
-
-
-def infer_family(text: str) -> str | None:
-    """Narrow fallback for legacy questions without a model-supplied family."""
-    text = normalized(text)
-    dark = re.search(r"\b(dark\w*|shadow\w*|black\w*|moody|silhouette\w*)\b", text)
-    detail = re.search(r"\b(detail\w*|visib\w*|readab\w*|lift\w*|bright\w*|gamma|reveal\w*)\b", text)
-    if dark and detail:
-        return PreferenceFamily.TONAL_READABILITY.value
-    if re.search(r"\b(saturat\w*|muted|vibran\w*)\b", text):
-        return PreferenceFamily.COLOR_INTENSITY.value
-    if re.search(r"\b(white balance|color temperature|colour temperature|warmth|tint)\b", text):
-        return PreferenceFamily.COLOR_BALANCE.value
-    if re.search(r"\bcontrast\w*\b", text):
-        return PreferenceFamily.CONTRAST_TEXTURE.value
-    return None
-
-
-def families(candidate: Candidate) -> set[str]:
-    explicit = candidate.preference_family.value
-    result = set() if explicit == "other" else {explicit}
-    if explicit in {"other", "tonal_readability", "contrast_texture"}:
-        text = " ".join([candidate.question, candidate.decision_fork,
-                         *(o.intended_outcome for o in candidate.options)])
-        inferred = infer_family(text)
-        if inferred and (explicit == "other" or inferred == "tonal_readability"):
-            result.add(inferred)
-    return result
-
-
-def scope_key(scope: str, operations: list[str]) -> str:
-    # The current global tool applies one treatment to the whole clip.
-    if set(operations) == {"global_grade"}:
-        return "clip"
-    return normalized(scope)
-
 
 class RubricSession:
-    """Deterministic controller: model proposes; controller permits or rejects."""
+    """One-question session and provenance. Creative selection belongs to Muse."""
 
     def __init__(self, inputs: RubricInput, max_decisions: int = 5):
         if not 0 <= max_decisions <= 5:
@@ -232,12 +193,12 @@ class RubricSession:
             operations = (sorted({op for o in question.options for op in o.required_operations}) if question
                           else directive.operations_are_suggestions if directive else [])
             scope = question.scope if question else directive.scope if directive else ""
-            groups = families(question) if question else {infer_family(" ".join([fork, outcome or ""]))} - {None}
+            groups = [question.preference_family.value] if question and question.preference_family != PreferenceFamily.OTHER else []
             decisions.append({
                 "question_id": answer.question_id,
                 "question": question.question if question else "",
                 "target_key": question.target_key if question else "",
-                "scope": scope, "scope_key": scope_key(scope, operations),
+                "scope": scope, "required_operations": operations,
                 "preference_families": sorted(groups),
                 "decision_fork": fork, "response_type": answer.response_type,
                 "response": answer.response, "selected_outcome": outcome,
@@ -245,62 +206,32 @@ class RubricSession:
             })
         return decisions
 
-    def _validate_candidate(self, c: Candidate) -> str | None:
-        if c.uncertainty_type != "preference":
-            return "not a preference uncertainty"
-        if set(c.memory_refs) - {m.id for m in self.inputs.memory_defaults}:
-            return "question cites unavailable preference memory"
-        if c.memory_conflict and not c.memory_refs:
-            return "memory conflict question has no supporting memory"
-        if c.target_key in self.resolved_keys:
-            return "preference already resolved"
+    def _check_question_contract(self, c: Candidate) -> None:
+        """Data/tool boundary only; never infer creative overlap, relevance or priority."""
         if c.id in {a.question_id for a in self.answers}:
-            return "question ID already used"
-        if c.interaction == "preview" and not self.inputs.capabilities.supports_look_previews:
-            return "preview operation is not available"
-        if not c.decision_fork.strip():
-            return "no stated consequence for the edit"
-        observations = {o.id for o in self.inputs.observations} | {"user_request"}
-        if not set(c.evidence_ids).issubset(observations):
-            return "question cites missing scene/user evidence"
+            raise ValueError("question ID already used; a follow-up needs a unique ID")
         if len({o.id for o in c.options}) != len(c.options):
-            return "repeated option IDs"
-        outcomes = {o.intended_outcome.strip().casefold() for o in c.options}
-        if len(outcomes) < 2 or "" in outcomes:
-            return "options do not lead to distinct editing goals"
-        if not any(o.required_operations for o in c.options):
-            return "no executable edit operation described for this decision"
-        capabilities = set(self.inputs.capabilities.operations)
-        if any(not set(o.required_operations).issubset(capabilities) for o in c.options):
-            return "an option requires unavailable editing operations"
-        if any(not o.label.strip() for o in c.options) or not c.question.strip():
-            return "empty question or option label"
-        if not c.target_key.strip() or not c.scope.strip():
-            return "missing target or scope"
-        candidate_scope = scope_key(c.scope, [op for o in c.options for op in o.required_operations])
-        candidate_families = families(c)
-        candidate_outcomes = {normalized(o.intended_outcome) for o in c.options}
-        for decision in self.answered_decisions():
-            if not candidate_scope or candidate_scope != decision["scope_key"]:
-                continue
-            overlap = candidate_families.intersection(decision["preference_families"])
-            if overlap:
-                return "preference already covered in this scope: " + ", ".join(sorted(overlap))
-            previous_outcomes = {normalized(o["intended_outcome"]) for o in decision["options"]}
-            if previous_outcomes and previous_outcomes == candidate_outcomes:
-                return "same outcome choices already presented in this scope"
-        if not c.preservation_risk and not c.memory_conflict:
-            covered = {m.key for m in self.inputs.memory_defaults if not m.conflicted}
-            if c.target_key in covered or candidate_families.intersection(covered):
-                return "low-risk preference covered by an applicable remembered default"
-        return None
+            raise ValueError("option IDs must be unique")
+        if any(not value.strip() for value in [c.id,c.question,c.scope,c.target_key,c.decision_fork,
+                                               *(o.label for o in c.options),*(o.intended_outcome for o in c.options)]):
+            raise ValueError("required question fields cannot be empty")
+        if set(c.evidence_ids) - ({o.id for o in self.inputs.observations} | {"user_request"}):
+            raise ValueError("question cites an unknown evidence ID")
+        if any(set(o.required_operations) - set(self.inputs.capabilities.operations) for o in c.options):
+            raise ValueError("question references an unavailable tool operation")
+        if c.interaction == "preview" and not self.inputs.capabilities.supports_look_previews:
+            raise ValueError("preview interaction is unavailable")
+        if set(c.memory_refs) - {m.id for m in self.inputs.memory_defaults}:
+            raise ValueError("question cites unavailable preference memory")
+        if c.memory_conflict and not c.memory_refs:
+            raise ValueError("memory conflict reference is missing")
 
     def next_question(self, proposal: Proposal) -> Candidate | None:
         """Choose at most one *consequential* question per cycle; never batch ask."""
         if self.pending is not None:
             raise RuntimeError("answer/skip the pending question before proposing another")
         allowed_memories = {m.id for m in self.inputs.memory_defaults if not m.conflicted}
-        self.blocked_memory_ids.update(ref for c in proposal.candidates if c.memory_conflict for ref in c.memory_refs
+        self.blocked_memory_ids.update(ref for c in proposal.candidates[:1] if c.memory_conflict for ref in c.memory_refs
                                        if ref in {m.id for m in self.inputs.memory_defaults})
         allowed_memories -= self.blocked_memory_ids
         self.used_memory_ids.update(set(proposal.memory_used_ids) & allowed_memories)
@@ -315,29 +246,13 @@ class RubricSession:
         if self.asked_count >= self.max_decisions:
             self.events.append({"event": "stop", "reason": "question budget exhausted"})
             return None
-        approved: list[Candidate] = []
-        for candidate in proposal.candidates:
-            reason = self._validate_candidate(candidate)
-            if reason:
-                self.rejected.append({"candidate_id": candidate.id, "reason": reason})
-            else:
-                approved.append(candidate)
-        if not approved:
-            self.events.append({"event": "stop", "reason": "no actionable preference fork",
+        if not proposal.candidates:
+            self.events.append({"event": "stop", "reason": "Muse proposed no further question",
                                 "explanation":proposal.completion_reason})
             return None
-        order = {Level.HIGH: 3, Level.MEDIUM: 2, Level.LOW: 1}
-        # Ordinal heuristic, NOT calibrated expected value of information.
-        approved.sort(
-            key=lambda c: (
-                int(c.preservation_risk),
-                order[c.impact],
-                order[c.answerability],
-                c.id,
-            ),
-            reverse=True,
-        )
-        selected = approved[0]
+        # Muse owns selection/order. No Python ranking, topic inference or semantic rejection.
+        selected = proposal.candidates[0]
+        self._check_question_contract(selected)
         self.pending = selected
         self.questions.append(selected.model_copy(deep=True))
         self.asked_count += 1
@@ -372,7 +287,7 @@ class RubricSession:
             raise ValueError("invalid response type")
         if not any(q.id == c.id for q in self.questions):
             self.questions.append(c.model_copy(deep=True))
-        # Even skips are marked resolved for now; re-open only explicitly.
+        # Legacy snapshot field records addressed keys; it no longer rejects follow-ups.
         self.resolved_keys.add(c.target_key)
         self.answers.append(answer)
         self.events.append({"event": "answer", "id": c.id, "kind": answer.response_type})

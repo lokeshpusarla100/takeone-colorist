@@ -46,7 +46,7 @@ For a frontend build preview, run npm run build and npm run preview inside front
 1. **Import video.** The unchanged original goes to the local backend. FFprobe records metadata/checksum; FFmpeg creates a VP9 display preview and a smaller silent MP4 for analysis.
 2. **Enter creative direction.** Describe the changes and preservation requirements. Leave blank to delegate a conservative direction.
 3. **Start analysis.** This sends the silent analysis video and request to Meta. Uploading or typing alone does not call Muse.
-4. **Clarify if needed.** The existing rubric validates evidence and available operations, then selects one question. Answer using an option, free text, Skip or You decide.
+4. **Clarify if needed.** Muse chooses the next question using the request and prior answers. The app checks the data and tool references, then shows it directly. Answer using an option, free text, Skip or You decide.
 5. **Review the brief.** The original request, approved outcomes, preservation constraints and unresolved limitations are saved. Download the brief or full session log.
 6. **Generate when ready.** Generate graded video sends selected source frames and the saved brief to Meta for a bounded recipe, then renders from the original. This is a separate action and may incur model usage.
 7. **Compare and revise.** Select a version, compare with Original, and download the chosen render. Save feedback to revise the current brief; generate again explicitly to apply that revision.
@@ -54,6 +54,8 @@ For a frontend build preview, run npm run build and npm run preview inside front
 Default question budget: three, with a hard maximum of five. A clear request can receive zero questions. The five rubric dimensions are internal coverage categories.
 
 Questions are adaptive: one question → save your answer → reevaluate remaining choices → ask one useful follow-up or finish. Follow-ups reuse cached video observations and include earlier questions, alternatives and chosen outcomes. The app does not ask five questions in one batch or render after every answer. Broad look words do not automatically settle treatment strength or preservation tradeoffs.
+
+Creative question selection belongs to Muse. Python keyword/topic overlap rejection and preservation/impact ranking have been removed. New outputs request zero or one question; the first question is used for legacy multi-candidate responses. Invalid data/tool references fail explicitly for retry instead of silently finishing the consultation. Full structured proposals and their selected question or error are included in session exports. See [the rule-based logic inventory](docs/RULE_BASED_LOGIC.md) for remaining policies and technical checks.
 
 Existing browser-only sessions remain compatible. Use **Prepare source** to upload their saved original and connect to the backend.
 
@@ -86,7 +88,7 @@ Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and por
 
 ## Run dashboard
 
-The sidebar has **Progress** and **Session log** tabs. Progress shows real source-preparation, video-analysis, clarification, brief and optional-grade stages. It distinguishes processing from waiting for your answer, and uses an indeterminate indicator rather than an estimated percentage. The brief records whether questioning ended because no questions were proposed, validation rejected candidates, or the configured limit was reached. New zero-question responses include a short Muse explanation when supplied; older sessions without one are labeled accordingly.
+The sidebar has **Progress** and **Session log** tabs. Progress shows real source-preparation, video-analysis, clarification, brief and optional-grade stages. It distinguishes processing from waiting for your answer, and uses an indeterminate indicator rather than an estimated percentage. Questioning finishes when Muse returns no question or the configured limit is reached. Historical sessions can retain a validator-rejection stop reason from the previous implementation. New zero-question responses include a short Muse explanation when supplied; older sessions without one are labeled accordingly.
 
 Importing/replacing media, switching sessions, renaming, changing versions/preferences, and submitting direction/feedback or another generation are disabled during conflicting processing or command submission. Cancel remains available for active work until cancellation is requested. Playback, dashboard tabs and log export remain usable. Controls unlock when processing finishes, fails or is cancelled.
 

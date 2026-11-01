@@ -185,7 +185,7 @@ This is a logical responsibility map. It does not require separate services or c
 | Component | Owns | Must not be treated as authority for |
 |---|---|---|
 | Muse visual pass | Scene descriptions, candidate subjects, visual relationships, uncertainty | Exact signal values, user preferences, guaranteed mask quality |
-| Rubric controller | Evidence/capability validation, question budget, deduplication, session state | Knowing that a listed operation will look convincing |
+| Rubric session | Data/tool contract checks, question budget, answer provenance and session state | Creative relevance, semantic repetition or priority; Muse owns those decisions |
 | User | Intent, permissions, important preservation requirements, final preference | Technical frame measurements or mask debugging |
 | Muse colorist call | Interpret brief; propose supported operations and expected outcomes | Executing arbitrary shell commands or inventing unsupported operations |
 | SAM adapter | Segmentation results, returned object/track records | Creative direction or successful compositing by itself |
@@ -300,22 +300,17 @@ Muse proposes structured candidate records containing:
 - Ordinal preservation consequence, visual impact, and answerability.
 - Interaction form: text choice or a real rendered comparison.
 
-Schema validation is necessary but insufficient. Semantic validation must also reject invalid evidence references, unsupported operations, duplicate slots, conflicting permissions, and options whose outcomes are effectively identical.
+The application checks known evidence/tool IDs, unique protocol IDs and required data. Muse owns semantic relevance, repetition, contrast between outcomes and priority. Explicit constraints must still quote the user rather than invent permission. Invalid data/tool references fail visibly; they do not silently complete the consultation.
 
 ### 7.5 Selection policy
 
-1. Extract preferences and constraints already supplied.
-2. Identify consequential unresolved forks.
-3. Remove forks resolved by a conservative default or previous answer.
-4. Reject questions promising unavailable operations.
-5. Prioritize preservation consequences, then visual impact and answerability.
-6. Ask one question.
-7. Record the response and refresh candidates.
-8. Stop when no meaningful eligible fork remains or the budget is exhausted.
+1. Give Muse the request, actual tool envelope and full previous questions/options/answers.
+2. Muse assesses all coverage areas and chooses the next useful unresolved question, or explains why none is needed.
+3. Show its question directly. Legacy multi-candidate lists use the first item in model order.
+4. Record the answer and request a fresh decision.
+5. Finish when Muse supplies no question or the configured limit is reached. Malformed/tool-invalid responses fail explicitly for retry.
 
-The ranking is an understandable heuristic. It is not a calibrated value-of-information estimator.
-
-**Actionability rule:** The controller should receive an explanation of how answer A and answer B would lead to meaningfully different, feasible treatments. If no difference can be stated, do not ask.
+Python keyword/family duplicate rejection, global-scope normalization and preservation/impact ranking have been removed at the user's request. Full proposals and their selected ID or contract error are saved for audit/export. Muse is instructed to avoid repetitions; code no longer judges equivalence. See docs/RULE_BASED_LOGIC.md for the remaining policies, heuristics and execution checks.
 
 ### 7.6 Interaction rules
 
@@ -323,7 +318,7 @@ Normally ask **0–3 consequential questions**, with a hard consultation budget 
 
 Each question supports selectable options, free text/Other, Skip, and You decide. Skip does not authorize an unrestricted transformation. Delegation uses visible defaults within existing boundaries.
 
-**Implemented interaction (1 November):** The controller displays one question, saves its answer, and requests fresh candidates with the previous question/options/outcome before selecting a follow-up. The configured limit is a ceiling, not a batch size or mandatory count. The prompter checks for unresolved supported tradeoffs even when broad look adjectives were provided. Zero-candidate responses request a concise user-facing completion reason; the project persists that separately from creative directives. Progress distinguishes no proposal, validation rejection and question-limit completion. These mechanics are fixture-tested; revised live Muse question quality requires separate evaluation.
+**Implemented interaction (1 November):** The session displays Muse's question, saves the answer, and requests a fresh model decision with full history. The configured limit is a ceiling, not a batch size or mandatory count. The prompt asks for unresolved supported tradeoffs even when broad look adjectives were provided. Zero-question responses request a concise completion explanation, stored separately from creative directives. Progress shows model completion or the question limit; invalid contracts fail for retry. Historical validator-rejection stops remain intact. Mechanics are fixture-tested; revised live question quality requires separate evaluation.
 
 The editor's Run dashboard has Progress and Session log tabs. It shows actual stages without fabricated percentages. Conflicting imports, session/profile/version changes, direction/feedback edits and generation actions lock during processing; playback, exports and tab navigation remain available, with cancellation guarded against repeated submission.
 

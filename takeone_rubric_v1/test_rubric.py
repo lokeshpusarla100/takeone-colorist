@@ -53,14 +53,16 @@ def test_reject_unavailable_operation():
         Option(id="a", label="A", intended_outcome="With relighting", required_operations=["3d_relighting"]),
         Option(id="b", label="B", intended_outcome="Without relighting", required_operations=["global_grade"]),
     ])
-    assert s.next_question(Proposal(candidates=[q])) is None
-    assert "unavailable" in s.rejected[0]["reason"]
+    with pytest.raises(ValueError,match="unavailable"):
+        s.next_question(Proposal(candidates=[q]))
+    assert not s.events and s.pending is None
 
 
-def test_nonpreference_and_hallucinated_evidence_rejected():
+def test_muse_owns_question_type_but_evidence_ids_are_checked():
     s = session()
-    qs = [question(id="q1", uncertainty_type="execution"), question(id="q2", evidence_ids=["invented"])]
-    assert s.next_question(Proposal(candidates=qs)) is None
+    assert s.next_question(Proposal(candidates=[question(uncertainty_type="execution")])).id=="q1"
+    with pytest.raises(ValueError,match="unknown evidence"):
+        session().next_question(Proposal(candidates=[question(evidence_ids=["invented"])]))
 
 
 def test_answer_validation_and_no_reask():
@@ -69,7 +71,8 @@ def test_answer_validation_and_no_reask():
     with pytest.raises(ValueError):
         s.record_answer(Answer(question_id="q1", response_type="option", response="nonexistent"))
     s.record_answer(Answer(question_id="q1", response_type="delegate"))
-    assert s.next_question(Proposal(candidates=[question()])) is None
+    with pytest.raises(ValueError,match="ID already used"):
+        s.next_question(Proposal(candidates=[question()]))
     assert len(s.brief().delegated_or_skipped) == 1
 
 
@@ -79,17 +82,14 @@ def test_bounded_interactions():
     assert s.next_question(Proposal(candidates=[question()])) is None
 
 
-def test_rank_preservation_first_and_reject_duplicate_outcomes():
+def test_muse_order_is_used_without_python_priority_ranking():
     s = session()
-    unsafe_dup = question(id="bad", options=[
-        Option(id="a", label="A", intended_outcome="Same"),
-        Option(id="b", label="B", intended_outcome="Same"),
-    ])
+    first = question(id="model_first",impact=Level.LOW,answerability=Level.LOW)
     high_impact = question(id="impact", target_key="impact", impact=Level.HIGH)
     preservation = question(id="preservation", target_key="paint", preservation_risk=True, impact=Level.MEDIUM)
-    selected = s.next_question(Proposal(candidates=[unsafe_dup, high_impact, preservation]))
-    assert selected.id == "preservation"
-    assert any(x["candidate_id"] == "bad" for x in s.rejected)
+    selected = s.next_question(Proposal(candidates=[first, high_impact, preservation]))
+    assert selected.id == "model_first"
+    assert not s.rejected
 
 
 def test_snapshot_and_literal_constraint_validation():
@@ -122,16 +122,16 @@ def tonal_question(**changes):
 
 
 @pytest.mark.parametrize("response_type,response", [("option", "dark"), ("skip", ""), ("delegate", ""), ("free_text", "Dark but readable.")])
-def test_renamed_brightness_fork_does_not_repeat_shadow_choice(response_type, response):
+def test_new_muse_question_is_not_dropped_by_keyword_or_topic_overlap(response_type, response):
     s = session()
     s.next_question(Proposal(candidates=[tonal_question()]))
     s.record_answer(Answer(question_id="shadow_choice", response_type=response_type, response=response))
     again = tonal_question(id="brightness_choice", target_key="gamma_brightness", scope="whole clip global",
         question="Keep night brightness dark and moody or lift it for clearer detail?",
         decision_fork="Dark gamma keeps blacks deep; lifted gamma makes details visible.")
-    assert s.next_question(Proposal(candidates=[again])) is None
-    assert s.asked_count == 1
-    assert "already covered" in s.rejected[-1]["reason"]
+    assert s.next_question(Proposal(candidates=[again])).id=="brightness_choice"
+    assert s.asked_count == 2
+    assert not s.rejected
 
 
 def test_color_question_remains_available_after_tonal_choice():
@@ -152,7 +152,7 @@ def test_independent_contrast_texture_is_not_treated_as_brightness():
     s.next_question(Proposal(candidates=[tonal_question(preference_family="tonal_readability")]))
     s.record_answer(Answer(question_id="shadow_choice", response_type="option", response="dark"))
     texture = tonal_question(id="texture", target_key="texture", preference_family="contrast_texture",
-        question="Soft tonal transitions or punchier texture?", decision_fork="Choose gentle transitions or crisp texture.",
+        question="Keep dark shadow detail with soft transitions, or use punchier texture?", decision_fork="Choose gentle transitions or crisp texture.",
         options=[
             Option(id="soft",label="Soft",intended_outcome="Gentle transitions",required_operations=["global_grade"]),
             Option(id="crisp",label="Crisp",intended_outcome="Crisp texture",required_operations=["global_grade"]),
@@ -172,7 +172,7 @@ def test_separate_regional_scopes_do_not_block_each_other():
     assert s.next_question(Proposal(candidates=[regional])).id == "background"
 
 
-def test_history_survives_restart_and_old_snapshots_still_deduplicate():
+def test_history_survives_restart_without_legacy_semantic_rejection():
     s = session()
     s.next_question(Proposal(candidates=[tonal_question()]))
     s.record_answer(Answer(question_id="shadow_choice", response_type="option", response="dark"))
@@ -185,7 +185,7 @@ def test_history_survives_restart_and_old_snapshots_still_deduplicate():
         decision = restored.answered_decisions()[0]
         assert decision["selected_outcome"] == "Darker shadows with cinematic depth"
         repeated = tonal_question(id="new_id",target_key="new_key")
-        assert restored.next_question(Proposal(candidates=[repeated])) is None
+        assert restored.next_question(Proposal(candidates=[repeated])).id=="new_id"
 
 
 def test_adapter_sends_question_meaning_not_only_option_ids():
@@ -193,7 +193,7 @@ def test_adapter_sends_question_meaning_not_only_option_ids():
     from types import SimpleNamespace
     from takeone_rubric_v1.muse_adapter import propose
     s = session()
-    s.next_question(Proposal(candidates=[tonal_question()]))
+    s.next_question(Proposal(candidates=[tonal_question(preference_family="tonal_readability")]))
     s.record_answer(Answer(question_id="shadow_choice", response_type="option", response="dark"))
     captured = {}
     def parse(**kwargs):

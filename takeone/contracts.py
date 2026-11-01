@@ -182,6 +182,7 @@ class State(StrictModel):
     active_job: str | None = None
     job_kind: str | None = None
     model_calls: int = 0
+    question_proposals: list[dict] = Field(default_factory=list)
     history: list[dict] = Field(default_factory=list)
     candidates: list[RenderCandidate] = Field(default_factory=list)
     selected_candidate_id: str | None = None

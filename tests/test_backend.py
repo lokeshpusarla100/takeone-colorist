@@ -219,7 +219,8 @@ def test_unavailable_operations_are_rejected(settings, video):
     muse.operation = "invented_relighting"
     with client(settings, muse) as c:
         state = start(c, upload(c, video))
-        assert state["status"] == "brief_ready"
+        assert state["status"] == "failed"
+        assert state["error"]["code"] == "RUBRIC_PROTOCOL_ERROR"
         assert state["question"] is None
 
 

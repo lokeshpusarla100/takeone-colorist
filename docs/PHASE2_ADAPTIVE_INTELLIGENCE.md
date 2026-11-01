@@ -35,6 +35,8 @@ Defaults and environment controls:
 
 Frame metadata is limited to 15,000 frames. Decode operations have explicit deadlines and cancellation. JPEG evidence is bounded, compressed and private to workspace artifacts; session exports carry measurements/references rather than raw image payloads.
 
+Follow-up timing correction: evidence manifests retain integer PTS/time bases and rendering explicitly preserves them through encoder and MP4 timescales. Near-CFR jitter and VFR are not normalized to nominal FPS. See [the measured failure, execution policy and timing regression coverage](RENDER_TIMING.md).
+
 ## Rendering mathematics
 
 New v3 recipes use luminance_ocio_v3. Tone acts on normalized encoded Rec.709 luma, with explicit input black/white points, gamma, the existing bounded monotonic contrast curve and bounded brightness. A common RGB gain plus peak protection retains channel proportions for tonal changes. Colour-protected subjects can therefore receive tonal adjustment without being forced to neutral gamma/contrast; saturation and cooling remain neutral for them.

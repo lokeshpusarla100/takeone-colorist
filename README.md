@@ -83,6 +83,7 @@ Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and por
 - HDR conversion and non-square-pixel sources are rejected explicitly until verified.
 - Source color interpretation remains known/unknown. Global grading capabilities are restricted to supported source metadata.
 - Browser previews are compressed 8-bit working views. Original precision is retained in the upload.
+- Global rendering preserves source presentation timestamps, including near-CFR jitter and VFR. Encoder/MP4 time bases are explicit; decoded frame counts, per-frame timing and the master's audio/video origin are validated. See [timing policy and RENDER_TIMING_CHANGED diagnosis](docs/RENDER_TIMING.md).
 - Scene understanding uses the complete silent proxy; it is not a calibrated color measurement.
 - Tools support bounded contrast, saturation, gamma, brightness gain and explicit red/blue cooling in the SDR/Rec.709 display domain. Local execution supports one segmentation concept with foreground/background controls and up to twelve requested intervals, split at detected cuts. Local paths require upright, zero-start CFR footage and complete unambiguous masks. Physical relighting, reconstruction and shot matching are unavailable.
 - Imported renders can be compared when dimensions and duration match; imported outputs have no verified recipe provenance.

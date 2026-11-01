@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import time
+from fractions import Fraction
 
 import cv2
 import numpy as np
@@ -17,13 +18,17 @@ def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separato
 
 def frame_manifest(path,settings,cancel):
     raw=json.loads(command([settings.ffprobe,'-v','error','-select_streams','v:0','-show_frames',
-        '-show_entries','frame=best_effort_timestamp_time:stream=width,height','-of','json',str(path)],cancel,90))
+        '-show_entries','frame=best_effort_timestamp,best_effort_timestamp_time,duration,pkt_duration:stream=width,height,time_base,r_frame_rate','-of','json',str(path)],cancel,90))
     try:
         times=[float(f['best_effort_timestamp_time']) for f in raw['frames']]
         if not times or len(times)>15000 or not all(np.isfinite(times)) or any(b<=a for a,b in zip(times,times[1:])):raise ValueError()
-        stream=raw['streams'][0];start=times[0]
-        return {'times':[t-start for t in times],'width':stream['width'],'height':stream['height'],'start':start}
-    except (KeyError,ValueError,IndexError):
+        stream=raw['streams'][0];tick=Fraction(stream['time_base'])
+        pts=[int(f['best_effort_timestamp']) for f in raw['frames']]
+        if tick<=0 or any(b<=a for a,b in zip(pts,pts[1:])):raise ValueError()
+        return {'times':[float((p-pts[0])*tick) for p in pts],'width':stream['width'],'height':stream['height'],
+                'start':float(pts[0]*tick),'pts':pts,'time_base':str(tick),'nominal_rate':stream.get('r_frame_rate','0/1'),
+                'durations':[f.get('duration',f.get('pkt_duration')) for f in raw['frames']]}
+    except (KeyError,ValueError,IndexError,ZeroDivisionError):
         raise Problem('EVIDENCE_TIMING_INVALID','Visual evidence has missing or unsupported frame timestamps.',
                       'Use a clip within the 15,000-frame analysis limit. No model call was made.',422)
 
@@ -87,7 +92,7 @@ def plan(path,source,settings,cancel,*,proxy=None,shots=None,focus=(),cache=None
     with scan_path.open('rb') as stream:file_hash=hashlib.file_digest(stream,'sha256').hexdigest()
     budget={'scan':settings.sample_scan_frames,'count':settings.sample_count,'width':settings.sample_width,
             'memory':settings.sample_memory_bytes,'image_bytes':settings.sample_image_bytes}
-    key=digest({'file':file_hash,'source':source.sha256,'budget':budget,'shots':shots,'focus':focus,'version':1})
+    key=digest({'file':file_hash,'source':source.sha256,'budget':budget,'shots':shots,'focus':focus,'version':2})
     if cache and Path(cache).is_file():
         cached=json.loads(Path(cache).read_text())
         if cached.get('key')==key:return dict(cached,cache_hit=True,lookup_elapsed_seconds=time.monotonic()-started)

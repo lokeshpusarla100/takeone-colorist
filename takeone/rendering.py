@@ -16,6 +16,7 @@ from .errors import Problem
 from .media import command, probe
 from . import evidence
 from . import color_processing
+from . import timing
 
 
 def fingerprint(value) -> str:
@@ -150,7 +151,7 @@ def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None) -> 
             "[view]scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[preview]")
 
 
-def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Settings, audio_codec: str | None):
+def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Settings, audio_codec: str | None, *, timing_policy):
     source=source.resolve();directory=directory.resolve()
     audio = "copy" if audio_codec in {"aac", "mp3", "alac"} else "aac"
     inputs=['-i',str(source)]
@@ -159,18 +160,26 @@ def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Se
             "-filter_complex_threads", "2", "-copyts", "-start_at_zero", *inputs,
             "-filter_complex", filter_graph(recipe.proposal.parameters,recipe=recipe,directory=directory),
             "-map", "[master]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "17",
-            "-threads", "4", "-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-c:a", audio,
+            "-threads", "4", "-pix_fmt", "yuv420p", "-fps_mode", "passthrough",
+            "-enc_time_base:v",timing_policy['encoder_time_base'],
+            "-video_track_timescale",str(timing_policy['video_track_timescale']),
+            "-movie_timescale",str(timing_policy['movie_timescale']),"-c:a", audio,
             "-movflags", "+faststart", str(directory / "grade.partial.mp4"),
             "-map", "[preview]", "-map", "0:a:0?", "-c:v", "libvpx-vp9", "-deadline", "realtime",
             "-cpu-used", "6", "-crf", "32", "-b:v", "0", "-threads", "4", "-pix_fmt", "yuv420p",
-            "-fps_mode", "passthrough", "-c:a", "libopus", "-b:a", "96k", str(directory / "preview.partial.webm")]
+            "-fps_mode", "passthrough", "-enc_time_base:v",timing_policy['encoder_time_base'],
+            "-c:a", "libopus", "-b:a", "96k", str(directory / "preview.partial.webm")]
 
 
 def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
            settings: Settings, cancel: threading.Event):
     source_meta = verify_source(source, original, settings, cancel)
     directory.mkdir(exist_ok=True)
-    command(render_args(source, directory, recipe, settings, original.audio_codec), cancel, 300,cwd=directory.resolve())
+    policy=timing.encoding_policy(source_meta)
+    source_manifest=(recipe.evidence_selection or {}).get('manifest')
+    if not source_manifest or 'pts' not in source_manifest:
+        source_manifest=evidence.frame_manifest(source,settings,cancel)
+    command(render_args(source, directory, recipe, settings, original.audio_codec,timing_policy=policy), cancel, 300,cwd=directory.resolve())
     master = directory / "grade.partial.mp4"
     view = directory / "preview.partial.webm"
     # Fully decode the output; a successful encoder exit alone is insufficient.
@@ -186,18 +195,16 @@ def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
             or video.get("pix_fmt") != "yuv420p" or video.get("color_transfer") != "bt709"
             or video.get("color_primaries") != "bt709" or video.get("color_space") != "bt709"
             or bool(audio) != bool(original.audio_codec)
-            or abs(float(preview_meta["format"]["duration"])-original.duration) > 0.5):
+            or abs(float(preview_meta["format"]["duration"])-float(source_meta['format']['duration'])) > 0.5):
         raise Problem("RENDER_VALIDATION_FAILED", "The rendered media did not meet the output contract.",
                       "The candidate was not accepted. The original and earlier versions are kept.", 422)
     source_video = next(s for s in source_meta["streams"] if s["codec_type"] == "video")
-    if source_video.get("nb_frames") and video.get("nb_frames") and source_video["nb_frames"] != video["nb_frames"]:
-        raise Problem("RENDER_TIMING_CHANGED", "Rendering changed the frame count.", "The candidate was not accepted.", 422)
+    master_timing=timing.validate(source_manifest,evidence.frame_manifest(master,settings,cancel),
+        origin_shift=-Fraction(str(policy['source_origin_seconds'])),movie_timescale=policy['movie_timescale'])
+    preview_timing=timing.validate(source_manifest,evidence.frame_manifest(view,settings,cancel),role='preview')
+    audio_timing=timing.validate_audio(source_meta,metadata,policy,original.audio_codec in {'aac','mp3','alac'})
+    timing_result={'encoding':policy,'master':master_timing,'preview':preview_timing,'audio':audio_timing}
     if recipe.evidence_selection:
-        output_manifest=evidence.frame_manifest(master,settings,cancel)
-        source_times=recipe.evidence_selection['manifest']['times']
-        if len(output_manifest['times'])!=len(source_times) or any(abs(a-b)>.002 for a,b in zip(output_manifest['times'],source_times)):
-            raise Problem('RENDER_TIMING_CHANGED','Rendered frame timestamps differ from the original.',
-                          'The candidate was not accepted. Inspect the timeline.',422)
         after,_=samples(master,original,settings,cancel,selection=recipe.evidence_selection)
     else:after,_=_legacy_samples(master,original,settings,cancel)
     warnings = []
@@ -208,7 +215,9 @@ def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
             if ((limits.max_new_black_fraction is not None and pair['new_black_fraction']>limits.max_new_black_fraction)
                 or (limits.max_new_white_fraction is not None and pair['new_white_fraction']>limits.max_new_white_fraction)):
                 raise Problem('GRADE_EXECUTION_LIMIT','Rendered clipping exceeded a declared execution bound.',
-                              'Revise the plan or clarify intentional clipping; no critic call was made.',422,frame_index=pair['frame_index'])
+                              'Revise the plan or clarify intentional clipping; no critic call was made.',422,
+                              frame_index=pair['frame_index'],observed_clipping=pair,
+                              execution_limits=limits.model_dump(),timing=timing_result)
     for before, result in ([] if recipe.tone_operator=='luminance_ocio_v3' else zip(recipe.source_samples, after)):
         if result["near_black_fraction"] > before["near_black_fraction"] + 0.08:
             warnings.append(f'Check lost shadow detail near {before["requested_time"]:.2f}s.')
@@ -229,6 +238,7 @@ def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
         "source_samples": recipe.source_samples, "output_samples": after, "warnings": warnings,
         "review_status": "needs_user_review",
         "mode":recipe.proposal.mode,"tone_operator":recipe.tone_operator,
+        "timing":timing_result,
         "diagnostics":diagnostics,
         "limitations": [
             "Technical checks and bounded samples do not establish aesthetic improvement or full constraint compliance.",

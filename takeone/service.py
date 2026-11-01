@@ -82,7 +82,12 @@ class Service:
         self.process_lock.close()
 
     def event(self, state: State, title: str, reason="", actor="app", kind="activity", **details):
-        event = Event(title=title, reason=reason, actor=actor, kind=kind, details=details)
+        # Event rows have a scalar-only contract. Preserve structured diagnostics
+        # in state.error, and encode their log projection instead of failing the
+        # failure transition itself and leaving the project stuck processing.
+        flat={k:v if v is None or isinstance(v,(str,int,float,bool)) else json.dumps(v,sort_keys=True)
+              for k,v in details.items()}
+        event = Event(title=title, reason=reason, actor=actor, kind=kind, details=flat)
         state.events.append(event)
         return event
 

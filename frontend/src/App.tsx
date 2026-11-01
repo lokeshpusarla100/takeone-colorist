@@ -133,7 +133,7 @@ export default function App() {
         </section>}
         {project.backend?.memory_capture_error&&<p className="inline-help" role="status">Preference capture needs attention: {project.backend.memory_capture_error.message}. Current-video feedback is retained.</p>}
       </main>
-      <SessionPanel key={project.id} events={project.events} onExport={exportLog}/>
+      <SessionPanel key={project.id} events={project.events} state={project.backend} onExport={exportLog}/>
     </div>
     {notice&&<p className="notice" role="status">{notice}</p>}
     {sessions&&<WorkspaceDialog mode="sessions" activeId={project.id} onClose={()=>setSessions(false)} onSelect={w.openSession} onNew={w.newSession}/>}

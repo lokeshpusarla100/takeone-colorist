@@ -16,6 +16,7 @@ from .store import Store
 from . import rendering
 from .preferences import FeedbackEvidence, PreferenceStore, PromptMemoryGate
 from .preferences import context_values
+from .usage import usage_details
 
 
 class Service:
@@ -362,13 +363,26 @@ class Service:
             return state
 
     def count_call(self, project_id, title):
+        request_id = str(uuid4())
         def change(state):
             if state.model_calls >= self.settings.max_questions + 4:
                 raise Problem("MODEL_CALL_BUDGET", "The consultation model-call budget was reached.",
                               "Review the saved evidence and answers before starting another consultation.", 409)
             state.model_calls += 1
-            self.event(state, title, actor="muse", model=self.settings.model, call=state.model_calls)
+            self.event(state, title, actor="muse", model=self.settings.model, call=state.model_calls,
+                       request_id=request_id)
         self.mutate(project_id, change)
+        return request_id
+
+    def record_usage(self, project_id, request_id, stage, usage, call):
+        titles = {"analysis":"Scene analysis usage", "rubric":"Muse request usage", "colorist":"Colorist request usage"}
+        def record(state):
+            # A receipt is tied to the request, not a call number that resets with direction.
+            if any(e.details and e.details.get("token_usage") and e.details.get("request_id")==request_id for e in state.events):
+                return
+            self.event(state,titles[stage],actor="muse",token_usage=True,request_id=request_id,
+                       usage_stage=stage,model=self.settings.model,call=call,**usage_details(usage))
+        self.mutate(project_id,record)
 
     @staticmethod
     def check_cancel(cancel):
@@ -387,6 +401,15 @@ class Service:
         except Exception as cause:
             failure = safe_problem(cause, kind)
             try:
+                if failure.details.get("usage_reported"):
+                    stages={"Inspecting video with Muse":"analysis","Selecting a useful clarification":"rubric",
+                            "Muse is preparing a global grading recipe":"colorist"}
+                    current=self.store.get(project_id)
+                    request=next((e for e in reversed(current.events) if e.title in stages
+                                  and e.details and e.details.get("request_id")),None)
+                    if request:
+                        self.record_usage(project_id,request.details["request_id"],stages[request.title],
+                                          failure.details,request.details["call"])
                 def failed(state):
                     if state.active_job != job_id:
                         return
@@ -438,17 +461,18 @@ class Service:
         if not state.source or not state.preview:
             raise Problem("SOURCE_NOT_READY", "Source preparation is incomplete.", "Retry source preparation.", 409)
         if not state.analysis:
-            self.count_call(project_id, "Inspecting video with Muse")
+            request_id = self.count_call(project_id, "Inspecting video with Muse")
+            call_number = self.store.get(project_id).model_calls
             def remember(remote_id):
                 self.mutate(project_id, lambda s: setattr(s, "remote_file_id", remote_id))
             analysis, usage = self.provider.analyze(self.store.directory(project_id) / "analysis.mp4",
                                                     state.source.duration, state.remote_file_id, remember)
+            self.record_usage(project_id,request_id,"analysis",usage,call_number)
             self.store.artifact(project_id, "analysis.json", analysis.model_dump(mode="json"))
             def analyzed(state):
                 state.analysis = analysis
                 state.stage = "select_question"
-                self.event(state, "Scene analysis saved", analysis.summary, actor="muse",
-                           input_tokens=usage.get("input_tokens"), output_tokens=usage.get("output_tokens"))
+                self.event(state, "Scene analysis saved", analysis.summary, actor="muse")
             self.mutate(project_id, analyzed)
         self.check_cancel(cancel)
         state = self.store.get(project_id)
@@ -479,12 +503,13 @@ class Service:
             from takeone_rubric_v1.rubric import Proposal
             proposal = Proposal()
         else:
-            self.count_call(project_id, "Selecting a useful clarification")
+            request_id = self.count_call(project_id, "Selecting a useful clarification")
             proposal_call = self.store.get(project_id).model_calls
             event_start = len(session.events)
             proposal = self.provider.propose(session)
             proposal_usage = next((e.get("usage") for e in reversed(session.events[event_start:])
                                    if e.get("event") == "muse_proposal"), None)
+            self.record_usage(project_id,request_id,"rubric",proposal_usage,proposal_call)
         self.check_cancel(cancel)
         question = session.next_question(proposal)
         brief = None if question else session.brief()
@@ -516,10 +541,6 @@ class Service:
                 self.event(state, "Creative brief ready", "The original request, answers, boundaries and limitations have been saved.", actor="muse")
             if session.rejected:
                 self.event(state, "Question validation completed", rejected_count=len(session.rejected))
-            if proposal_usage:
-                self.event(state, "Muse request usage", actor="muse",
-                           input_tokens=proposal_usage.get("prompt_tokens"),
-                           output_tokens=proposal_usage.get("completion_tokens"), call=proposal_call)
         self.mutate(project_id, selected)
 
     def render_grade(self, project_id, cancel):
@@ -539,9 +560,10 @@ class Service:
         if not candidate.recipe:
             measurements, images = rendering.samples(original, state.source, self.settings, cancel)
             self.check_cancel(cancel)
-            self.count_call(project_id, "Muse is preparing a global grading recipe")
+            request_id = self.count_call(project_id, "Muse is preparing a global grading recipe")
             call_number = self.store.get(project_id).model_calls
             proposal, usage = self.provider.grade(state.brief, state.analysis, state.source, measurements, images)
+            self.record_usage(project_id,request_id,"colorist",usage,call_number)
             recipe = GradeRecipe(source_sha256=state.source.sha256, brief_sha256=candidate.brief_sha256,
                                  model=self.settings.model, proposal=proposal, source_samples=measurements)
             self.store.candidate_artifact(project_id, candidate.id, "recipe.json", recipe.model_dump(mode="json"))
@@ -563,9 +585,6 @@ class Service:
                             if len(parts)==3 and parts[2].isdigit():
                                 state.memory_influences.append({"entry_id":parts[1],"revision":int(parts[2]),
                                     "stage":"grade","target":candidate.id+":"+decision.parameter})
-                if usage:
-                    self.event(state, "Colorist request usage", actor="muse", call=call_number,
-                               input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"))
             self.mutate(project_id, planned)
         else:
             recipe = candidate.recipe

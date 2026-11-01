@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { SessionEvent } from '../lib/types';
-export default function SessionPanel({events,onExport}:{events:SessionEvent[];onExport:()=>void}) {
+import type { BackendState } from '../lib/api';
+import TokenUsage from './TokenUsage';
+export default function SessionPanel({events,onExport,state}:{events:SessionEvent[];onExport:()=>void;state?:BackendState}) {
   const [filter,setFilter]=useState('all');
   const [query,setQuery]=useState('');
   const list=useRef<HTMLDivElement>(null);
@@ -13,6 +15,7 @@ export default function SessionPanel({events,onExport}:{events:SessionEvent[];on
     && (e.title+' '+(e.reason??'')+' '+JSON.stringify(e.details??{})).toLowerCase().includes(query.toLowerCase()));
   return <section className="session-panel" aria-labelledby="session-heading">
     <div className="section-heading"><h2 id="session-heading">Session log</h2><button onClick={onExport}>Export JSON</button></div>
+    <TokenUsage state={state}/>
     <div className="log-tools"><input type="search" aria-label="Search session log" placeholder="Search log" value={query} onChange={e=>setQuery(e.target.value)}/>
       <select aria-label="Filter session log" value={filter} onChange={e=>setFilter(e.target.value)}>
         <option value="all">All activity</option><option value="decision">Decisions</option><option value="error">Errors</option>

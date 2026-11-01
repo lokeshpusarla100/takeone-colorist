@@ -56,11 +56,14 @@ The selected profile and category/scene/purpose labels are next-upload defaults 
 - storage.ts: IndexedDB transactions and state validation.
 - RubricPanel.tsx: prompt, question/answer controls and brief.
 - RenderPanel.tsx: explicit global-grade request, progress, recipe and render checks.
+- TokenUsage.tsx / tokenUsage.ts: project usage totals, per-request breakdown, pending/unknown counts and legacy event compatibility.
 - MemoryView.tsx: scoped preference management and supporting evidence.
 - preferenceApi.ts / preferenceContext.ts: memory API and next-upload profile/context defaults.
 - ErrorBoundary.tsx: recovery screen for rendering exceptions.
 
 IndexedDB remains at schema version 1; backend state is optional, preserving legacy sessions. Export excludes thumbnails, video blobs and backend-private credentials.
+
+The token panel uses the current backend project's persisted events rather than counting merged log rows or the consultation's resettable call counter. Existing polling updates it automatically. Input/output/total are provider-reported; cached and reasoning tokens remain included subsets. Running requests show a waiting status, and missing usage stays unknown. No extra model or token-count requests are made. Exact counts arrive after a response, not continuously during generation; this is not an account balance or context-occupancy meter.
 
 ## Verification boundary
 

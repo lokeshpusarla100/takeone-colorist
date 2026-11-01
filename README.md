@@ -82,6 +82,14 @@ Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and por
 - Imported renders can be compared when dimensions and duration match; imported outputs have no verified recipe provenance.
 - A global-grade render path is connected to the brief. Autonomous review, localized edits and a broader final-delivery pipeline remain outside this implementation; media checks do not establish aesthetic quality or preservation.
 
+## Token usage
+
+The session sidebar shows this project's reported input, output and total tokens, with an expandable per-request breakdown for video analysis, rubric and colorist requests. Counts update through normal state polling as responses return and survive refresh. Direction changes retain earlier project usage. Cached-input and reasoning-output counts are subsets of the totals, not additional tokens.
+
+While a request is running, the panel waits for provider accounting. Missing usage is shown as unknown and totals are labeled partial. Returned usage is saved before downstream validation/cancellation, including known accounting from truncated responses. Legacy saved usage events remain readable; historical requests without counts cannot be reconstructed locally.
+
+[Meta's token-counting documentation](https://dev.meta.ai/docs/token-counting) specifies final-response usage, including the final usage chunk for streamed Chat Completions. It does not document continuous exact usage during generation. The input-count endpoint measures context size rather than billing usage. The dashboard uses returned accounting without extra API calls, token estimates or credit-balance claims. Inference requests keep their existing non-streaming structured-output path.
+
 ## Check
 
 From the project root:

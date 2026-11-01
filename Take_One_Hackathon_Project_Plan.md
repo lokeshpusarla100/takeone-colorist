@@ -800,6 +800,8 @@ Call count varies with questions, retries, masks, and revisions. Do not advertis
 
 Record model, request purpose, input/output usage when returned, wall time, success/error, retry count, and cost attribution status.
 
+**Implemented token dashboard (1 November):** The session sidebar aggregates persisted provider-reported input/output/total tokens across video analysis, rubric and colorist requests, with per-request details and running/unknown states. New request IDs prevent duplicate receipts and separate calls even when consultation counters reset. Cached and reasoning counts are subsets, not additions. Returned accounting is persisted before downstream validation/cancellation; missing usage remains unknown. Existing log formats are supported. No extra token-count calls or model streaming changes are introduced. Meta documents usage on the final response/stream chunk; continuous exact generation-time accounting is not promised. See README.md for the documentation source and practical limits. Wall-time metering, monetary estimates and account-credit monitoring remain outside this addition.
+
 An earlier target was approximately US$7 for baseline experiments; treat this as a planning target, not a measured budget guarantee. Verify current pricing and available credit balance before fixing run caps. The US$150 credit application does not itself prove funds are available.
 
 Set explicit per-run call/revision/time limits and a user-configured spending ceiling where usage can be estimated reliably. Unknown SAM or media charges remain unknown until documented or observed.

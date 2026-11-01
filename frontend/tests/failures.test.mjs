@@ -9,6 +9,57 @@ const {validateProject}=await load('storage');
 const {makeProject}=await load('types');
 const {parseBackend,request,waitForSource}=await load('api');
 const {preparedSource}=await load('preparedSource');
+const {tokenUsage}=await load('tokenUsage');
+
+const usageEvent=(id,title,details={})=>({id,title,details,actor:'muse',kind:'activity',timestamp:'2026-11-01T10:00:00Z'});
+test('token usage deduplicates event receipts and keeps cached/reasoning counts within totals',()=>{
+  const start=usageEvent('start','Inspecting video with Muse',{request_id:'req1',model:'muse-spark-1.3'});
+  const receipt=usageEvent('receipt','Scene analysis usage',{request_id:'req1',input_tokens:120,output_tokens:30,
+    total_tokens:150,cached_tokens:40,reasoning_tokens:20});
+  const usage=tokenUsage([start,start,receipt,receipt]);
+  assert.equal(usage.rows.length,1);
+  assert.deepEqual([usage.input,usage.output,usage.total,usage.cached,usage.reasoning],[120,30,150,40,20]);
+  assert.equal(usage.incomplete,0);
+});
+test('token usage remains unknown during generation and marks failed/missing receipts as partial',()=>{
+  const events=[usageEvent('start','Selecting a useful clarification',{request_id:'req1'})];
+  const pending=tokenUsage(events,'select_question');
+  assert.equal(pending.running,true);
+  assert.equal(pending.total,null);
+  assert.equal(pending.incomplete,0);
+  const failed=tokenUsage(events);
+  assert.equal(failed.running,false);
+  assert.equal(failed.incomplete,1);
+  assert.equal(failed.total,null);
+});
+test('legacy usage survives reset call numbers without counting scene-save events twice',()=>{
+  const events=[
+    usageEvent('a','Inspecting video with Muse',{call:1,model:'muse'}),
+    usageEvent('b','Scene analysis saved',{input_tokens:10,output_tokens:2}),
+    usageEvent('c','Selecting a useful clarification',{call:2,model:'muse'}),
+    usageEvent('d','Muse request usage',{call:2,input_tokens:20,output_tokens:3}),
+    usageEvent('e','Selecting a useful clarification',{call:1,model:'muse'}),
+    usageEvent('f','Muse request usage',{call:1,input_tokens:30,output_tokens:4}),
+    usageEvent('g','Scene analysis saved',{}),
+  ];
+  const usage=tokenUsage(events);
+  assert.equal(usage.rows.length,3);
+  assert.deepEqual([usage.input,usage.output,usage.total],[60,9,69]);
+});
+test('unknown or invalid token fields never become fake zero counts',()=>{
+  const usage=tokenUsage([
+    usageEvent('a','Colorist request usage',{input_tokens:0,output_tokens:12,total_tokens:12}),
+    usageEvent('b','Muse request usage',{input_tokens:-10,output_tokens:null,total_tokens:'100'}),
+  ]);
+  assert.deepEqual([usage.input,usage.output,usage.total],[0,12,12]);
+  assert.equal(usage.incomplete,1);
+  assert.equal(usage.rows[1].total,null);
+});
+test('partial receipts preserve reported provider totals without estimating missing components',()=>{
+  const usage=tokenUsage([usageEvent('a','Muse request usage',{input_tokens:15,total_tokens:40})]);
+  assert.equal(usage.input,15);assert.equal(usage.output,null);assert.equal(usage.total,40);
+  assert.equal(usage.incomplete,1);
+});
 
 test('native media errors preserve different diagnoses and original details',()=>{
   for(const [code,expected] of [[1,'MEDIA_ABORTED'],[2,'MEDIA_READ_FAILED'],[3,'MEDIA_DECODE_FAILED'],[4,'MEDIA_UNSUPPORTED']]){

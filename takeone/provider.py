@@ -11,6 +11,7 @@ from .config import Settings
 from .contracts import SceneAnalysis, GradeProposal
 from .errors import Problem
 from .preferences import PromptMemoryGate
+from .usage import usage_details
 
 
 class MuseProvider:
@@ -61,16 +62,17 @@ class MuseProvider:
                 ]}],
                 text_format=SceneAnalysis, reasoning={"effort": "low"}, max_output_tokens=2600, store=False,
             ))
+            accounting = {"usage_reported":True, **usage_details(result.usage.model_dump() if result.usage else {})}
             parsed = result.output_parsed
             if parsed is None:
                 if getattr(result, "status", None) == "incomplete":
                     raise Problem("MUSE_RESPONSE_TRUNCATED", "Muse did not complete the scene analysis within its response limit.",
-                                  "The prepared source is kept. Retry the step explicitly; no automatic retry was made.", 502)
+                                  "The prepared source is kept. Retry the step explicitly; no automatic retry was made.", 502,**accounting)
                 raise Problem("MUSE_INVALID_RESPONSE", "Muse returned no usable scene analysis.",
-                              "Retry analysis. The source and preview have been kept.", 502)
+                              "Retry analysis. The source and preview have been kept.", 502,**accounting)
             if any(o.end > duration + 0.25 for o in parsed.observations):
                 raise Problem("MUSE_INVALID_EVIDENCE", "Muse returned an observation outside the clip.",
-                              "Retry analysis. Invalid evidence has not been accepted.", 502)
+                              "Retry analysis. Invalid evidence has not been accepted.", 502,**accounting)
             return parsed, result.usage.model_dump() if result.usage else {}
 
     def propose(self, session):
@@ -129,14 +131,15 @@ class MuseProvider:
                     {"role": "user", "content": content},
                 ], response_format=GradeProposal, reasoning_effort="low", max_tokens=4096,
             ))
+            accounting = {"usage_reported":True, **usage_details(result.usage.model_dump() if result.usage else {})}
             proposal = result.choices[0].message.parsed
             if proposal is None:
                 raise Problem("MUSE_INVALID_RECIPE", "Muse returned no usable grading plan.",
-                              "Retry planning. The source and brief are preserved.", 502)
+                              "Retry planning. The source and brief are preserved.", 502,**accounting)
             allowed = set(context["allowed_source_ids"])
             if any(set(d.source_ids) - allowed for d in proposal.decisions):
                 raise Problem("MUSE_INVALID_RECIPE", "The grading plan cited an unknown brief reference.",
-                              "Retry planning. The invalid plan has not been applied.", 502)
+                              "Retry planning. The invalid plan has not been applied.", 502,**accounting)
             return proposal, result.usage.model_dump() if result.usage else {}
 
     @staticmethod
@@ -147,7 +150,8 @@ class MuseProvider:
             usage = getattr(getattr(error, "completion", None), "usage", None)
             raise Problem("MUSE_RESPONSE_TRUNCATED", "Muse reached its response limit before completing the rubric.",
                           "Cached scene analysis and answers are kept. Retry this step; the video will not be resent.", 502,
-                          finish_reason="length", output_tokens=getattr(usage, "completion_tokens", None))
+                          finish_reason="length", usage_reported=True,
+                          **usage_details(usage.model_dump() if usage else {}))
         except openai.ContentFilterFinishReasonError:
             raise Problem("MUSE_RESPONSE_UNAVAILABLE", "The provider did not return a usable response for this request.",
                           "Review the request or try different footage. No incomplete response has been accepted.", 502)

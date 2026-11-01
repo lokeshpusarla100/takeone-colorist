@@ -63,3 +63,15 @@ class Store:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, directory / filename)
+
+    def candidate_artifact(self, project_id: str, candidate_id: str, filename: str, value: dict):
+        if filename not in {"recipe.json", "validation.json"}:
+            raise ValueError("Unknown candidate artifact")
+        directory = self.directory(project_id) / "candidates" / str(UUID(candidate_id))
+        directory.mkdir(parents=True, exist_ok=True)
+        temporary = directory / ("." + filename + ".tmp")
+        with temporary.open("w") as stream:
+            json.dump(value, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, directory / filename)

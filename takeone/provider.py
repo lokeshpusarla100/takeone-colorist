@@ -8,7 +8,7 @@ from dotenv import dotenv_values
 
 from takeone_rubric_v1.muse_adapter import propose
 from .config import Settings
-from .contracts import SceneAnalysis
+from .contracts import SceneAnalysis, GradeProposal
 from .errors import Problem
 
 
@@ -74,6 +74,59 @@ class MuseProvider:
     def propose(self, session):
         with self.client() as client:
             return self.call(lambda: propose(session, self.settings.model, client=client))
+
+    def grade(self, brief, analysis, source, sample_stats, images):
+        import json
+        references = ["user_request", "default_protections",
+                      *(d.source_id for d in brief.directives),
+                      *("constraint:" + str(i) for i in range(len(brief.explicit_constraints)))]
+        context = {
+            "brief": brief.model_dump(mode="json"),
+            "scene_analysis": analysis.model_dump(mode="json"),
+            "source": source.model_dump(mode="json"),
+            "sample_statistics": sample_stats,
+            "allowed_source_ids": references,
+            "controls": {
+                "contrast": "0.75..1.25; neutral 1.0; multiplies encoded RGB around 0.5",
+                "gamma": "0.8..1.2; neutral 1.0; RGB power 1/gamma: above 1 lifts midtones, below 1 darkens",
+                "saturation": "0..1.5; neutral 1.0; Rec.709-weighted encoded RGB channel mixing",
+            },
+            "operation_order": ["gamma", "contrast", "saturation"],
+        }
+        content = [{"type": "text", "text": json.dumps(context)}]
+        for image in images:
+            content += [{"type": "text", "text": f'Source sample requested at {image["time"]:.3f}s.'},
+                        {"type": "image_url", "image_url": {"url": image["url"], "detail": "low"}}]
+        with self.client() as client:
+            result = self.call(lambda: client.beta.chat.completions.parse(
+                model=self.settings.model,
+                messages=[
+                    {"role": "system", "content": (
+                        "You are Take One's colorist. Produce ONE bounded global treatment from the whole brief, "
+                        "the actual source frames, cached scene observations and declared controls. Source frames "
+                        "are analysis thumbnails, not the final rendering source. Statistics are sampled encoded "
+                        "luma diagnostics, not scene exposure measurements. Respect explicit constraints and "
+                        "default protections. Do not compound darkness when several directives describe one look. "
+                        "If the source is already dark, coordinate gamma and contrast to retain subject legibility. "
+                        "Preserve meaningful paint/material appearance and do not invent missing detail. "
+                        "Only these three global controls are supported; no masks, temperature shift, relighting, "
+                        "recoloring, timeline edits or shot matching. Explain each changed control in ordinary "
+                        "visual terms, citing allowed_source_ids. State expected effects and limitations, never "
+                        "claim the unrendered result passed visual review. Keep the recipe conservative. "
+                        "Return the requested schema; do not emit commands."
+                    )},
+                    {"role": "user", "content": content},
+                ], response_format=GradeProposal, reasoning_effort="low", max_tokens=4096,
+            ))
+            proposal = result.choices[0].message.parsed
+            if proposal is None:
+                raise Problem("MUSE_INVALID_RECIPE", "Muse returned no usable grading plan.",
+                              "Retry planning. The source and brief are preserved.", 502)
+            allowed = set(references)
+            if any(set(d.source_ids) - allowed for d in proposal.decisions):
+                raise Problem("MUSE_INVALID_RECIPE", "The grading plan cited an unknown brief reference.",
+                              "Retry planning. The invalid plan has not been applied.", 502)
+            return proposal, result.usage.model_dump() if result.usage else {}
 
     @staticmethod
     def call(operation):

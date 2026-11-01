@@ -8,11 +8,12 @@ from uuid import uuid4
 
 from takeone_rubric_v1.rubric import Answer, CapabilityManifest, Observation, RubricInput, RubricSession
 from .config import Settings
-from .contracts import Event, State
+from .contracts import Event, State, GradeRecipe, RenderCandidate
 from .errors import Problem, safe_problem
 from .media import capabilities, inspect_source, make_previews
 from .provider import MuseProvider
 from .store import Store
+from . import rendering
 
 
 class Service:
@@ -90,10 +91,11 @@ class Service:
         cancel = threading.Event()
         state.active_job = job_id
         state.job_kind = kind
-        state.status = "ingesting" if kind == "ingest" else "analyzing"
-        state.stage = "inspect_source" if kind == "ingest" else "analyze_scene" if not state.analysis else "select_question"
+        state.status = "ingesting" if kind == "ingest" else "rendering" if kind == "render" else "analyzing"
+        state.stage = ("inspect_source" if kind == "ingest" else "plan_grade" if kind == "render"
+                       else "analyze_scene" if not state.analysis else "select_question")
         state.error = None
-        self.event(state, "Preparing source" if kind == "ingest" else "Analysis queued")
+        self.event(state, "Preparing source" if kind == "ingest" else "Grade queued" if kind == "render" else "Analysis queued")
         try:
             self.store.save(state)
             self.cancels[state.id] = cancel
@@ -123,7 +125,7 @@ class Service:
             if not self.provider.available():
                 raise Problem("MUSE_NOT_CONFIGURED", "The Meta API key is not configured.",
                               "Set MODEL_API_KEY in the root .env file, then refresh the editor.", 503)
-            if state.request == request and state.status in {"awaiting_answer", "brief_ready", "failed", "cancelled"}:
+            if state.request == request and state.status in {"awaiting_answer", "brief_ready", "render_ready", "failed", "cancelled"}:
                 return state
             if state.rubric:
                 state.history.append({"request": state.request, "rubric": state.rubric,
@@ -134,6 +136,7 @@ class Service:
             state.brief = None
             state.answered_count = 0
             state.model_calls = 0
+            state.render_target_id = None
             state.receipts[command_id] = fingerprint
             self.event(state, "Creative direction submitted", request or "Use a conservative direction.", actor="user")
             self.submit(state, "analysis")
@@ -174,11 +177,43 @@ class Service:
             if state.status not in {"failed", "cancelled"}:
                 raise Problem("RETRY_NOT_NEEDED", "There is no failed step to retry.", "Continue with the current state.", 409)
             kind = state.job_kind or ("ingest" if not state.preview else "analysis")
-            if kind == "analysis" and not self.provider.available():
+            target = next((c for c in state.candidates if c.id == state.render_target_id), None)
+            if (kind == "analysis" or (kind == "render" and (not target or not target.recipe))) and not self.provider.available():
                 raise Problem("MUSE_NOT_CONFIGURED", "The Meta API key is not configured.",
                               "Set MODEL_API_KEY in .env, then refresh the editor.", 503)
             state.receipts[command_id] = fingerprint
             self.submit(state, kind)
+            return state
+
+    def generate(self, project_id, revision: int, command_id: str):
+        with self.store.lock:
+            state = self.store.get(project_id)
+            if not state.brief:
+                raise Problem("BRIEF_NOT_READY", "Complete the creative brief before generating a grade.",
+                              "Finish the pending consultation.", 409)
+            brief_hash = rendering.fingerprint(state.brief.model_dump(mode="json"))
+            fingerprint = self.fingerprint("render", brief_hash)
+            if self.receipt(state, command_id, fingerprint):
+                return state
+            self.check_revision(state, revision)
+            if state.status not in {"brief_ready", "render_ready"}:
+                raise Problem("RENDER_NOT_READY", "The project is not ready for a new render.",
+                              "Retry the failed step or finish the current operation.", 409)
+            if not state.source or "global_grade" not in capabilities(state.source)["operations"]:
+                raise Problem("GRADE_DOMAIN_UNSUPPORTED", "This source has no supported global grading domain.",
+                              "Use known 8-bit SDR Rec.709 footage.", 422)
+            if not self.provider.available():
+                raise Problem("MUSE_NOT_CONFIGURED", "The Meta API key is not configured.", "Set MODEL_API_KEY in .env.", 503)
+            if sum(c.brief_sha256 == brief_hash for c in state.candidates) >= 3:
+                raise Problem("RENDER_BUDGET", "Three candidates have already been attempted for this brief.",
+                              "Review the saved candidates before changing the direction.", 409)
+            candidate = RenderCandidate(id=str(uuid4()), name="V" + str(len(state.candidates) + 1),
+                                        brief_sha256=brief_hash, source_sha256=state.source.sha256)
+            state.candidates.append(candidate)
+            state.render_target_id = candidate.id
+            state.receipts[command_id] = fingerprint
+            self.event(state, "Grade requested", actor="user", candidate=candidate.name)
+            self.submit(state, "render")
             return state
 
     def cancel(self, project_id):
@@ -211,6 +246,8 @@ class Service:
             self.check_cancel(cancel)
             if kind == "ingest":
                 self.ingest(project_id, cancel)
+            elif kind == "render":
+                self.render_grade(project_id, cancel)
             else:
                 self.analyze(project_id, cancel)
         except Exception as cause:
@@ -222,6 +259,11 @@ class Service:
                     state.status = "cancelled" if failure.code == "JOB_CANCELLED" else "failed"
                     state.error = failure.public()
                     state.active_job = None
+                    if kind == "render":
+                        target = next((c for c in state.candidates if c.id == state.render_target_id), None)
+                        if target:
+                            target.status = "cancelled" if failure.code == "JOB_CANCELLED" else "failed"
+                            target.error = failure.public()
                     self.event(state, failure.message, failure.action, kind="activity" if state.status == "cancelled" else "error",
                                code=failure.code, **failure.details)
                 self.mutate(project_id, failed)
@@ -291,12 +333,18 @@ class Service:
                     *state.analysis.caveats,
                 ],
             ), max_decisions=state.max_questions)
+        proposal_usage = None
+        proposal_call = None
         if session.asked_count >= session.max_decisions:
             from takeone_rubric_v1.rubric import Proposal
             proposal = Proposal()
         else:
             self.count_call(project_id, "Selecting a useful clarification")
+            proposal_call = self.store.get(project_id).model_calls
+            event_start = len(session.events)
             proposal = self.provider.propose(session)
+            proposal_usage = next((e.get("usage") for e in reversed(session.events[event_start:])
+                                   if e.get("event") == "muse_proposal"), None)
         self.check_cancel(cancel)
         question = session.next_question(proposal)
         brief = None if question else session.brief()
@@ -320,8 +368,72 @@ class Service:
                 self.event(state, "Creative brief ready", "The original request, answers, boundaries and limitations have been saved.", actor="muse")
             if session.rejected:
                 self.event(state, "Question validation completed", rejected_count=len(session.rejected))
-            usage = next((e.get("usage") for e in reversed(session.events) if e.get("event") == "muse_proposal"), None)
-            if usage:
+            if proposal_usage:
                 self.event(state, "Muse request usage", actor="muse",
-                           input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"))
+                           input_tokens=proposal_usage.get("prompt_tokens"),
+                           output_tokens=proposal_usage.get("completion_tokens"), call=proposal_call)
         self.mutate(project_id, selected)
+
+    def render_grade(self, project_id, cancel):
+        state = self.store.get(project_id)
+        candidate = next((c for c in state.candidates if c.id == state.render_target_id), None)
+        if not candidate or not state.source or not state.analysis or not state.brief:
+            raise Problem("RENDER_STATE_INVALID", "The render has no matching source, analysis or brief.",
+                          "Refresh the consultation before rendering.", 409)
+        if candidate.brief_sha256 != rendering.fingerprint(state.brief.model_dump(mode="json")):
+            raise Problem("BRIEF_CHANGED", "The brief changed after this candidate was requested.",
+                          "Generate a new candidate from the current brief.", 409)
+        directory = self.store.directory(project_id)
+        output = directory / "candidates" / candidate.id
+        output.mkdir(parents=True, exist_ok=True)
+        original = directory / "source.bin"
+        rendering.verify_source(original, state.source, self.settings, cancel)
+        if not candidate.recipe:
+            measurements, images = rendering.samples(original, state.source, self.settings, cancel)
+            self.check_cancel(cancel)
+            self.count_call(project_id, "Muse is preparing a global grading recipe")
+            call_number = self.store.get(project_id).model_calls
+            proposal, usage = self.provider.grade(state.brief, state.analysis, state.source, measurements, images)
+            recipe = GradeRecipe(source_sha256=state.source.sha256, brief_sha256=candidate.brief_sha256,
+                                 model=self.settings.model, proposal=proposal, source_samples=measurements)
+            self.store.candidate_artifact(project_id, candidate.id, "recipe.json", recipe.model_dump(mode="json"))
+            def planned(state):
+                target = next(c for c in state.candidates if c.id == candidate.id)
+                target.recipe = recipe
+                target.status = "rendering"
+                target.error = None
+                state.stage = "render_grade"
+                self.event(state, "Grading recipe saved", proposal.summary, actor="muse", kind="decision",
+                           candidate=candidate.name, contrast=proposal.parameters.contrast,
+                           saturation=proposal.parameters.saturation, gamma=proposal.parameters.gamma)
+                for decision in proposal.decisions:
+                    self.event(state, decision.parameter.capitalize() + " decision", decision.reason,
+                               actor="muse", kind="decision", candidate=candidate.name)
+                if usage:
+                    self.event(state, "Colorist request usage", actor="muse", call=call_number,
+                               input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"))
+            self.mutate(project_id, planned)
+        else:
+            recipe = candidate.recipe
+            def resuming(state):
+                target = next(c for c in state.candidates if c.id == candidate.id)
+                target.status, target.error = "rendering", None
+                state.stage = "render_grade"
+                self.event(state, "Resuming saved recipe", "No additional model call is needed.", candidate=candidate.name)
+            self.mutate(project_id, resuming)
+        self.check_cancel(cancel)
+        result = rendering.render(original, output, recipe, state.source, self.settings, cancel)
+        self.check_cancel(cancel)
+        self.store.candidate_artifact(project_id, candidate.id, "validation.json", result)
+        def accepted(state):
+            target = next(c for c in state.candidates if c.id == candidate.id)
+            target.status, target.error = "ready", None
+            target.width, target.height, target.duration = result["width"], result["height"], result["duration"]
+            target.preview_url = f"/api/projects/{project_id}/candidates/{target.id}/preview"
+            target.download_url = f"/api/projects/{project_id}/candidates/{target.id}/download"
+            target.validation = result
+            state.selected_candidate_id = target.id
+            state.status, state.stage, state.active_job = "render_ready", "render_ready", None
+            self.event(state, "Rendered " + target.name, "The video is ready for comparison. Visual approval is still required.",
+                       actor="renderer", candidate=target.name, warnings=len(result["warnings"]))
+        self.mutate(project_id, accepted)

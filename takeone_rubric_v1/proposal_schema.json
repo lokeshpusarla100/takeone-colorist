@@ -14,6 +14,10 @@
           "title": "Target Key",
           "type": "string"
         },
+        "preference_family": {
+          "$ref": "#/$defs/PreferenceFamily",
+          "default": "other"
+        },
         "scope": {
           "title": "Scope",
           "type": "string"
@@ -140,6 +144,21 @@
       ],
       "title": "Option",
       "type": "object"
+    },
+    "PreferenceFamily": {
+      "enum": [
+        "tonal_readability",
+        "contrast_texture",
+        "color_intensity",
+        "color_balance",
+        "subject_priority",
+        "preservation",
+        "continuity",
+        "purpose",
+        "other"
+      ],
+      "title": "PreferenceFamily",
+      "type": "string"
     }
   },
   "additionalProperties": false,

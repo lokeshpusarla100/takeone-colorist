@@ -29,6 +29,14 @@ A system controller will decide which ONE question to ask. Output only the reque
 Extract explicit preservation constraints as exact quotes from user_request in explicit_constraints.
 Never invent or paraphrase those quotes. Normally ask 0-3 questions. A clear request needs none.
 Return at most three concise candidates. Keep each question and explanation short.
+Read previous_decisions, including the full question, alternatives, and chosen outcome.
+Do not re-open the same visual preference under a new target_key or a different control.
+Use preference_family consistently. tonal_readability covers dark/moody/deep shadows versus
+lifted brightness/readable detail; contrast_texture covers punchy versus soft transitions
+without re-asking how dark the image should be. Keep different subjects/regions scoped explicitly.
+The user chooses visible outcomes, not one question per gamma, contrast or saturation knob.
+Use ordinary visual language in question, option labels and decision_fork.
+Stop when the useful preferences are resolved; do not fill the question budget.
 """
 
 
@@ -42,6 +50,7 @@ def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=Non
         "explicit_constraints": session.inputs.explicit_constraints,
         "technical_envelope": session.inputs.technical_envelope,
         "answers": [a.model_dump() for a in session.answers],
+        "previous_decisions": session.answered_decisions(),
         "resolved_preference_keys": sorted(session.resolved_keys),
         "rubric_budget_remaining": session.max_decisions - session.asked_count,
     }

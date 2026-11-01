@@ -7,6 +7,7 @@ and ranks them, records user decisions and exports a traceable creative brief.
 from __future__ import annotations
 
 from enum import Enum
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -28,6 +29,18 @@ class Level(str, Enum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
+
+
+class PreferenceFamily(str, Enum):
+    TONAL_READABILITY = "tonal_readability"
+    CONTRAST_TEXTURE = "contrast_texture"
+    COLOR_INTENSITY = "color_intensity"
+    COLOR_BALANCE = "color_balance"
+    SUBJECT_PRIORITY = "subject_priority"
+    PRESERVATION = "preservation"
+    CONTINUITY = "continuity"
+    PURPOSE = "purpose"
+    OTHER = "other"
 
 
 class Observation(StrictModel):
@@ -64,6 +77,7 @@ class Candidate(StrictModel):
     id: str
     dimension: Dimension
     target_key: str  # semantic slot; avoids re-asking an already resolved preference
+    preference_family: PreferenceFamily = PreferenceFamily.OTHER
     scope: str
     question: str
     evidence_ids: list[str] = Field(min_length=1)
@@ -112,6 +126,8 @@ class CreativeBrief(StrictModel):
     delegated_or_skipped: list[str]
     unresolved: list[str]
     review_rule: str = (
+        "Translate the directives into one coordinated treatment; do not compound the strength "
+        "when several statements describe the same look. "
         "Compare graded video with the source and this brief. Verify hard boundaries "
         "first; check technical artifacts over time; report evidence-linked deviations. "
         "Do not substitute the reviewer's personal aesthetic preference for user intent."
@@ -124,6 +140,45 @@ DEFAULT_PROTECTIONS = [
     "Do not recolor meaningful products or markings without authorization.",
     "Do not sacrifice subject legibility or introduce temporal artifacts without approval.",
 ]
+
+
+def normalized(value: str) -> str:
+    return re.sub(r"[\W_]+", " ", value.casefold()).strip()
+
+
+def infer_family(text: str) -> str | None:
+    """Narrow fallback for legacy questions without a model-supplied family."""
+    text = normalized(text)
+    dark = re.search(r"\b(dark\w*|shadow\w*|black\w*|moody|silhouette\w*)\b", text)
+    detail = re.search(r"\b(detail\w*|visib\w*|readab\w*|lift\w*|bright\w*|gamma|reveal\w*)\b", text)
+    if dark and detail:
+        return PreferenceFamily.TONAL_READABILITY.value
+    if re.search(r"\b(saturat\w*|muted|vibran\w*)\b", text):
+        return PreferenceFamily.COLOR_INTENSITY.value
+    if re.search(r"\b(white balance|color temperature|colour temperature|warmth|tint)\b", text):
+        return PreferenceFamily.COLOR_BALANCE.value
+    if re.search(r"\bcontrast\w*\b", text):
+        return PreferenceFamily.CONTRAST_TEXTURE.value
+    return None
+
+
+def families(candidate: Candidate) -> set[str]:
+    explicit = candidate.preference_family.value
+    result = set() if explicit == "other" else {explicit}
+    if explicit in {"other", "tonal_readability", "contrast_texture"}:
+        text = " ".join([candidate.question, candidate.decision_fork,
+                         *(o.intended_outcome for o in candidate.options)])
+        inferred = infer_family(text)
+        if inferred and (explicit == "other" or inferred == "tonal_readability"):
+            result.add(inferred)
+    return result
+
+
+def scope_key(scope: str, operations: list[str]) -> str:
+    # The current global tool applies one treatment to the whole clip.
+    if set(operations) == {"global_grade"}:
+        return "clip"
+    return normalized(scope)
 
 
 class RubricSession:
@@ -141,6 +196,33 @@ class RubricSession:
         self.asked_count = 0
         self.events: list[dict] = []
         self.rejected: list[dict] = []
+        self.questions: list[Candidate] = []
+
+    def answered_decisions(self) -> list[dict]:
+        questions = {q.id: q for q in self.questions}
+        directives = {d.source_id: d for d in self.directives}
+        forks = {e["id"]: e.get("reason", "") for e in self.events if e.get("event") == "question_selected"}
+        decisions = []
+        for answer in self.answers:
+            question = questions.get(answer.question_id)
+            directive = directives.get(answer.question_id)
+            fork = question.decision_fork if question else forks.get(answer.question_id, "")
+            outcome = directive.outcome if directive else None
+            operations = (sorted({op for o in question.options for op in o.required_operations}) if question
+                          else directive.operations_are_suggestions if directive else [])
+            scope = question.scope if question else directive.scope if directive else ""
+            groups = families(question) if question else {infer_family(" ".join([fork, outcome or ""]))} - {None}
+            decisions.append({
+                "question_id": answer.question_id,
+                "question": question.question if question else "",
+                "target_key": question.target_key if question else "",
+                "scope": scope, "scope_key": scope_key(scope, operations),
+                "preference_families": sorted(groups),
+                "decision_fork": fork, "response_type": answer.response_type,
+                "response": answer.response, "selected_outcome": outcome,
+                "options": [o.model_dump(mode="json") for o in question.options] if question else [],
+            })
+        return decisions
 
     def _validate_candidate(self, c: Candidate) -> str | None:
         if c.uncertainty_type != "preference":
@@ -170,6 +252,18 @@ class RubricSession:
             return "empty question or option label"
         if not c.target_key.strip() or not c.scope.strip():
             return "missing target or scope"
+        candidate_scope = scope_key(c.scope, [op for o in c.options for op in o.required_operations])
+        candidate_families = families(c)
+        candidate_outcomes = {normalized(o.intended_outcome) for o in c.options}
+        for decision in self.answered_decisions():
+            if not candidate_scope or candidate_scope != decision["scope_key"]:
+                continue
+            overlap = candidate_families.intersection(decision["preference_families"])
+            if overlap:
+                return "preference already covered in this scope: " + ", ".join(sorted(overlap))
+            previous_outcomes = {normalized(o["intended_outcome"]) for o in decision["options"]}
+            if previous_outcomes and previous_outcomes == candidate_outcomes:
+                return "same outcome choices already presented in this scope"
         return None
 
     def next_question(self, proposal: Proposal) -> Candidate | None:
@@ -208,6 +302,7 @@ class RubricSession:
         )
         selected = approved[0]
         self.pending = selected
+        self.questions.append(selected.model_copy(deep=True))
         self.asked_count += 1
         self.events.append({"event": "question_selected", "id": selected.id,
                             "reason": selected.decision_fork})
@@ -237,6 +332,8 @@ class RubricSession:
             ))
         elif answer.response_type not in ("skip", "delegate"):
             raise ValueError("invalid response type")
+        if not any(q.id == c.id for q in self.questions):
+            self.questions.append(c.model_copy(deep=True))
         # Even skips are marked resolved for now; re-open only explicitly.
         self.resolved_keys.add(c.target_key)
         self.answers.append(answer)
@@ -250,6 +347,8 @@ class RubricSession:
             "Skipped or delegated question: " + a.question_id
             for a in self.answers if a.response_type in ("skip", "delegate")
         ]
+        if any(e.get("event") == "stop" and e.get("reason") == "question budget exhausted" for e in self.events):
+            unresolved.append("Consultation ended at the question limit; additional preference gaps were not evaluated.")
         return CreativeBrief(
             initial_request=self.inputs.user_request,
             directives=self.directives,
@@ -267,13 +366,14 @@ class RubricSession:
             inputs=self.inputs, max_decisions=self.max_decisions, answers=self.answers,
             directives=self.directives, resolved_keys=sorted(self.resolved_keys),
             pending=self.pending, asked_count=self.asked_count, events=self.events, rejected=self.rejected,
+            questions=self.questions,
         ).model_dump(mode="json")
 
     @classmethod
     def restore(cls, value: dict):
         state = RubricSnapshot.model_validate(value)
         session = cls(state.inputs, state.max_decisions)
-        for name in ("answers", "directives", "pending", "asked_count", "events", "rejected"):
+        for name in ("answers", "directives", "pending", "asked_count", "events", "rejected", "questions"):
             setattr(session, name, getattr(state, name))
         session.resolved_keys = set(state.resolved_keys)
         return session
@@ -289,3 +389,4 @@ class RubricSnapshot(StrictModel):
     asked_count: int = Field(ge=0, le=5)
     events: list[dict]
     rejected: list[dict]
+    questions: list[Candidate] = Field(default_factory=list)

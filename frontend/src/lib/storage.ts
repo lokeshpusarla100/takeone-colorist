@@ -49,7 +49,7 @@ export function validateProject(value: unknown): asserts value is Project {
     && num(v.width) && (v.width as number) > 0 && num(v.height) && (v.height as number) > 0
     && num(v.duration) && (v.duration as number) > 0 && text(v.thumbnail)
     && (v.playbackUrl===undefined || (typeof v.playbackUrl==='string'
-      && /^\/api\/projects\/[0-9a-f-]{36}\/preview$/i.test(v.playbackUrl)));
+      && /^\/api\/projects\/[0-9a-f-]{36}\/(?:candidates\/[0-9a-f-]{36}\/)?preview$/i.test(v.playbackUrl)));
   const valid = obj(value) && value.schemaVersion === 1 && text(value.id) && text(value.name)
     && date(value.createdAt) && date(value.updatedAt) && text(value.direction) && recipe(value.recipe)
     && (value.source === null || asset(value.source)) && Array.isArray(value.assets) && value.assets.every(asset)

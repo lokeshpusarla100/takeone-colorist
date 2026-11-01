@@ -173,7 +173,7 @@
       "type": "array"
     },
     "review_rule": {
-      "default": "Compare graded video with the source and this brief. Verify hard boundaries first; check technical artifacts over time; report evidence-linked deviations. Do not substitute the reviewer's personal aesthetic preference for user intent.",
+      "default": "Translate the directives into one coordinated treatment; do not compound the strength when several statements describe the same look. Compare graded video with the source and this brief. Verify hard boundaries first; check technical artifacts over time; report evidence-linked deviations. Do not substitute the reviewer's personal aesthetic preference for user intent.",
       "title": "Review Rule",
       "type": "string"
     }

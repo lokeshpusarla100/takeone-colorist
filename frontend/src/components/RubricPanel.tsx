@@ -36,7 +36,7 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
     {!working&&!(question&&!changed)&&!(brief&&!changed)&&<div className="consultation-actions"><span className="muted">
       {hasSource?'Start sends the silent analysis video and your request to Meta.':'Import a video before starting.'}</span>
       <button disabled={disabled||!state?.preview||!online||!health?.muse_configured
-        ||(!changed&&!!state&&['awaiting_answer','brief_ready','failed','cancelled'].includes(state.status))}
+        ||(!changed&&!!state&&['awaiting_answer','brief_ready','render_ready','failed','cancelled'].includes(state.status))}
         onClick={onStart}>{changed&&state?.request?'Start with new direction':'Start analysis'}</button></div>}
     {working&&<div className="consultation-status" role="status"><span>{stageLabel(state.stage)}</span><button disabled={sending||state.stage==='cancelling'} onClick={onCancel}>Cancel</button></div>}
     {state&&(state.status==='failed'||state.status==='cancelled')&&<div className="consultation-actions">
@@ -71,7 +71,7 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
       {!!brief.explicit_constraints.length&&<><h3>Preserve</h3><ul>{brief.explicit_constraints.map((v,i)=><li key={i}>{v}</li>)}</ul></>}
       {!!brief.unresolved.length&&<><h3>Unresolved or delegated</h3><ul>{brief.unresolved.map((v,i)=><li key={i}>{v}</li>)}</ul></>}
       <details><summary>Protections and technical limits</summary><ul>{[...brief.default_protections,...brief.technical_envelope].map((v,i)=><li key={i}>{v}</li>)}</ul></details>
-      <p className="inline-help">Brief saved. Automatic grade generation and SAM masking are not connected yet.</p>
+      <p className="inline-help">Brief saved. Generate a global grade below when ready. SAM masking is not connected.</p>
     </section>}
   </section>;
 }

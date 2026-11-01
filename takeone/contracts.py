@@ -72,11 +72,69 @@ class Preview(StrictModel):
     preview_start_time: float
 
 
+class GradeParameters(StrictModel):
+    contrast: float = Field(ge=0.75, le=1.25, strict=True, allow_inf_nan=False)
+    saturation: float = Field(ge=0, le=1.5, strict=True, allow_inf_nan=False)
+    gamma: float = Field(ge=0.8, le=1.2, strict=True, allow_inf_nan=False)
+
+
+class GradeDecision(StrictModel):
+    parameter: Literal["contrast", "saturation", "gamma"]
+    reason: str = Field(min_length=1, max_length=500)
+    source_ids: list[str] = Field(min_length=1, max_length=10)
+
+
+class GradeProposal(StrictModel):
+    parameters: GradeParameters
+    summary: str = Field(min_length=1, max_length=1000)
+    decisions: list[GradeDecision] = Field(min_length=1, max_length=3)
+    limitations: list[str] = Field(max_length=8)
+
+    @field_validator("decisions")
+    @classmethod
+    def unique_parameters(cls, decisions):
+        if len({d.parameter for d in decisions}) != len(decisions):
+            raise ValueError("Each parameter has one coordinated decision")
+        return decisions
+
+
+class GradeRecipe(StrictModel):
+    schema_version: Literal["takeone-global-v1"] = "takeone-global-v1"
+    source_sha256: str
+    brief_sha256: str
+    model: str
+    prompt_version: Literal["colorist-v1"] = "colorist-v1"
+    color_domain: Literal["display-encoded-rec709"] = "display-encoded-rec709"
+    working_pixel_format: Literal["gbrp16le"] = "gbrp16le"
+    output_pixel_format: Literal["yuv420p"] = "yuv420p"
+    operation_order: list[str] = Field(default_factory=lambda: ["gamma", "contrast", "saturation"])
+    proposal: GradeProposal
+    source_samples: list[dict]
+    created_at: str = Field(default_factory=now)
+
+
+class RenderCandidate(StrictModel):
+    id: str
+    name: str
+    brief_sha256: str
+    source_sha256: str
+    status: Literal["planning", "rendering", "ready", "failed", "cancelled"] = "planning"
+    created_at: str = Field(default_factory=now)
+    recipe: GradeRecipe | None = None
+    preview_url: str | None = None
+    download_url: str | None = None
+    width: int | None = None
+    height: int | None = None
+    duration: float | None = None
+    validation: dict | None = None
+    error: dict | None = None
+
+
 class State(StrictModel):
     schema_version: int = 1
     id: str
     revision: int = 0
-    status: Literal["ingesting", "ready", "analyzing", "awaiting_answer", "brief_ready", "failed", "cancelled"]
+    status: Literal["ingesting", "ready", "analyzing", "awaiting_answer", "brief_ready", "rendering", "render_ready", "failed", "cancelled"]
     stage: str
     created_at: str = Field(default_factory=now)
     updated_at: str = Field(default_factory=now)
@@ -98,6 +156,9 @@ class State(StrictModel):
     job_kind: str | None = None
     model_calls: int = 0
     history: list[dict] = Field(default_factory=list)
+    candidates: list[RenderCandidate] = Field(default_factory=list)
+    selected_candidate_id: str | None = None
+    render_target_id: str | None = None
 
     def public(self):
-        return self.model_dump(mode="json", exclude={"rubric", "receipts", "remote_file_id", "active_job", "job_kind", "history"})
+        return self.model_dump(mode="json", exclude={"rubric", "receipts", "remote_file_id", "active_job", "job_kind", "history", "render_target_id"})

@@ -13,9 +13,18 @@ export type Brief = {
   answers:{question_id:string;response_type:string;response:string}[];
   unresolved:string[];
 };
+export type RenderCandidate = {
+  id:string;name:string;created_at:string;brief_sha256:string;source_sha256:string;
+  status:'planning'|'rendering'|'ready'|'failed'|'cancelled';
+  recipe:null|{proposal:{parameters:{contrast:number;saturation:number;gamma:number};
+    summary:string;decisions:{parameter:string;reason:string;source_ids:string[]}[];limitations:string[]}};
+  preview_url:string|null;download_url:string|null;width:number|null;height:number|null;duration:number|null;
+  validation:null|{warnings:string[];limitations:string[];review_status:string;bytes:number;audio_mode:string};
+  error:null|{code:string;message:string;action:string};
+};
 export type BackendState = {
   id:string;revision:number;
-  status:'ingesting'|'ready'|'analyzing'|'awaiting_answer'|'brief_ready'|'failed'|'cancelled';
+  status:'ingesting'|'ready'|'analyzing'|'awaiting_answer'|'brief_ready'|'rendering'|'render_ready'|'failed'|'cancelled';
   stage:string;filename:string;request:string;answered_count:number;max_questions:number;model_calls:number;
   source:null|{name:string;bytes:number;sha256:string;width:number;height:number;duration:number;
     video_codec:string;audio_codec:string|null;technical_notes:string[]};
@@ -23,6 +32,8 @@ export type BackendState = {
   analysis:null|{summary:string;caveats:string[]};
   question:Question|null;brief:Brief|null;events:SessionEvent[];
   error:null|{code:string;message:string;action:string;details:ErrorDetails};
+  candidates?:RenderCandidate[];
+  selected_candidate_id?:string|null;
 };
 export type Health = {
   status:string;model:string;muse_configured:boolean;ffmpeg_available:boolean;ffprobe_available:boolean;
@@ -46,7 +57,7 @@ function invalidResponse():never {
 }
 export function parseBackend(value:unknown):BackendState {
   if(!record(value)||!uuid(value.id)||!Number.isInteger(value.revision)||Number(value.revision)<0
-    ||!['ingesting','ready','analyzing','awaiting_answer','brief_ready','failed','cancelled'].includes(value.status as string)
+    ||!['ingesting','ready','analyzing','awaiting_answer','brief_ready','rendering','render_ready','failed','cancelled'].includes(value.status as string)
     ||!text(value.stage)||!text(value.filename)||!text(value.request)||!finite(value.answered_count)
     ||!finite(value.max_questions)||!finite(value.model_calls)||!Array.isArray(value.events)||!value.events.every(validEvent)){
     return invalidResponse();
@@ -70,16 +81,34 @@ export function parseBackend(value:unknown):BackendState {
     ||!text(value.error.action)||!details(value.error.details)))return invalidResponse();
   if(value.status==='awaiting_answer'&&!value.question)return invalidResponse();
   if(value.status==='brief_ready'&&!value.brief)return invalidResponse();
-  if(['ready','awaiting_answer','brief_ready'].includes(value.status as string)&&(!value.source||!value.preview))return invalidResponse();
+  if(['ready','awaiting_answer','brief_ready','rendering','render_ready'].includes(value.status as string)&&(!value.source||!value.preview))return invalidResponse();
+  if(value.candidates!==undefined&&(!Array.isArray(value.candidates)||!value.candidates.every(c=>{
+    if(!record(c)||!uuid(c.id)||!text(c.name)||!text(c.created_at)
+      ||!['planning','rendering','ready','failed','cancelled'].includes(c.status as string))return false;
+    if(c.recipe!==null&&(!record(c.recipe)||!record(c.recipe.proposal)||!record(c.recipe.proposal.parameters)
+      ||!text(c.recipe.proposal.summary)||!Array.isArray(c.recipe.proposal.decisions)||!strings(c.recipe.proposal.limitations)))return false;
+    if(c.status==='ready'){
+      const prefix='/api/projects/'+value.id+'/candidates/'+c.id;
+      return c.preview_url===prefix+'/preview'&&c.download_url===prefix+'/download'
+        &&finite(c.width)&&Number(c.width)>0&&finite(c.height)&&Number(c.height)>0&&finite(c.duration)&&Number(c.duration)>0
+        &&record(c.validation)&&strings(c.validation.warnings)&&strings(c.validation.limitations);
+    }
+    return true;
+  })))return invalidResponse();
+  if(value.selected_candidate_id!==undefined&&value.selected_candidate_id!==null
+    &&(!uuid(value.selected_candidate_id)||!Array.isArray(value.candidates)
+      ||!value.candidates.some(c=>record(c)&&c.id===value.selected_candidate_id&&c.status==='ready')))return invalidResponse();
+  if(value.status==='render_ready'&&!value.selected_candidate_id)return invalidResponse();
   return value as unknown as BackendState;
 }
-export const activeJob=(s:BackendState)=>s.status==='ingesting'||s.status==='analyzing';
+export const activeJob=(s:BackendState)=>s.status==='ingesting'||s.status==='analyzing'||s.status==='rendering';
 export function stageLabel(stage:string) {
   const labels:Record<string,string>={
     inspect_source:'Inspecting source metadata',prepare_preview:'Preparing video previews',
     analyze_scene:'Muse is inspecting the video',select_question:'Checking whether clarification is needed',
     awaiting_answer:'Waiting for your answer',brief_ready:'Creative brief ready',ready:'Source ready',
     cancelling:'Cancelling; an in-flight request may still finish',queue:'Waiting for the worker',
+    plan_grade:'Preparing the global grading recipe',render_grade:'Rendering and validating the video',render_ready:'Rendered video ready',
   };
   return labels[stage]??stage;
 }
@@ -128,7 +157,7 @@ export async function upload(file:File,signal:AbortSignal) {
   const form=new FormData();form.append('file',file);
   return parseBackend(await request<unknown>('/api/projects',{method:'POST',body:form,signal},120000));
 }
-export async function command(id:string,kind:'analyze'|'answers'|'retry',body:Record<string,unknown>) {
+export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render',body:Record<string,unknown>) {
   return parseBackend(await request<unknown>('/api/projects/'+id+'/'+kind,{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({...body,command_id:crypto.randomUUID()}),

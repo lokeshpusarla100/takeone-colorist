@@ -288,6 +288,48 @@ def test_budget_stops_without_an_extra_model_proposal(settings, video):
         assert done["model_calls"] == 2
 
 
+def test_usage_is_not_replayed_when_budget_finishes_without_a_call(settings, video):
+    class UsageProvider(FakeMuse):
+        def propose(self, session):
+            result = super().propose(session)
+            session.events.append({"event":"muse_proposal","usage":{"prompt_tokens":123,"completion_tokens":456}})
+            return result
+    muse = UsageProvider()
+    with client(replace(settings,max_questions=1),muse) as c:
+        state = start(c,upload(c,video))
+        first_usage = [e for e in state["events"] if e["title"]=="Muse request usage"]
+        assert len(first_usage)==1
+        assert first_usage[0]["details"]["call"]==2
+        c.post("/api/projects/"+state["id"]+"/answers",json={
+            "command_id":str(uuid4()),"revision":state["revision"],
+            "answer":{"question_id":"q1","response_type":"option","response":"natural"},
+        })
+        done = wait(c,state["id"],"brief_ready")
+        assert [e for e in done["events"] if e["title"]=="Muse request usage"]==first_usage
+        assert muse.proposal_calls==1
+        assert done["model_calls"]==2
+
+
+def test_later_no_question_proposal_gets_its_own_usage(settings, video):
+    class UsageProvider(FakeMuse):
+        def propose(self, session):
+            result=super().propose(session)
+            session.events.append({"event":"muse_proposal","usage":{
+                "prompt_tokens":100*self.proposal_calls,"completion_tokens":10*self.proposal_calls}})
+            return result
+    muse=UsageProvider()
+    with client(settings,muse) as c:
+        state=start(c,upload(c,video))
+        c.post("/api/projects/"+state["id"]+"/answers",json={
+            "command_id":str(uuid4()),"revision":state["revision"],
+            "answer":{"question_id":"q1","response_type":"delegate"},
+        })
+        done=wait(c,state["id"],"brief_ready")
+        usages=[e["details"] for e in done["events"] if e["title"]=="Muse request usage"]
+        assert [u["call"] for u in usages]==[2,3]
+        assert [u["input_tokens"] for u in usages]==[100,200]
+
+
 def test_provider_errors_do_not_expose_secrets(settings, video):
     class BrokenProvider(FakeMuse):
         def analyze(self, *args):

@@ -80,6 +80,21 @@ Muse may return zero candidates. Observation gaps require more visual/signal ins
 
 ### Outputs
 
+Follow-up requests now include the previous question, all alternatives, response type and selected
+outcome. Question history persists in snapshots; older snapshots use their saved directives and
+decision forks as a fallback. The controller checks preference families within the same scope,
+so renaming a darkness/detail choice from contrast to gamma does not create a new user decision.
+Different regional scopes and genuinely different color or texture preferences remain eligible.
+The legacy English text fallback is deliberately narrow; this is not a universal paraphrase classifier.
+
+The model is instructed to ask about visible outcomes, use ordinary language and stop when useful
+preferences are resolved. No extra model verification call is added. Briefs coordinate related
+directives and disclose when questioning ended at the budget limit.
+
+Usage events are taken only from the newly completed proposal call. A local budget stop has no
+usage event, and a real zero-question response still records its own returned usage. Existing saved
+logs are retained as audit records and are not retroactively rewritten.
+
 The brief passes to both the **Colorist** (plans edits) and **Critic** (checks compliance against source + user intent). Do **not** let the Critic change the brief to fit its preferred grade. If a hard constraint cannot be achieved, pause that particular transformation and report the limitation; do not simply improve an aesthetic score.
 
 ### Diagnostic events

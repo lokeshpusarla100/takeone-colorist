@@ -133,7 +133,7 @@ def capabilities(source: Source):
         "operations": ["global_grade"] if supported else [],
         "limitations": [
             "Only global SDR display-domain contrast, saturation and gamma are implemented in the base tool.",
-            "Automatic colorist execution is not connected. Local masks, relighting, reconstruction and shot matching are unavailable.",
+            "Only global treatment is available. Local masks, relighting, reconstruction and shot matching are unavailable.",
             *source.technical_notes,
         ],
         "supports_look_previews": False,

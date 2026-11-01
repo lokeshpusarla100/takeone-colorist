@@ -32,6 +32,8 @@ export type Version = {
   assetId?: string;
   parentId?: string;
   recipe: Recipe | null;
+  candidateId?: string;
+  downloadUrl?: string;
 };
 
 export type SessionEvent = {

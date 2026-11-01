@@ -10,6 +10,7 @@ import { getMedia, saveProject } from './lib/storage';
 import { useWorkspace } from './lib/useWorkspace';
 import { useConsultation } from './lib/useConsultation';
 import RubricPanel from './components/RubricPanel';
+import RenderPanel from './components/RenderPanel';
 
 export default function App() {
   const w=useWorkspace();
@@ -50,6 +51,9 @@ export default function App() {
   const downloadVideo=async()=>{
     if(selected?.kind!=='rendered'||!asset)return;
     try {
+      if(selected.downloadUrl){
+        const link=document.createElement('a');link.href=selected.downloadUrl;link.download=selected.name+'-graded.mp4';link.click();return;
+      }
       const blob=await getMedia(asset.id);
       if(!blob)throw new AppError('MEDIA_MISSING','The rendered file is missing.','Import the rendered video again.',{assetId:asset.id});
       downloadBlob(blob,asset.name);
@@ -66,7 +70,8 @@ export default function App() {
         <button disabled={busy} onClick={()=>sourceInput.current?.click()}>Import video</button><button onClick={exportLog}>Export log</button></div>
     </header>
     <div className="connection-note">{consultation.online
-      ? 'Backend connected · '+(consultation.health?.muse_configured?'Muse configured':'Meta API key missing')+' · Automatic grading not connected'
+      ? 'Backend connected · '+(consultation.health?.muse_configured?'Muse configured':'Meta API key missing')
+        +' · '+(consultation.health?.grading_connected?'Global grading connected':'Grading unavailable')
       : 'Backend unavailable · Start the Python server to prepare video and run Muse'}</div>
     {error&&<ErrorNotice error={error} onDismiss={w.clearError} onRetry={error.code.startsWith('STORAGE')?()=>void w.retrySave():undefined}/>}
     {busy&&<div className="operation-status" role="status"><span>{w.progress??'Saving session…'}</span>{w.canCancel&&<button onClick={w.cancelImport}>Cancel import</button>}</div>}
@@ -82,7 +87,7 @@ export default function App() {
         {project.source&&<div className="version-controls">
           <label>Version <select aria-label="Selected version" value={project.selectedVersionId??''} disabled={busy}
             onChange={e=>{const v=project.versions.find(item=>item.id===e.target.value);if(v)w.selectVersion(v);}}>
-            {project.versions.map(v=><option key={v.id} value={v.id}>{v.name}{v.kind==='draft'?' (unrendered)':v.kind==='rendered'?' (imported)':''}</option>)}
+            {project.versions.map(v=><option key={v.id} value={v.id}>{v.name}{v.kind==='draft'?' (unrendered)':v.kind==='rendered'?v.candidateId?' (graded)':' (imported)':''}</option>)}
           </select></label>
           <button disabled={busy} onClick={()=>renderInput.current?.click()}>Import render</button>
           {selected?.kind==='rendered'&&<button onClick={()=>void downloadVideo()}>Download video</button>}
@@ -97,6 +102,10 @@ export default function App() {
             try{downloadBlob(new Blob([JSON.stringify(project.backend?.brief,null,2)],{type:'application/json'}),'creative-brief.json');}
             catch(cause){reportError(cause,'brief.export');}
           }}/>
+        <RenderPanel state={project.backend} health={consultation.health} online={consultation.online}
+          sending={consultation.sending} direction={direction}
+          onGenerate={()=>{w.clearError();void consultation.generate();}}
+          onRetry={()=>{w.clearError();void consultation.retry();}} onCancel={()=>void consultation.cancel()}/>
       </main>
       <SessionPanel key={project.id} events={project.events} onExport={exportLog}/>
     </div>

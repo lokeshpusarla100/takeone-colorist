@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Project } from './types';
 import { AppError } from './errors';
 import * as api from './api';
+import { withRenderedVersions } from './renderedVersions';
 
 export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Project)=>void,
   reportError:(cause:unknown,stage:string)=>void) {
@@ -23,9 +24,10 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
     if(current.current?.backend?.id!==state.id)return;
     setOnline(true);
     update(p=>{
-      if(p.backend?.id!==state.id||p.backend.revision>=state.revision)return p;
+      if(p.backend?.id!==state.id||p.backend.revision>state.revision)return p;
+      if(p.backend.revision===state.revision)return withRenderedVersions(p,state);
       const ids=new Set(p.events.map(e=>e.id));
-      return {...p,backend:state,events:[...p.events,...state.events.filter(e=>!ids.has(e.id))]
+      return {...withRenderedVersions(p,state),backend:state,events:[...p.events,...state.events.filter(e=>!ids.has(e.id))]
         .sort((a,b)=>Date.parse(a.timestamp)-Date.parse(b.timestamp))};
     });
     if(state.status==='failed'||state.status==='cancelled'){
@@ -51,7 +53,7 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
     void poll();
     return()=>{aborter.abort();clearTimeout(timer);};
   },[project?.backend?.id,refresh,apply,online]);
-  const send=async(kind:'analyze'|'answers'|'retry',body:Record<string,unknown>)=>{
+  const send=async(kind:'analyze'|'answers'|'retry'|'render',body:Record<string,unknown>)=>{
     const source=current.current;
     if(!source?.backend||inFlight.current)return;
     inFlight.current=true;setSending(true);
@@ -74,6 +76,7 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
       answer:{question_id:questionId,response_type:responseType,response},
     }),
     retry:()=>send('retry',{}),cancel:stop,
+    generate:()=>send('render',{}),
     refresh:()=>setRefresh(n=>n+1),
     unavailable:()=>reportError(new AppError('SOURCE_NOT_PREPARED','Prepare the source before analysis.',
       'Upload the original video to the local backend first.'),'backend.source'),

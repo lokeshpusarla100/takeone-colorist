@@ -95,7 +95,7 @@ def create_app(settings: Settings | None = None, provider=None):
             "max_upload_bytes": settings.max_upload_bytes,
             "max_duration_seconds": settings.max_duration,
             "max_questions": settings.max_questions,
-            "grading_connected": False,
+            "grading_connected": True,
         }
 
     @application.post("/api/projects", status_code=202)
@@ -177,6 +177,29 @@ def create_app(settings: Settings | None = None, provider=None):
     @application.post("/api/projects/{project_id}/cancel", status_code=202)
     def cancel(project_id: UUID):
         return service().cancel(str(project_id)).public()
+
+    @application.post("/api/projects/{project_id}/render", status_code=202)
+    def generate(project_id: UUID, body: Command):
+        return service().generate(str(project_id), body.revision, str(body.command_id)).public()
+
+    def candidate_file(project_id: UUID, candidate_id: UUID, filename: str):
+        state = service().store.get(str(project_id))
+        candidate = next((c for c in state.candidates if c.id == str(candidate_id)), None)
+        path = service().store.directory(str(project_id)) / "candidates" / str(candidate_id) / filename
+        if not candidate or candidate.status != "ready" or not path.is_file():
+            raise Problem("CANDIDATE_NOT_READY", "The requested candidate is not available.",
+                          "Wait for validation or inspect its saved failure.", 409)
+        return path, candidate
+
+    @application.get("/api/projects/{project_id}/candidates/{candidate_id}/preview")
+    def candidate_preview(project_id: UUID, candidate_id: UUID):
+        path, _ = candidate_file(project_id, candidate_id, "preview.webm")
+        return FileResponse(path, media_type="video/webm")
+
+    @application.get("/api/projects/{project_id}/candidates/{candidate_id}/download")
+    def candidate_download(project_id: UUID, candidate_id: UUID):
+        path, candidate = candidate_file(project_id, candidate_id, "grade.mp4")
+        return FileResponse(path, media_type="video/mp4", filename=candidate.name + "-graded.mp4")
 
     @application.get("/api/projects/{project_id}/brief")
     def get_brief(project_id: UUID):

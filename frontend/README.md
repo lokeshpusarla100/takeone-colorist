@@ -14,6 +14,15 @@ Then run in this directory:
 
 Open http://127.0.0.1:5173/. On a fresh checkout, run npm ci first. Dev and preview proxy /api to port 8000; TAKEONE_API_TARGET can override the target for isolated tests.
 
+The Progress tab displays elapsed backend time for each step and a total across this video's recorded
+attempts. Planning/render/QC and mask tracking/validation have separate breakdowns. Saved stage events
+preserve timing on refresh; waiting for answers and idle time are excluded. Older untimed work shows
+`—`, and interrupted/offline timing is explicitly qualified. Browser upload-transfer time is excluded.
+
+New questions open a native modal automatically. Close/Escape only hide it; Answer question reopens
+the pending question, and Review Q&A opens saved answers. Drafts survive closing/reopening while the
+page stays open; submitted answers survive refresh. The direction and brief stay in the main editor.
+
 Other commands:
 
     npm test
@@ -66,11 +75,11 @@ The selected profile and category/scene/purpose labels are next-upload defaults 
 - media.ts: bounded first-frame/thumbnail inspection.
 - errors.ts: stable codes, messages, recovery actions and diagnostics.
 - storage.ts: IndexedDB transactions and state validation.
-- RubricPanel.tsx: prompt, question/answer controls and brief.
+- RubricPanel.tsx / RubricDialog.tsx: direction, brief and an accessible question/answer popup with saved answer history.
 - RenderPanel.tsx: explicit global-grade request, progress, recipe and render checks.
 - SamPanel.tsx: explicit subject/scope selection, tracking progress, saved mask runs, diagnostic overlay and manifest.
 - TokenUsage.tsx / tokenUsage.ts: project usage totals, per-request breakdown, pending/unknown counts and legacy event compatibility.
-- ProgressPanel.tsx / workflow.ts: backend-stage progress, waiting/completion states and processing locks.
+- ProgressPanel.tsx / workflow.ts / progressTiming.ts: backend-stage progress, persisted per-step/total timers, waiting/completion states and processing locks.
 - SessionPanel.tsx: keyboard-accessible Progress/Session log tabs and activity filtering.
 - MemoryView.tsx: scoped preference management and supporting evidence.
 - preferenceApi.ts / preferenceContext.ts: memory API and next-upload profile/context defaults.
@@ -85,3 +94,8 @@ The token panel uses the current backend project's persisted events rather than 
 Automated frontend tests use Node's test library and the installed Vite compiler. Browser integration should exercise upload → Start → question → answer → brief, preference add/edit/delete and profile isolation, and feedback with capture paused. A real generated render requires a separate visual review; offline memory verification makes no model calls.
 
 tests.offline_app:app is a separate fixture-backed test server. Normal startup always uses the real Muse provider. Offline checks verify wiring and state behavior, not live model quality.
+
+Progress/popup verification: 140 backend/rubric tests, 28 frontend tests and the production build
+passed. Fourteen isolated Chrome checks exercised live/paused/restored timing, modal focus and Escape,
+answer submission/history, processing locks, and mobile fit. These checks used synthetic footage and
+mocked providers, with no Meta calls.

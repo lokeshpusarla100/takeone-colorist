@@ -754,6 +754,7 @@ class Service:
                 brief.unresolved.append("Observation gap: " + proposal.observation_gap)
             if proposal.knowledge_gap:
                 brief.unresolved.append("Knowledge gap: " + proposal.knowledge_gap)
+            self.mutate(project_id,lambda s:setattr(s,'stage','save_brief'))
             self.store.artifact(project_id, "brief.json", brief.model_dump(mode="json"))
         def selected(state):
             state.rubric = session.snapshot()
@@ -855,7 +856,7 @@ class Service:
                 target.recipe = recipe
                 target.status = "rendering"
                 target.error = None
-                state.stage = "render_grade"
+                state.stage = "plan_grade"
                 self.event(state, "Grading recipe saved", proposal.summary, actor="muse", kind="decision",mode=proposal.mode,
                            candidate=candidate.name, contrast=proposal.parameters.contrast,
                            saturation=proposal.parameters.saturation, gamma=proposal.parameters.gamma)
@@ -874,7 +875,7 @@ class Service:
             def resuming(state):
                 target = next(c for c in state.candidates if c.id == candidate.id)
                 target.status, target.error = "rendering", None
-                state.stage = "render_grade"
+                state.stage = "plan_grade"
                 self.event(state, "Resuming saved recipe", "No additional model call is needed.", candidate=candidate.name)
             self.mutate(project_id, resuming)
         self.check_cancel(cancel)
@@ -882,6 +883,7 @@ class Service:
         if recipe.proposal.mode=='localized':
             if evidence is None or recipe.timeline['key']!=evidence['key']:
                 raise Problem('LOCAL_TIMELINE_CHANGED','The cached recipe has a different local source mapping.','Create a new candidate.',409)
+            self.mutate(project_id,lambda s:setattr(s,'stage','verify_segmentation_input'))
             records,ranges=self.local_masks(project_id,candidate.id,evidence,recipe.proposal.local,cancel)
             # Frame-derived interval boundaries, never guessed request timestamps.
             step=float(1/Fraction(evidence['frame_map']['proxy']['rate']))
@@ -899,7 +901,9 @@ class Service:
             def compositing(s):
                 s.stage='render_local_grade';self.event(s,'Rendering localized foreground/background grade',candidate=candidate.name)
             self.mutate(project_id,compositing)
-        result = rendering.render(original, output, recipe, state.source, self.settings, cancel)
+        def render_stage(stage):
+            self.mutate(project_id,lambda s:setattr(s,'stage',stage))
+        result = rendering.render(original, output, recipe, state.source, self.settings, cancel,on_stage=render_stage)
         result['execution_capabilities']={k:technical[k] for k in ['operations','localized_available','limitations','shots']}
         self.check_cancel(cancel)
         def checking(s):

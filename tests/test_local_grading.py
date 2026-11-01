@@ -156,7 +156,7 @@ def test_sam_and_ffmpeg_errors_are_actionable_without_fallback(settings,scene,mo
     with TestClient(create_app(settings,Planner(),Masks()),base_url='http://127.0.0.1') as c:
         # Existing workspace persists; use another source project.
         state=start(c,upload(c,scene),'explicit global')
-        monkeypatch.setattr(rendering,'render',lambda *_:(_ for _ in ()).throw(Problem('MEDIA_TOOL_FAILED','Fixture FFmpeg error','Inspect encoder diagnostic; retry saved recipe.',422)))
+        monkeypatch.setattr(rendering,'render',lambda *_,**__:(_ for _ in ()).throw(Problem('MEDIA_TOOL_FAILED','Fixture FFmpeg error','Inspect encoder diagnostic; retry saved recipe.',422)))
         result=generate(c,state)
         assert result['error']['code']=='MEDIA_TOOL_FAILED' and result['error']['action']
 

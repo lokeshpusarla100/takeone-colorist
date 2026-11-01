@@ -4,7 +4,7 @@ from pathlib import Path
 import threading
 from uuid import UUID, uuid4
 
-from .contracts import State, now
+from .contracts import Event, State, now
 from .errors import Problem
 
 
@@ -38,7 +38,17 @@ class Store:
             directory = self.directory(state.id)
             directory.mkdir(parents=True, exist_ok=True)
             state.revision += 1
+            previous_update=state.updated_at
             state.updated_at = now()
+            marker=next((e for e in reversed(state.events) if e.details.get('progress_timing') is True),None)
+            active=bool(state.active_job)
+            signature=(state.stage,active,state.active_job)
+            previous=(marker.details.get('progress_stage'),marker.details.get('progress_active'),marker.details.get('progress_job')) if marker else None
+            if signature!=previous and (active or marker and marker.details.get('progress_active')):
+                interrupted=not active and bool(state.error and state.error.get('code')=='JOB_INTERRUPTED')
+                state.events.append(Event(title='Processing stage',timestamp=previous_update if interrupted else state.updated_at,
+                    details={'progress_timing':True,'progress_stage':state.stage,'progress_active':active,
+                             'progress_status':state.status,'progress_job':state.active_job,'progress_interrupted':interrupted}))
             temporary = directory / (".state-" + str(uuid4()) + ".tmp")
             try:
                 with temporary.open("w") as stream:

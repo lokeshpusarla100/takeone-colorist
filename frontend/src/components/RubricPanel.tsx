@@ -1,29 +1,27 @@
 import { useEffect, useRef, useState } from 'react';
 import type { BackendState, Health } from '../lib/api';
 import { activeJob, stageLabel } from '../lib/api';
+import RubricDialog from './RubricDialog';
+import type { AppError } from '../lib/errors';
 
 export default function RubricPanel({state,health,online,busy,sending,hasSource,direction,onDirection,onSaveDirection,
-  onStart,onAnswer,onRetry,onCancel,onPrepare,onDownload}:{
+  onStart,onAnswer,onRetry,onCancel,onPrepare,onDownload,error}:{
   state?:BackendState;health:Health|null;online:boolean;busy:boolean;sending:boolean;hasSource:boolean;
   direction:string;onDirection:(text:string)=>void;onSaveDirection:()=>void;onStart:()=>void;
   onAnswer:(id:string,type:string,response:string)=>void;onRetry:()=>void;onCancel:()=>void;
   onPrepare:()=>void;onDownload:()=>void;
+  error?:AppError|null;
 }) {
-  const [choice,setChoice]=useState('');
-  const [other,setOther]=useState('');
-  const questionRef=useRef<HTMLDivElement>(null);
-  useEffect(()=>{setChoice('');setOther('');},[state?.question?.id,state?.request,state?.id]);
-  useEffect(()=>{
-    if(questionRef.current){
-      questionRef.current.scrollIntoView({block:'nearest'});
-      questionRef.current.querySelector('legend')?.focus({preventScroll:true});
-    }
-  },[state?.question?.id,state?.request,state?.id]);
+  const [open,setOpen]=useState(false);
+  const trigger=useRef<HTMLButtonElement>(null);
   const working=!!state&&activeJob(state);
   const changed=!!state&&direction.trim()!==state.request;
   const disabled=busy||sending||working;
   const question=state?.status==='awaiting_answer'?state.question:null;
   const brief=state?.brief;
+  useEffect(()=>{if(question&&!changed)setOpen(true);},[state?.id,state?.request,question?.id,changed]);
+  useEffect(()=>{if(!open)trigger.current?.focus();},[open]);
+  const close=()=>setOpen(false);
   return <section className="direction rubric-panel" aria-label="Creative direction consultation">
     <label htmlFor="direction">Creative direction</label>
     <textarea id="direction" value={direction} disabled={disabled} maxLength={4000} rows={3}
@@ -44,26 +42,11 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
       <button disabled={disabled||!online} onClick={onRetry}>Retry failed step</button>
     </div>}
     {question&&changed&&<p className="inline-help">The request has changed. Start with the new direction to update the questions.</p>}
-    {question&&!changed&&<div className="rubric-question" key={question.id} ref={questionRef}>
-      <p className="question-count">{state?.answered_count} answered · up to {state?.max_questions} questions, one at a time</p>
-      <fieldset disabled={disabled||!online}>
-        <legend tabIndex={-1}>{question.question}</legend>
-        {question.options.map(option=><label className="question-option" key={option.id}>
-          <input type="radio" name={'question-'+question.id} checked={choice===option.id} onChange={()=>setChoice(option.id)}/>
-          <span>{option.label}</span>
-        </label>)}
-        <label className="question-option"><input type="radio" name={'question-'+question.id} checked={choice==='__other'} onChange={()=>setChoice('__other')}/>My own answer</label>
-        {choice==='__other'&&<textarea rows={2} maxLength={4000} aria-label="Your answer" value={other} onChange={e=>setOther(e.target.value)}/>}
-      </fieldset>
-      <p className="question-reason"><strong>Why this matters: </strong>{question.decision_fork}</p>
-      <div className="actions">
-        <button disabled={disabled||!online||!choice||(choice==='__other'&&!other.trim())}
-          onClick={()=>onAnswer(question.id,choice==='__other'?'free_text':'option',choice==='__other'?other.trim():choice)}>
-          {sending?'Saving answer…':'Continue'}</button>
-        <button disabled={disabled||!online} onClick={()=>onAnswer(question.id,'delegate','')}>You decide</button>
-        <button disabled={disabled||!online} onClick={()=>onAnswer(question.id,'skip','')}>Skip</button>
-      </div>
-    </div>}
+    {state&&(state.analysis||question||brief)&&<div className="consultation-actions">
+      <span>{question&&!changed?'Muse has a question for you.':`${state.answered_count} answers saved.`}</span>
+      <button ref={trigger} onClick={()=>setOpen(true)}>{question&&!changed?'Answer question':'Review Q&A'}</button></div>}
+    <RubricDialog open={open} onClose={close} state={state} disabled={disabled} online={online} changed={changed}
+      onAnswer={onAnswer} onRetry={onRetry} onCancel={onCancel} error={error}/>
     {brief&&<section className="creative-brief" aria-labelledby="brief-heading">
       <div className="section-heading"><h2 id="brief-heading">Creative brief</h2><button onClick={onDownload}>Download brief</button></div>
       <p><strong>Request: </strong>{brief.initial_request||'Conservative direction delegated to Muse.'}</p>

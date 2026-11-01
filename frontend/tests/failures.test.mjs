@@ -11,6 +11,45 @@ const {parseBackend,request,waitForSource}=await load('api');
 const {preparedSource}=await load('preparedSource');
 const {tokenUsage}=await load('tokenUsage');
 const {mutationLocked,runProgress}=await load('workflow');
+const {processingTimings,formatDuration}=await load('progressTiming');
+
+const timingEvent=(id,second,stage,active=true,extra={})=>({id,timestamp:new Date(Date.UTC(2026,10,2,10)+second*1000).toISOString(),
+  details:{progress_timing:true,progress_stage:stage,progress_active:active,...extra}});
+const timingNow=second=>Date.UTC(2026,10,2,10)+second*1000;
+test('processing timers persist across refreshes and exclude answer and idle waits',()=>{
+  const events=[timingEvent('a',0,'inspect_source'),timingEvent('b',3,'prepare_preview'),timingEvent('c',8,'ready',false),
+    timingEvent('d',100,'analyze_scene'),timingEvent('e',110,'select_question'),timingEvent('f',115,'awaiting_answer',false)];
+  const state={status:'awaiting_answer',events};
+  const measured=processingTimings(state,timingNow(200));
+  assert.equal(measured.total,23000);
+  assert.deepEqual(measured.byStep,{prepare:8000,inspect:10000,clarify:5000});
+  assert.deepEqual(processingTimings(JSON.parse(JSON.stringify(state)),timingNow(500)),measured);
+  const running=processingTimings({status:'analyzing',events:[...events,events[0],timingEvent('g',205,'select_question')]},timingNow(210));
+  assert.equal(running.total,28000);assert.equal(running.running,true);
+});
+test('render, masks and review timers count each interval once across phases',()=>{
+  const events=[timingEvent('a',0,'plan_grade'),timingEvent('b',2,'segment_subject'),timingEvent('c',8,'validate_local_masks'),
+    timingEvent('d',10,'render_local_grade'),timingEvent('e',15,'check_output_quality'),timingEvent('f',17,'creative_review'),timingEvent('g',20,'render_ready',false)];
+  const result=processingTimings({status:'render_ready',events},timingNow(50));
+  assert.equal(result.total,20000);
+  assert.deepEqual(result.byStep,{grade:9000,masks:8000,review:3000});
+  assert.deepEqual(result.parts,{plan:2000,track:6000,validate_masks:2000,render:5000,qc:2000});
+});
+test('timers freeze on disconnect, cancellation and interrupted recovery',()=>{
+  const events=[timingEvent('a',0,'plan_grade'),timingEvent('b',5,'render_grade')];
+  const state={status:'rendering',events,updated_at:new Date(timingNow(7)).toISOString()};
+  assert.equal(processingTimings(state,timingNow(100),false).total,7000);
+  const stopped=processingTimings({...state,status:'cancelled',events:[...events,timingEvent('c',8,'cancelling'),timingEvent('d',10,'cancelling',false)]},timingNow(100));
+  assert.equal(stopped.total,10000);assert.equal(stopped.running,false);
+  const recovered=processingTimings({...state,status:'failed',events:[...events,timingEvent('d',7,'render_grade',false,{progress_interrupted:true})]},timingNow(100));
+  assert.equal(recovered.total,7000);assert.equal(recovered.interrupted,true);
+});
+test('untimed legacy sessions stay unknown and durations support long jobs',()=>{
+  assert.equal(processingTimings({events:[],status:'ready'}).total,null);
+  assert.equal(formatDuration(undefined),'—');assert.equal(formatDuration(0),'00:00');
+  assert.equal(formatDuration(250),'<1s');assert.equal(formatDuration(62000),'01:02');
+  assert.equal(formatDuration(3661000),'01:01:01');
+});
 
 test('mutating workspace actions lock during local, remote and command processing',()=>{
   for(const status of ['ingesting','analyzing','rendering','segmenting','reviewing'])assert.equal(mutationLocked({status}),true);
@@ -34,12 +73,17 @@ test('progress distinguishes waiting for a single answer from model processing a
   assert.equal(complete.working,false);
   assert.equal(complete.steps[2].phase,'complete');
   assert.equal(complete.steps[4].phase,'pending');
+  const saving=runProgress({...state,status:'analyzing',stage:'save_brief'});
+  assert.equal(saving.steps[2].phase,'complete');assert.equal(saving.steps[3].phase,'active');
   const changedBrief=runProgress({...state,status:'brief_ready',stage:'brief_ready',brief:{},candidates:[{status:'ready'}]});
   assert.equal(changedBrief.steps[4].phase,'pending');
   assert.match(changedBrief.steps[4].detail,/earlier version/);
   const tracking=runProgress({...state,status:'segmenting',stage:'segment_subject',brief:{},segmentations:[{status:'streaming',frame_count:12,frames_with_masks:4}]});
   assert.equal(tracking.working,true);
   assert.equal(tracking.steps[5].phase,'active');
+  const validating=runProgress({...state,status:'rendering',stage:'validate_local_masks',brief:{},
+    candidates:[{status:'rendering',recipe:{proposal:{mode:'localized'}}}],segmentations:[{status:'ready',frame_count:12,frames_with_masks:12}]});
+  assert.equal(validating.steps[5].phase,'active');
   const review=runProgress({...state,status:'reviewing',stage:'creative_review',brief:{},candidates:[{status:'ready'}]});
   assert.equal(review.working,true);assert.equal(review.steps[6].phase,'active');
 });
@@ -186,15 +230,19 @@ test('cancellation settles immediately and releases resources',async t=>{
 test('structured backend errors keep their code, recovery action and request ID',async t=>{
   const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});
   globalThis.fetch=async()=>new Response(JSON.stringify({error:{
-    code:'MUSE_NOT_CONFIGURED',message:'Key missing',action:'Configure .env',details:{request_id:'test-request'},
+    code:'MUSE_NOT_CONFIGURED',message:'Key missing',action:'Configure .env',details:{request_id:'test-request',timing:{max_error_ms:4.8}},
   }}),{status:503,headers:{'Content-Type':'application/json'}});
   await assert.rejects(request('/api/health'),e=>e.code==='MUSE_NOT_CONFIGURED'
-    &&e.action==='Configure .env'&&e.details.request_id==='test-request');
+    &&e.action==='Configure .env'&&e.details.request_id==='test-request'&&JSON.parse(e.details.timing).max_error_ms===4.8);
 });
 test('malformed or inconsistent backend state is rejected before it reaches storage',()=>{
   const state={id:crypto.randomUUID(),revision:1,status:'ingesting',stage:'inspect_source',filename:'test.mp4',
     request:'',answered_count:0,max_questions:3,model_calls:0,source:null,preview:null,question:null,brief:null,events:[],error:null};
   assert.equal(parseBackend(state).status,'ingesting');
+  const nested=parseBackend({...state,error:{code:'RENDER_TIMING_CHANGED',message:'Timing error',action:'Retry',details:{timing:{maximum:4.8}}}});
+  assert.deepEqual(JSON.parse(nested.error.details.timing),{maximum:4.8});
+  assert.equal(parseBackend({...state,rubric_history:[{question_id:'q1',question:'Contrast?',answer:'Soft',response_type:'option'}]}).rubric_history[0].answer,'Soft');
+  assert.throws(()=>parseBackend({...state,rubric_history:[{question_id:'q1'}]}),{code:'API_RESPONSE_INVALID'});
   assert.throws(()=>parseBackend({...state,status:'awaiting_answer'}),{code:'API_RESPONSE_INVALID'});
   assert.throws(()=>parseBackend({...state,events:[{id:'bad'}]}),{code:'API_RESPONSE_INVALID'});
   assert.throws(()=>parseBackend({...state,preview:{url:'https://untrusted.invalid/video',width:2,height:2,duration:1,bytes:1}}),{code:'API_RESPONSE_INVALID'});

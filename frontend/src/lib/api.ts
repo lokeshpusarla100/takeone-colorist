@@ -33,6 +33,8 @@ export type RenderCandidate = {
 };
 export type BackendState = {
   id:string;revision:number;
+  updated_at?:string;
+  rubric_history?:{question_id:string;question:string;answer:string;response_type:string}[];
   status:'ingesting'|'ready'|'analyzing'|'awaiting_answer'|'brief_ready'|'rendering'|'render_ready'|'segmenting'|'reviewing'|'failed'|'cancelled';
   stage:string;filename:string;request:string;answered_count:number;max_questions:number;model_calls:number;
   source:null|{name:string;bytes:number;sha256:string;width:number;height:number;duration:number;
@@ -71,6 +73,10 @@ const primitive=(value:unknown)=>value===null||text(value)||finite(value)||typeo
 const gradeValues=(v:unknown)=>record(v)&&['contrast','saturation','gamma'].every(k=>finite(v[k]))
   &&(v.brightness_gain===undefined||finite(v.brightness_gain))&&(v.cooling===undefined||finite(v.cooling));
 const details=(value:unknown)=>record(value)&&Object.values(value).every(primitive);
+const jsonValue=(value:unknown,depth=0):boolean=>primitive(value)||depth<16&&(Array.isArray(value)
+  ?value.every(v=>jsonValue(v,depth+1)):record(value)&&Object.values(value).every(v=>jsonValue(v,depth+1)));
+const flattenDetails=(value:Record<string,unknown>):ErrorDetails=>Object.fromEntries(Object.entries(value)
+  .map(([key,item])=>[key,primitive(item)?item:JSON.stringify(item)])) as ErrorDetails;
 const validEvent=(value:unknown)=>record(value)&&text(value.id)&&text(value.timestamp)
   &&Number.isFinite(Date.parse(value.timestamp as string))&&text(value.title)
   &&['app','user','muse','renderer'].includes(value.actor as string)
@@ -98,12 +104,15 @@ export function parseBackend(value:unknown):BackendState {
     ||!text(value.question.decision_fork)||!Array.isArray(value.question.options)
     ||value.question.options.length<2||value.question.options.length>3
     ||!value.question.options.every(o=>record(o)&&text(o.id)&&text(o.label)&&text(o.intended_outcome))))return invalidResponse();
+  if(value.updated_at!==undefined&&(!text(value.updated_at)||!Number.isFinite(Date.parse(value.updated_at as string))))return invalidResponse();
+  if(value.rubric_history!==undefined&&(!Array.isArray(value.rubric_history)||!value.rubric_history.every(a=>record(a)
+    &&['question_id','question','answer','response_type'].every(k=>text(a[k])))))return invalidResponse();
   if(value.brief!==null&&(!record(value.brief)||!text(value.brief.initial_request)||!Array.isArray(value.brief.directives)
     ||!value.brief.directives.every(d=>record(d)&&text(d.outcome)&&text(d.scope)&&text(d.provenance))
     ||!strings(value.brief.explicit_constraints)||!strings(value.brief.default_protections)
     ||!strings(value.brief.technical_envelope)||!strings(value.brief.unresolved)||!Array.isArray(value.brief.answers)))return invalidResponse();
   if(value.error!==null&&(!record(value.error)||!text(value.error.code)||!text(value.error.message)
-    ||!text(value.error.action)||!details(value.error.details)))return invalidResponse();
+    ||!text(value.error.action)||!record(value.error.details)||!jsonValue(value.error.details)))return invalidResponse();
   if(value.status==='awaiting_answer'&&!value.question)return invalidResponse();
   if(value.consultation!==undefined&&value.consultation!==null&&(!record(value.consultation)
     ||!['question_selected','question_limit','no_candidates','no_valid_candidates'].includes(value.consultation.reason as string)
@@ -156,16 +165,16 @@ export function parseBackend(value:unknown):BackendState {
     &&(!uuid(value.selected_candidate_id)||!Array.isArray(value.candidates)
       ||!value.candidates.some(c=>record(c)&&c.id===value.selected_candidate_id&&c.status==='ready')))return invalidResponse();
   if(value.status==='render_ready'&&!value.selected_candidate_id)return invalidResponse();
-  return value as unknown as BackendState;
+  return {...value,error:record(value.error)?{...value.error,details:flattenDetails(value.error.details as Record<string,unknown>)}:null} as unknown as BackendState;
 }
 export const activeJob=(s:BackendState)=>s.status==='ingesting'||s.status==='analyzing'||s.status==='rendering'||s.status==='segmenting'||s.status==='reviewing';
 export function stageLabel(stage:string) {
   const labels:Record<string,string>={
     inspect_source:'Inspecting source metadata',prepare_preview:'Preparing video previews',
-    analyze_scene:'Muse is inspecting the video',select_question:'Checking whether clarification is needed',
+    analyze_scene:'Muse is inspecting the video',select_question:'Checking whether clarification is needed',save_brief:'Saving the creative brief',
     awaiting_answer:'Waiting for your answer',brief_ready:'Creative brief ready',ready:'Source ready',
     cancelling:'Cancelling; an in-flight request may still finish',queue:'Waiting for the worker',
-    plan_grade:'Preparing the global grading recipe',render_grade:'Rendering and validating the video',render_ready:'Rendered video ready',
+    plan_grade:'Planning supported adjustments',render_grade:'Rendering the video',render_ready:'Rendered video ready',
     verify_segmentation_input:'Verifying source/proxy frame mapping',segment_subject:'SAM is tracking the subject',
     render_mask_overlay:'Rendering the mask diagnostic overlay',segmentation_ready:'Subject tracking complete',
     decode_segmentation_masks:'Validating and decoding saved SAM masks locally',
@@ -181,7 +190,7 @@ function issue(value:unknown,status:number):AppError {
   const body=value as {error?:{code?:string;message?:string;action?:string;details?:ErrorDetails}};
   if(body?.error&&typeof body.error.message==='string') {
     return new AppError(body.error.code??'API_FAILED',body.error.message,
-      body.error.action??'Retry the failed operation.',{...body.error.details,http_status:status});
+      body.error.action??'Retry the failed operation.',{...(record(body.error.details)?flattenDetails(body.error.details):{}),http_status:status});
   }
   return new AppError('API_FAILED','The backend request failed.','Check the backend terminal and retry.',{http_status:status});
 }

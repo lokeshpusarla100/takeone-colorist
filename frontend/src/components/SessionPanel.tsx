@@ -15,7 +15,7 @@ export default function SessionPanel({events,onExport,state,localBusy=false,loca
     if(list.current&&follow.current)list.current.scrollTop=list.current.scrollHeight;
   },[events.length,tab]);
   const labels={app:'App',user:'You',muse:'Muse',renderer:'Renderer'};
-  const filtered=events.filter(e=>(filter==='all'||e.kind===filter)
+  const filtered=events.filter(e=>!e.details?.progress_timing&&(filter==='all'||e.kind===filter)
     && (e.title+' '+(e.reason??'')+' '+JSON.stringify(e.details??{})).toLowerCase().includes(query.toLowerCase()));
   return <section className="session-panel" aria-labelledby="session-heading">
     <div className="section-heading"><h2 id="session-heading">Run dashboard</h2><button onClick={onExport}>Export JSON</button></div>

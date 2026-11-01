@@ -172,14 +172,16 @@ def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Se
 
 
 def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
-           settings: Settings, cancel: threading.Event):
+           settings: Settings, cancel: threading.Event, *, on_stage=None):
     source_meta = verify_source(source, original, settings, cancel)
     directory.mkdir(exist_ok=True)
     policy=timing.encoding_policy(source_meta)
     source_manifest=(recipe.evidence_selection or {}).get('manifest')
     if not source_manifest or 'pts' not in source_manifest:
         source_manifest=evidence.frame_manifest(source,settings,cancel)
+    if on_stage:on_stage('render_local_grade' if recipe.proposal.mode=='localized' else 'render_grade')
     command(render_args(source, directory, recipe, settings, original.audio_codec,timing_policy=policy), cancel, 300,cwd=directory.resolve())
+    if on_stage:on_stage('check_output_quality')
     master = directory / "grade.partial.mp4"
     view = directory / "preview.partial.webm"
     # Fully decode the output; a successful encoder exit alone is insufficient.

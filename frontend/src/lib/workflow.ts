@@ -15,6 +15,8 @@ export function runProgress(state?:BackendState,localBusy=false,localProgress?:s
   const brief=!!state?.brief;
   const latest=state?.candidates?.at(-1);
   const masks=state?.segmentations?.at(-1);
+  const masking=state?.status==='segmenting'||state?.status==='rendering'&&latest?.recipe?.proposal.mode==='localized'
+    &&['verify_segmentation_input','segment_subject','decode_segmentation_masks','validate_local_masks'].includes(state.stage);
   const waiting=state?.status==='awaiting_answer';
   const step=(name:string,complete:boolean,active:boolean,detail:string):ProgressStep=>({
     name,phase:complete?'complete':active?(failed?'failed':'active'):'pending',detail,
@@ -22,14 +24,14 @@ export function runProgress(state?:BackendState,localBusy=false,localProgress?:s
   const steps:ProgressStep[]=[
     step('Prepare source',source,localBusy||!!state&&!source,'Upload and prepare a browser preview.'),
     step('Inspect video',analysis,source&&!analysis&&!!state&&state.status!=='ready','Inspect the clip once; reuse cached observations.'),
-    {...step('Clarify direction',brief,analysis&&!brief,'Process each answer before selecting another useful question.'),
+    {...step('Clarify direction',brief||state?.stage==='save_brief',analysis&&!brief&&state?.stage!=='save_brief','Process each answer before selecting another useful question.'),
       ...(waiting?{phase:'waiting' as Phase,detail:`Waiting for answer ${state.answered_count+1}. One question at a time.`}:{})},
-    step('Save creative brief',brief,false,'Save current intent, boundaries and limitations.'),
+    step('Save creative brief',brief,state?.stage==='save_brief','Save current intent, boundaries and limitations.'),
     {...step('Generate grade · optional',['render_ready','reviewing'].includes(state?.status??'')&&latest?.status==='ready',state?.status==='rendering',
       latest?.status==='ready'?(['render_ready','reviewing'].includes(state?.status??'')?'A rendered version is available. Review the moving result.'
         :'An earlier version is available. Generate again to apply the current brief.'):'Starts only when you request a graded video.'),
       ...(latest&&['failed','cancelled'].includes(latest.status)&&!working?{phase:'failed' as Phase}:{})},
-    {...step('Subject masks · when needed',masks?.status==='ready'||masks?.status==='empty',state?.status==='segmenting'||state?.status==='rendering'&&latest?.recipe?.proposal.mode==='localized'&&['verify_segmentation_input','segment_subject','decode_segmentation_masks'].includes(state.stage),
+    {...step('Subject masks · when needed',!masking&&(masks?.status==='ready'||masks?.status==='empty'),masking,
       masks?`${masks.frames_with_masks}/${masks.frame_count} frames with masks. Review the diagnostic overlay.`:'Starts automatically for localized plans; manual tracking is also available.'),
       ...(masks&&['failed','cancelled'].includes(masks.status)&&!working?{phase:'failed' as Phase}:{})},
     step('Creative review',!!latest?.creative_review,state?.status==='reviewing','Muse inspects actual rendered/source evidence. Its opinion does not approve the candidate for you.'),

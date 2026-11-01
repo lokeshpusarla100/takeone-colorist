@@ -95,7 +95,7 @@ def test_api_tracking_persists_manifest_playable_overlay_and_deduplicates(settin
         assert manifest['frame_map']['frame_count']==12 and manifest['frames_with_masks']==3
         preview=c.get(run['preview_url'],headers={'Range':'bytes=0-31'})
         assert preview.status_code==206 and len(preview.content)==32
-        assert done['events'][-1]['title']=='Subject masks ready'
+        assert [e for e in done['events'] if not e['details'].get('progress_timing')][-1]['title']=='Subject masks ready'
 
 
 def test_overlay_retry_reuses_completed_masks_without_another_sam_request(settings,video,monkeypatch):

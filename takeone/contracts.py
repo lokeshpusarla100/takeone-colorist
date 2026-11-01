@@ -313,5 +313,13 @@ class State(StrictModel):
 
     def public(self):
         value=self.model_dump(mode="json", exclude={"rubric", "receipts", "remote_file_id", "active_job", "job_kind", "history", "render_target_id", "memory_binding", "memory_outbox", "sam_upload", "segmentation_target_id"})
+        questions={q['id']:q for q in (self.rubric or {}).get('questions',[])}
+        value['rubric_history']=[]
+        for answer in (self.rubric or {}).get('answers',[]):
+            question=questions.get(answer['question_id'],{})
+            option=next((o for o in question.get('options',[]) if o['id']==answer['response']),None) if answer['response_type']=='option' else None
+            response=(option['label'] if option else answer['response']) if answer['response_type'] in {'option','free_text'} else 'Delegated to Muse' if answer['response_type']=='delegate' else 'Skipped'
+            value['rubric_history'].append({'question_id':answer['question_id'],'question':question.get('question',answer['question_id']),
+                'answer':response,'response_type':answer['response_type']})
         value['brief_sha256']=hashlib.sha256(json.dumps(self.brief.model_dump(mode='json'),sort_keys=True,separators=(',',':')).encode()).hexdigest() if self.brief else None
         return value

@@ -145,7 +145,7 @@ def test_service_persists_structured_timing_failure_and_retry_reuses_recipe(sett
         state=generate(client,start(client,upload(client,scene),'explicit global correction'))
         assert state['status']=='failed' and client.app.state.service.store.get(state['id']).active_job is None
         assert state['error']['details']['source']=={'classification':'near_cfr'}
-        assert json.loads(state['events'][-1]['details']['source'])=={'classification':'near_cfr'}
+        assert json.loads(next(e for e in reversed(state['events']) if e['kind']=='error')['details']['source'])=={'classification':'near_cfr'}
         candidate=state['candidates'][-1]['id']
         monkeypatch.setattr(rendering,'render',original_render)
         response=client.post('/api/projects/'+state['id']+'/retry',json={'revision':state['revision'],'command_id':str(uuid4())})

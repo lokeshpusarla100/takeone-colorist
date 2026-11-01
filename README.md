@@ -93,6 +93,10 @@ Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and por
 
 The sidebar has **Progress** and **Session log** tabs. Progress shows real source-preparation, video-analysis, clarification, brief and optional-grade stages. It distinguishes processing from waiting for your answer, and uses an indeterminate indicator rather than an estimated percentage. Questioning finishes when Muse returns no question or the configured limit is reached. Historical sessions can retain a validator-rejection stop reason from the previous implementation. New zero-question responses include a short Muse explanation when supplied; older sessions without one are labeled accordingly.
 
+Each progress step shows elapsed backend time, with separate planning/render/check timings and an overall **Total processing** timer. Times accumulate across attempts for this video, survive refresh, and pause between jobs and while awaiting answers. Browser upload transfer is excluded. Older untimed stages show **—** rather than an invented duration. Interrupted work is explicitly marked partial; offline timers freeze at the last saved update.
+
+Rubric questions appear one at a time in an automatic popup. **Answer question** reopens a pending question; **Review Q&A** shows saved questions and answers. Closing or pressing Escape leaves the question unanswered and preserves the current draft while the page stays open. The direction field and completed Creative Brief remain in the editor.
+
 Importing/replacing media, switching sessions, renaming, changing versions/preferences, and submitting direction/feedback or another generation are disabled during conflicting processing or command submission. Cancel remains available for active work until cancellation is requested. Playback, dashboard tabs and log export remain usable. Controls unlock when processing finishes, fails or is cancelled.
 
 ## Subject tracking with SAM

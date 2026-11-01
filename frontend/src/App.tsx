@@ -108,7 +108,7 @@ export default function App() {
           <button disabled={locked} onClick={()=>renderInput.current?.click()}>Import render</button>
           {selected?.kind==='rendered'&&<button onClick={()=>void downloadVideo()}>Download video</button>}
         </div>}
-        <RubricPanel state={project.backend} health={consultation.health} online={consultation.online} busy={busy||!!project.pendingBackend}
+        <RubricPanel key={'rubric:'+project.id} state={project.backend} health={consultation.health} online={consultation.online} busy={busy||!!project.pendingBackend} error={error}
           sending={sending} hasSource={!!project.source} direction={direction} onDirection={setDirection}
           onSaveDirection={()=>w.saveDirection(direction)}
           onStart={()=>{w.saveDirection(direction);w.clearError();void consultation.start(direction);}}

@@ -3,7 +3,7 @@ import { tokenUsage } from '../lib/tokenUsage';
 
 const format=(n:number|null)=>n===null?'—':n.toLocaleString();
 export default function TokenUsage({state}:{state?:BackendState}){
-  const active=state&&['analyzing','rendering','segmenting'].includes(state.status)?state.stage:undefined;
+  const active=state&&['analyzing','rendering','segmenting','reviewing'].includes(state.status)?state.stage:undefined;
   const usage=tokenUsage(state?.events??[],active);
   return <section className="token-usage" aria-labelledby="token-usage-heading">
     <h3 id="token-usage-heading">Token usage · this project</h3>

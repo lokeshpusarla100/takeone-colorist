@@ -100,10 +100,10 @@ def raster(records,width,height):
     return result,ids
 
 
-def prepare_matte(proxy,output,source,evidence,records,plan,settings,cancel):
+def prepare_matte(proxy,output,source,evidence,records,plan,settings,cancel,*,adaptive=False):
     mapping=evidence['frame_map'];w,h=mapping['proxy']['width'],mapping['proxy']['height']
     capture=cv2.VideoCapture(str(proxy));last_gray=last_mask=last_ids=None
-    cuts=set(evidence['cut_frames']);unstable=[];warnings=[];active=0
+    cuts=set(evidence['cut_frames']);unstable=[];warnings=[];active=0;uncertain_flow=[]
     flow_scale=min(160/w,160/h,1);fw,fh=max(8,int(w*flow_scale)),max(8,int(h*flow_scale))
     args=[settings.ffmpeg,'-v','error','-y','-f','rawvideo','-pixel_format','gray16le','-video_size',f'{source.width}x{source.height}',
           '-framerate',mapping['proxy']['rate'],'-i','-','-an','-c:v','ffv1','-threads','2','-pix_fmt','gray16le',str(output/'matte.partial.mkv')]
@@ -128,8 +128,18 @@ def prepare_matte(proxy,output,source,evidence,records,plan,settings,cancel):
                         warped=cv2.remap(last_mask,xx+flow[:,:,0],yy+flow[:,:,1],cv2.INTER_LINEAR)
                         intersection=np.logical_and(warped>.5,small>.5).sum();union=np.logical_or(warped>.5,small>.5).sum()
                         iou=float(intersection/max(1,union))
-                        if iou<.35:unstable.append({'frame':index,'motion_compensated_iou':round(iou,4)})
-                        else:
+                        bad=iou<.35;registration_valid=True;detail={'frame':index,'motion_compensated_iou':round(iou,4)}
+                        if adaptive:
+                            registered=cv2.remap(last_gray,xx+flow[:,:,0],yy+flow[:,:,1],cv2.INTER_LINEAR)
+                            error=float(np.median(np.abs(registered.astype(float)-gray))/255)
+                            tolerance=max(2/255,float(np.quantile(gray,.9)-np.quantile(gray,.1))/255*.1)
+                            edge=cv2.dilate((small>.5).astype(np.uint8),np.ones((3,3),np.uint8))-cv2.erode((small>.5).astype(np.uint8),np.ones((3,3),np.uint8))
+                            allowance=min(1,float(edge.sum())*2/max(1,union))
+                            registration_valid=error<=tolerance;bad=registration_valid and 1-iou>allowance
+                            detail.update(photometric_error=round(error,5),registration_tolerance=round(tolerance,5),boundary_disagreement_allowance=round(allowance,5))
+                            if not registration_valid:uncertain_flow.append(detail)
+                        if bad:unstable.append(detail)
+                        elif registration_valid:
                             band=(cv2.dilate(binary,np.ones((3,3),np.uint8))!=cv2.erode(binary,np.ones((3,3),np.uint8)))
                             prior=cv2.resize(warped,(w,h))
                             soft[band]=.8*soft[band]+.2*prior[band]
@@ -153,8 +163,11 @@ def prepare_matte(proxy,output,source,evidence,records,plan,settings,cancel):
             if not process.stdin.closed:process.stdin.close()
     if unstable:
         warnings.append(f'{len(unstable)} frames have low motion-compensated mask overlap; this diagnostic is not model confidence.')
+    if uncertain_flow:
+        warnings.append(f'Motion registration is uncertain on {len(uncertain_flow)} frames; temporal smoothing was not applied there. Inspect moving edges.')
     consecutive=any(b['frame']==a['frame']+1 and c['frame']==b['frame']+1 for a,b,c in zip(unstable,unstable[1:],unstable[2:]))
     qa={'active_frames':active,'frame_count':mapping['frame_count'],'cut_frames':evidence['cut_frames'],
+        'uncertain_registration_frames':uncertain_flow,'stability_policy':'content_scaled_boundary_and_registration' if adaptive else 'legacy_iou',
         'unstable_frames':unstable,'warnings':warnings,'refinement':'current-supported spatial feather + 20% motion-compensated boundary smoothing; reset at cuts/gaps'}
     sam.atomic(output/'mask-validation.json',qa)
     if consecutive or len(unstable)>max(2,active*.1):
@@ -168,7 +181,7 @@ def prepare_matte(proxy,output,source,evidence,records,plan,settings,cancel):
     return qa
 
 
-def check_output(original,graded,source,evidence,records,plan,settings,cancel):
+def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,limits=None,adaptive=False):
     mapping=evidence['frame_map'];timing=sam.frame_info(graded,settings,cancel)
     if len(timing['pts'])!=mapping['frame_count'] or any(abs(t-f['time'])>.002 for t,f in zip(timing['normalized'],mapping['frames'])):
         raise Problem('LOCAL_OUTPUT_TIMING','Rendered frames no longer match source timing.','The candidate was not accepted.',422)
@@ -214,14 +227,20 @@ def check_output(original,graded,source,evidence,records,plan,settings,cancel):
             'background_checked_frames':counts['background'],'background_worst_measured':worst['background'],
             'background_near_black_increase_max':background_black,'review_status':'needs_user_review',
             'max_layer_mean_rgb_change':pixel_change,
-            'warnings':[f'Background near-black fraction increased by up to {background_black:.3f}; inspect meaningful dark detail.'] if background_black>.08 else [],
+            'warnings':[f'Background near-black fraction increased by up to {background_black:.3f}; inspect meaningful dark detail.'] if background_black>.08 and not adaptive else [],
             'limitations':['Mask-core measurements are technical proxies, not semantic paint/light fidelity or aesthetic approval.']}
     for name,protected in [('subject',plan.preserve_subject_color),('background',neutral)]:
         metrics=worst[name]
-        if protected and (metrics['shadow_increase']>.05 or metrics['subject_luma_ratio']<.85 or metrics['chroma_change']>.035 or metrics['highlight_chroma_change']>.06):
+        failed=(metrics['shadow_increase']>.05 or metrics['subject_luma_ratio']<.85 or metrics['chroma_change']>.035 or metrics['highlight_chroma_change']>.06) if not adaptive else (
+            limits is not None and name=='subject' and (
+                limits.subject_min_luma_ratio is not None and metrics['subject_luma_ratio']<limits.subject_min_luma_ratio
+                or limits.subject_max_chroma_change is not None and metrics['chroma_change']>limits.subject_max_chroma_change))
+        enforce=protected if not adaptive else name=='subject' and limits is not None
+        if enforce and failed:
             raise Problem('LOCAL_PROTECTION_FAILED','A protected rendered layer did not meet measured preservation bounds.',
                           'Review source/output and reduce the treatment; the candidate was not accepted.',422,layer=name,**metrics)
-    if max(pixel_change.values())<.01:
+    result['change_below_encoding_resolution']=max(pixel_change.values())<1/255
+    if max(pixel_change.values())<.01 and not adaptive:
         raise Problem('LOCAL_NO_VISIBLE_EFFECT','The localized recipe produced no measurable change beyond encoding noise.',
                       'Revise the supported treatment; the candidate was not labeled a successful selective edit.',422)
     return result

@@ -1,4 +1,4 @@
-"""One explicit global SDR path, always rendered from the original source."""
+"""Versioned SDR global/local rendering from the original with bounded evidence/QC."""
 import base64
 import hashlib
 import json
@@ -14,6 +14,8 @@ from .config import Settings
 from .contracts import GradeParameters, GradeRecipe, Source
 from .errors import Problem
 from .media import command, probe
+from . import evidence
+from . import color_processing
 
 
 def fingerprint(value) -> str:
@@ -40,7 +42,7 @@ def verify_source(path: Path, source: Source, settings: Settings, cancel: thread
     return metadata
 
 
-def samples(path: Path, source: Source, settings: Settings, cancel: threading.Event):
+def _legacy_samples(path: Path, source: Source, settings: Settings, cancel: threading.Event):
     """Small uncompressed analysis frames; final rendering never uses these pixels."""
     import subprocess
     scale = min(256 / source.width, 256 / source.height, 1)
@@ -80,6 +82,11 @@ def samples(path: Path, source: Source, settings: Settings, cancel: threading.Ev
     return records, images
 
 
+def samples(path,source,settings,cancel,*,selection=None,proxy=None,shots=None,focus=(),cache=None):
+    selection=selection or evidence.plan(path,source,settings,cancel,proxy=proxy,shots=shots,focus=focus,cache=cache)
+    return evidence.collect(path,source,settings,cancel,selection=selection)
+
+
 def treatment_filter(parameters: GradeParameters, *, operator='bounded_sigmoid_v2', protected=False):
     p = parameters
     if protected:
@@ -106,8 +113,10 @@ def treatment_filter(parameters: GradeParameters, *, operator='bounded_sigmoid_v
     return "lutrgb=r='"+tone+"':g='"+tone+"':b='"+tone+"',colorchannelmixer="+matrix+','+balance+',format=gbrp16le'
 
 
-def filter_graph(parameters: GradeParameters, *, recipe=None) -> str:
+def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None) -> str:
     operator=recipe.tone_operator if recipe else 'bounded_sigmoid_v2'
+    def treatment(p,protected=False):
+        return color_processing.lut(directory,p,protected) if operator=='luminance_ocio_v3' else treatment_filter(p,operator=operator,protected=protected)
     start='[0:v]format=gbrp16le,setparams=range=full'
     if recipe and recipe.proposal.mode=='localized':
         local=recipe.proposal.local
@@ -124,16 +133,16 @@ def filter_graph(parameters: GradeParameters, *, recipe=None) -> str:
         weight='+'.join(weights)
         # On disabled frames maskedmerge passes its first input (the base treatment).
         start+=',split=3[basein][fgin][bgin];'
-        start+='[basein]'+treatment_filter(parameters,operator=operator)+'[base];'
-        start+='[fgin]'+treatment_filter(local.foreground,operator=operator,protected=local.preserve_subject_color)+'[fg];'
-        start+='[bgin]'+treatment_filter(local.background,operator=operator)+'[bg];'
+        start+='[basein]'+treatment(parameters)+'[base];'
+        start+='[fgin]'+treatment(local.foreground,local.preserve_subject_color)+'[fg];'
+        start+='[bgin]'+treatment(local.background)+'[bg];'
         # Matroska stores milliseconds; rebase the verified CFR mask by frame index.
         start+=f'[1:v]settb=expr={rate.denominator}/{rate.numerator},setpts=N,format=gbrp16le,setparams=range=full[mask];'
         start+='[bg][fg][mask]maskedmerge=planes=7[local];'
         # The base is selected outside requested intervals, not a repeated stale mask.
         start+=f"[base][local]blend=all_expr='A+(B-A)*({weight})':enable='{condition}':eof_action=endall:repeatlast=0,"
     else:
-        start+=','+treatment_filter(parameters,operator=operator)+','
+        start+=','+treatment(parameters)+','
     return (start+
             "scale=in_range=pc:out_color_matrix=bt709:out_range=tv,format=yuv420p,"
             "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709,"
@@ -142,12 +151,13 @@ def filter_graph(parameters: GradeParameters, *, recipe=None) -> str:
 
 
 def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Settings, audio_codec: str | None):
+    source=source.resolve();directory=directory.resolve()
     audio = "copy" if audio_codec in {"aac", "mp3", "alac"} else "aac"
     inputs=['-i',str(source)]
     if recipe.proposal.mode=='localized':inputs+=['-i',str(directory/'matte.mkv')]
     return [settings.ffmpeg, "-hide_banner", "-v", "error", "-nostdin", "-y",
             "-filter_complex_threads", "2", "-copyts", "-start_at_zero", *inputs,
-            "-filter_complex", filter_graph(recipe.proposal.parameters,recipe=recipe),
+            "-filter_complex", filter_graph(recipe.proposal.parameters,recipe=recipe,directory=directory),
             "-map", "[master]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "17",
             "-threads", "4", "-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-c:a", audio,
             "-movflags", "+faststart", str(directory / "grade.partial.mp4"),
@@ -160,7 +170,7 @@ def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
            settings: Settings, cancel: threading.Event):
     source_meta = verify_source(source, original, settings, cancel)
     directory.mkdir(exist_ok=True)
-    command(render_args(source, directory, recipe, settings, original.audio_codec), cancel, 300)
+    command(render_args(source, directory, recipe, settings, original.audio_codec), cancel, 300,cwd=directory.resolve())
     master = directory / "grade.partial.mp4"
     view = directory / "preview.partial.webm"
     # Fully decode the output; a successful encoder exit alone is insufficient.
@@ -182,9 +192,24 @@ def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
     source_video = next(s for s in source_meta["streams"] if s["codec_type"] == "video")
     if source_video.get("nb_frames") and video.get("nb_frames") and source_video["nb_frames"] != video["nb_frames"]:
         raise Problem("RENDER_TIMING_CHANGED", "Rendering changed the frame count.", "The candidate was not accepted.", 422)
-    after, _ = samples(master, original, settings, cancel)
+    if recipe.evidence_selection:
+        output_manifest=evidence.frame_manifest(master,settings,cancel)
+        source_times=recipe.evidence_selection['manifest']['times']
+        if len(output_manifest['times'])!=len(source_times) or any(abs(a-b)>.002 for a,b in zip(output_manifest['times'],source_times)):
+            raise Problem('RENDER_TIMING_CHANGED','Rendered frame timestamps differ from the original.',
+                          'The candidate was not accepted. Inspect the timeline.',422)
+        after,_=samples(master,original,settings,cancel,selection=recipe.evidence_selection)
+    else:after,_=_legacy_samples(master,original,settings,cancel)
     warnings = []
-    for before, result in zip(recipe.source_samples, after):
+    diagnostics=evidence.compare(recipe.source_samples,after,recipe.proposal.intent.model_dump()) if recipe.evidence_selection else None
+    if recipe.tone_operator=='luminance_ocio_v3' and diagnostics:
+        limits=recipe.proposal.execution_limits
+        for pair in diagnostics['paired_measurements']:
+            if ((limits.max_new_black_fraction is not None and pair['new_black_fraction']>limits.max_new_black_fraction)
+                or (limits.max_new_white_fraction is not None and pair['new_white_fraction']>limits.max_new_white_fraction)):
+                raise Problem('GRADE_EXECUTION_LIMIT','Rendered clipping exceeded a declared execution bound.',
+                              'Revise the plan or clarify intentional clipping; no critic call was made.',422,frame_index=pair['frame_index'])
+    for before, result in ([] if recipe.tone_operator=='luminance_ocio_v3' else zip(recipe.source_samples, after)):
         if result["near_black_fraction"] > before["near_black_fraction"] + 0.08:
             warnings.append(f'Check lost shadow detail near {before["requested_time"]:.2f}s.')
         if result["near_white_fraction"] > before["near_white_fraction"] + 0.03:
@@ -204,8 +229,9 @@ def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
         "source_samples": recipe.source_samples, "output_samples": after, "warnings": warnings,
         "review_status": "needs_user_review",
         "mode":recipe.proposal.mode,"tone_operator":recipe.tone_operator,
+        "diagnostics":diagnostics,
         "limitations": [
-            "Technical checks and four sampled frames do not establish aesthetic improvement or full constraint compliance.",
+            "Technical checks and bounded samples do not establish aesthetic improvement or full constraint compliance.",
             "Localized foreground/background treatment on validated intervals; no physical relighting or shot matching."
             if recipe.proposal.mode=='localized' else "One global treatment is applied across source shots. No shot matching.",
         ],

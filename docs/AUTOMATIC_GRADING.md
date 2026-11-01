@@ -1,5 +1,7 @@
 # Automatic global and localized grading
 
+Version note: this document records the v2 SAM compositor integration. [Phase 2](PHASE2_ADAPTIVE_INTELLIGENCE.md) supersedes new-recipe sampling, colour processing and review/QC policy with v3. The source mapping, raw-mask cache and compositor described here remain in use; old recipes retain their versioned interpretation.
+
 ## Root cause and implemented path
 
 Previously Muse was instructed to emit only three global controls, GradeProposal contained no local plan, and Service.render_grade always called the global renderer. Manual SAM artifacts were diagnostic outputs with no path into the grading filter graph.

@@ -1,15 +1,16 @@
 import type { BackendState, GradeValues, Health } from '../lib/api';
 import { activeJob, stageLabel } from '../lib/api';
 
-export default function RenderPanel({state,health,sending,online,direction,onGenerate,onRetry,onCancel}:{
+export default function RenderPanel({state,health,sending,online,direction,onGenerate,onRetry,onCancel,onReview,viewCandidateId}:{
   state?:BackendState;health:Health|null;sending:boolean;online:boolean;direction:string;
   onGenerate:()=>void;onRetry:()=>void;onCancel:()=>void;
+  onReview:(id:string)=>void;viewCandidateId?:string;
 }) {
   if(!state?.brief)return null;
-  const running=state.status==='rendering';
+  const running=state.status==='rendering'||state.status==='reviewing';
   const busy=activeJob(state)||sending;
   const latest=state.candidates?.at(-1);
-  const selected=state.candidates?.find(c=>c.id===state.selected_candidate_id);
+  const selected=state.candidates?.find(c=>c.id===(viewCandidateId??state.selected_candidate_id));
   const changed=direction.trim()!==state.request;
   const values=(p:GradeValues)=><dl className="recipe-values">{Object.entries(p).filter(([,v])=>typeof v==='number').map(([name,value])=>
     <div key={name}><dt>{name.replaceAll('_',' ')}</dt><dd>{value!.toFixed(3)}{name==='cooling'?' shift':'×'}</dd></div>)}</dl>;
@@ -19,7 +20,7 @@ export default function RenderPanel({state,health,sending,online,direction,onGen
         ||!['brief_ready','render_ready'].includes(state.status)} onClick={onGenerate}>
         {selected?'Generate another version':'Generate graded video'}</button>
     </div>
-    <p className="inline-help">Muse plans from source frames, measurements and the current brief. Global corrections bypass SAM. A localized plan automatically tracks the requested subject, validates masks, and composites separate treatments on the original footage. SAM may incur per-frame usage.</p>
+    <p className="inline-help">Muse plans from bounded adaptive visual evidence, measurements and the current brief. Localized plans obtain SAM masks automatically. Substantive candidates can receive a rendered-evidence critique and up to three render iterations. Model review is an opinion; final approval remains yours. Muse and SAM calls may incur usage.</p>
     {changed&&<p className="inline-help">The direction has changed. Complete its updated brief before generating a grade.</p>}
     {running&&<div className="consultation-status" role="status"><span>{stageLabel(state.stage)}</span>
       <button disabled={sending||!online||state.stage==='cancelling'} onClick={onCancel}>Cancel render</button></div>}
@@ -31,8 +32,26 @@ export default function RenderPanel({state,health,sending,online,direction,onGen
         <button disabled={busy||!online} onClick={onRetry}>Retry render</button></div>}
     {latest&&selected&&latest.id!==selected.id&&['failed','cancelled'].includes(latest.status)&&
       <p className="inline-help">The latest attempt did not produce an accepted candidate. The displayed render is an earlier version.</p>}
+    {latest&&latest.id!==selected?.id&&latest.review_error&&<p className="inline-help">
+      Creative review for {latest.name} needs attention: {latest.review_error.message} Its render remains available in Version.
+    </p>}
+    {latest&&selected&&latest.id!==selected.id&&latest.creative_review&&<p className="inline-help">
+      Latest Muse opinion for {latest.name}: {latest.creative_review.summary} The selected version remains available for comparison.
+    </p>}
     {selected?.status==='ready'&&<div className="render-result">
       <p><strong>{selected.name} is rendered.</strong> Select it in Version, compare with Original, and review it before export.</p>
+      {!!selected.iteration&&<p className="inline-help">Render iteration {selected.iteration}. Earlier versions remain available for comparison.</p>}
+      <button disabled={busy||!online||!health?.muse_configured||(!!selected.creative_review||(selected.review_attempts??0)>=2)&&selected.review_brief_sha256===state.brief_sha256}
+        onClick={()=>onReview(selected.id)}>{selected.review_error?'Retry creative review':'Review this candidate'}</button>
+      {selected.review_error&&<p className="inline-help">Creative review unavailable: {selected.review_error.message} {selected.review_error.action} The rendered video is retained.</p>}
+      {selected.creative_review&&<section className="creative-opinion"><h3>Muse creative opinion · {selected.name}</h3>
+        <p>{selected.creative_review.summary}</p>
+        <ul>{selected.creative_review.issues.map(i=><li key={i.id}>{i.description} <small>Evidence: {i.evidence_ids.join(', ')}</small></li>)}</ul>
+        {!!selected.review_evidence?.length&&<details><summary>Rendered evidence used</summary><ul>
+          {selected.review_evidence.map(f=><li key={f.frame_index}>Frame {f.frame_index} · {f.time.toFixed(3)}s · {f.roles.join(', ')}</li>)}
+        </ul></details>}
+        <p className="inline-help">{[selected.creative_review.decision.replaceAll('_',' '),selected.revision_stop_reason?.replaceAll('_',' ')].filter(Boolean).join(' · ')}. This is not objective quality or user approval.</p>
+      </section>}
       {selected.recipe&&<>
         <p>{selected.recipe.proposal.summary}</p>
         <p>Treatment: {selected.recipe.proposal.mode??'global'}</p>

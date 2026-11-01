@@ -32,14 +32,19 @@ def wait(service: Service, project_id: str):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true",
-                        help="Allow up to two real Muse inference calls using the configured backend key.")
+                        help="Opt in to real Meta inference on generated footage only.")
+    parser.add_argument('--phase2',action='store_true',help='Also render/review: at most two renders, two critic calls, five total inference calls; no SAM.')
     args = parser.parse_args()
     if not args.live:
         parser.error("--live is required; this check can incur Meta API usage")
     settings = Settings.from_env()
     with tempfile.TemporaryDirectory(prefix="takeone-live-check-") as temporary:
-        settings = replace(settings, workspace=Path(temporary) / "workspace", max_questions=1)
-        service = Service(settings)
+        settings = replace(settings, workspace=Path(temporary) / "workspace", memory_root=Path(temporary)/'preferences',max_questions=1,
+                           max_render_iterations=2,sample_count=4,sample_scan_frames=16,sample_image_bytes=256*1024)
+        class NoSAM:
+            def available(self):return False
+            def segment(self,*_):raise RuntimeError('The bounded live verifier forbids SAM requests.')
+        service = Service(settings,sam_provider=NoSAM())
         remote_id = None
         try:
             if not service.provider.available():
@@ -70,15 +75,24 @@ def main():
                                state.revision, str(uuid4()))
                 state = wait(service, project_id)
             remote_id = state.remote_file_id
+            if args.phase2 and state.status=='brief_ready':
+                service.generate(project_id,state.revision,str(uuid4()));state=wait(service,project_id)
+                ready=next((c for c in reversed(state.candidates) if c.status=='ready'),None)
+                if ready and not ready.creative_review and not ready.review_error:
+                    service.review_candidate(project_id,ready.id,state.revision,str(uuid4()));state=wait(service,project_id)
             print(json.dumps({
                 "status": state.status, "model": settings.model, "model_calls": state.model_calls,
                 "analysis_summary": state.analysis.summary if state.analysis else None,
                 "observation_count": len(state.analysis.observations) if state.analysis else 0,
                 "brief_saved": state.brief is not None, "error": state.error,
+                'render_count':len(state.candidates),'critic_calls':state.critic_calls,'sam_calls':state.sam_calls,
+                'creative_opinions':[c.creative_review.model_dump(mode='json') for c in state.candidates if c.creative_review],
             }, indent=2), flush=True)
-            if state.status != "brief_ready" or not state.analysis or not state.brief:
+            if state.status != ('render_ready' if args.phase2 else 'brief_ready') or not state.analysis or not state.brief:
                 return 1
-            if state.model_calls > 2:
+            if args.phase2 and (len(state.candidates)>2 or state.critic_calls>2 or state.sam_calls):
+                raise RuntimeError('Phase 2 verification exceeded its declared budget')
+            if state.model_calls > (5 if args.phase2 else 2):
                 raise RuntimeError("Live check exceeded its call limit")
             return 0
         finally:

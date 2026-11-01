@@ -1,0 +1,120 @@
+"""Bounded paired evidence and executable-plan identity for Muse review."""
+from dataclasses import replace
+import json
+import base64
+import cv2
+import numpy as np
+
+from . import evidence,sam
+from .errors import Problem
+
+TECHNICAL_ERRORS={'REVIEW_OUTPUT_CHANGED','REVIEW_TIMING_INVALID','EVIDENCE_TIMING_INVALID','EVIDENCE_DECODE_FAILED','MEDIA_TOOL_FAILED'}
+
+
+def execution_identity(plan,operator='luminance_ocio_v3',duration=None):
+    def normalize(v):
+        if isinstance(v,float):return round(v,8)
+        if isinstance(v,dict):return {k:normalize(x) for k,x in v.items()}
+        if isinstance(v,list):return [normalize(x) for x in v]
+        return v
+    value=plan.model_dump(mode='json')
+    executable={k:value[k] for k in ['mode','parameters','local']}
+    if plan.local and duration is not None:
+        intervals=sorted(plan.local.intervals,key=lambda i:i.start);end=0.
+        for interval in intervals:
+            if interval.start>end+1e-8:break
+            end=max(end,interval.end)
+        if end>=duration:executable['parameters']=None # Base is never used under full local coverage.
+    return evidence.digest({'operator':operator,'plan':normalize(executable)})
+
+
+def collect(service,state,candidate,cancel):
+    directory=service.store.directory(state.id);output=directory/'candidates'/candidate.id
+    if not (directory/'source.bin').is_file() or sam.checksum(directory/'source.bin')!=state.source.sha256:
+        raise Problem('SOURCE_CHANGED','The source no longer matches the candidate analysis.','Restore the original source before review.',409)
+    rendered=output/'grade.mp4'
+    initial_hash=sam.checksum(rendered) if rendered.exists() else None
+    if not rendered.exists() or candidate.output_sha256 and sam.checksum(rendered)!=candidate.output_sha256:
+        raise Problem('REVIEW_OUTPUT_CHANGED','The rendered candidate is missing or changed.','Restore/re-render it; no critic call was made.',409)
+    # Legacy accepted files are decoded again before first review; new files have a bound QC hash.
+    if not candidate.output_sha256:
+        sam.command([service.settings.ffmpeg,'-v','error','-xerror','-i',str(rendered),'-f','null','-'],cancel,120)
+    focus=[(i.start,i.end) for i in candidate.recipe.proposal.local.intervals] if candidate.recipe.proposal.local else []
+    shots=candidate.recipe.timeline['shots'] if candidate.recipe.timeline else None
+    source_plan=evidence.plan(directory/'source.bin',state.source,service.settings,cancel,proxy=directory/'analysis.mp4',
+                              shots=shots,focus=focus,cache=directory/'source-review-evidence-v3.json')
+    result_plan=evidence.plan(rendered,state.source,service.settings,cancel,shots=shots,focus=focus,cache=output/'review-render-selection.json')
+    # Add measured output changes to source coverage; frame identities remain shared.
+    source_by={f['frame_index']:f for f in source_plan['features']}
+    changes=sorted(result_plan['features'],key=lambda f:abs(f['median_encoded_luma']-source_by.get(f['frame_index'],f)['median_encoded_luma'])
+                   +abs(f['black_fraction']-source_by.get(f['frame_index'],f)['black_fraction']),reverse=True)
+    indices=[]
+    for i in [changes[0]['frame_index'],*source_plan['selected_indices'],*result_plan['selected_indices']]:
+        if i not in indices:indices.append(i)
+        if len(indices)>=service.settings.sample_count:break
+    selection=dict(source_plan,selected_indices=sorted(indices))
+    previous=next((c for c in reversed(state.candidates) if c.id!=candidate.id and c.status=='ready'
+        and c.source_sha256==candidate.source_sha256 and (c.id==state.selected_candidate_id or c.id==candidate.parent_id)),None)
+    budget=service.settings.sample_image_bytes
+    roles=2+(1 if previous else 0)+(2 if focus else 0)
+    pair_settings=replace(service.settings,sample_image_bytes=budget*2//roles)
+    data=evidence.paired(directory/'source.bin',rendered,state.source,pair_settings,cancel,selection,cache=output/'review-evidence.json')
+    comparison=None
+    if previous:
+        path=directory/'candidates'/previous.id/'grade.mp4'
+        if path.exists() and (not previous.output_sha256 or sam.checksum(path)==previous.output_sha256):
+            try:
+                if not previous.output_sha256:
+                    sam.command([service.settings.ffmpeg,'-v','error','-xerror','-i',str(path),'-f','null','-'],cancel,120)
+                previous_manifest=evidence.frame_manifest(path,service.settings,cancel)
+                if len(previous_manifest['times'])!=len(selection['manifest']['times']) or any(abs(a-b)>.002 for a,b in zip(previous_manifest['times'],selection['manifest']['times'])):raise ValueError('timing')
+                _,images=evidence.collect(path,state.source,replace(service.settings,sample_image_bytes=budget//roles),cancel,selection=selection)
+                common={i['frame_index'] for i in images}&{i['frame_index'] for i in data['source_images']}&{i['frame_index'] for i in data['candidate_images']}
+                if common:
+                    data=dict(data,source_images=[i for i in data['source_images'] if i['frame_index'] in common],
+                              candidate_images=[i for i in data['candidate_images'] if i['frame_index'] in common])
+                    comparison={'id':previous.id,'images':[i for i in images if i['frame_index'] in common],'output_sha256':sam.checksum(path)}
+            except (Problem,ValueError):
+                data['uncertainty']=data['uncertainty']+['Previous candidate could not be aligned for comparison; it was not shown.']
+    regions={}
+    for run_id in candidate.mask_run_ids:
+        path=directory/'segmentations'/run_id/'manifest.json'
+        if not path.is_file():continue
+        manifest=json.loads(path.read_text());mapping=manifest['frame_map']
+        for record in manifest['records']:
+            index=mapping['frames'][record['frame_index']]['index']
+            if index in selection['selected_indices']:
+                regions.setdefault(index,[]).append((record['bounds'],mapping['proxy']))
+    def crops(images):
+        result=[];used=0
+        for image in images:
+            boxes=regions.get(image['frame_index'])
+            if not boxes:continue
+            pixels=cv2.imdecode(np.frombuffer(base64.b64decode(image['url'].split(',')[1]),np.uint8),cv2.IMREAD_COLOR)
+            h,w=pixels.shape[:2]
+            x=min(b[0]/p['width'] for b,p in boxes);y=min(b[1]/p['height'] for b,p in boxes)
+            x2=max(b[2]/p['width'] for b,p in boxes);y2=max(b[3]/p['height'] for b,p in boxes)
+            if (x2-x)*(y2-y)>.9:continue
+            left=max(0,int(x*w)-3);top=max(0,int(y*h)-3);right=min(w,int(x2*w)+3);bottom=min(h,int(y2*h)+3)
+            crop=pixels[top:bottom,left:right]
+            if not crop.size:continue
+            scale=min(256/crop.shape[1],256/crop.shape[0]);crop=cv2.resize(crop,(max(1,int(crop.shape[1]*scale)),max(1,int(crop.shape[0]*scale))))
+            ok,jpeg=cv2.imencode('.jpg',crop,[cv2.IMWRITE_JPEG_QUALITY,78])
+            if not ok:continue
+            size=4*((len(jpeg)+2)//3)+len('data:image/jpeg;base64,')
+            if used+size>budget//roles:continue
+            used+=size
+            result.append({**image,'url':'data:image/jpeg;base64,'+base64.b64encode(jpeg).decode(),
+                           'view':'subject_region','bounds_fraction':[x,y,x2,y2]})
+        return result
+    source_crops=crops(data['source_images']);candidate_crops=crops(data['candidate_images'])
+    crop_indices={i['frame_index'] for i in source_crops}&{i['frame_index'] for i in candidate_crops}
+    data=dict(data,source_region_images=[i for i in source_crops if i['frame_index'] in crop_indices],
+              candidate_region_images=[i for i in candidate_crops if i['frame_index'] in crop_indices])
+    if sam.checksum(rendered)!=initial_hash:
+        raise Problem('REVIEW_OUTPUT_CHANGED','The candidate changed while evidence was collected.','Re-render or restore the frozen candidate.',409)
+    data['rendered_sha256']=initial_hash
+    summary=[{'frame_index':f['frame_index'],'time':f['time'],'roles':['source','candidate']+(['previous'] if comparison else [])
+              +(['source_region','candidate_region'] if any(i['frame_index']==f['frame_index'] for i in data['candidate_region_images']) else [])}
+             for f in data['source_images']]
+    return data,comparison,summary

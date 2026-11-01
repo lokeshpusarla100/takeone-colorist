@@ -8,6 +8,8 @@ Local video preparation, a React editor, Muse-powered creative direction, and ca
 
 **Generate graded video** asks Muse Spark 1.3 to choose an executable global or localized SDR/Rec.709 plan from the saved brief and latest feedback. Global correction bypasses SAM. Localized treatment automatically obtains SAM 3.1 masks, validates them, and composites separate foreground/background adjustments with FFmpeg. Manual SAM diagnostics remain available. Physical relighting, reconstruction, shot matching and automatic aesthetic approval remain unavailable.
 
+Phase 2 adds bounded content-adaptive evidence, luminance-preserving tone with OpenColorIO CDL colour operations, and rendered-evidence creative review. Substantive candidates may receive a targeted revision, capped at three renders by default. Muse opinions are shown separately from technical measurements; final aesthetic approval remains yours. See [Phase 2 implementation and verification](docs/PHASE2_ADAPTIVE_INTELLIGENCE.md).
+
 ## Configure
 
 Reuse the existing Python environment and frontend dependencies. For a fresh checkout:
@@ -55,7 +57,7 @@ Default question budget: three, with a hard maximum of five. A clear request can
 
 Questions are adaptive: one question → save your answer → reevaluate remaining choices → ask one useful follow-up or finish. Follow-ups reuse cached video observations and include earlier questions, alternatives and chosen outcomes. The app does not ask five questions in one batch or render after every answer. Broad look words do not automatically settle treatment strength or preservation tradeoffs.
 
-Creative question selection belongs to Muse. Python keyword/topic overlap rejection and preservation/impact ranking have been removed. New outputs request zero or one question; the first question is used for legacy multi-candidate responses. Invalid data/tool references fail explicitly for retry instead of silently finishing the consultation. Full structured proposals and their selected question or error are included in session exports. See [the rule-based logic inventory](docs/RULE_BASED_LOGIC.md) for remaining policies and technical checks.
+Creative question selection belongs to Muse. Python keyword/family inference and aesthetic ranking remain removed. Repetition checks now validate scope-specific model decision IDs and verbatim question/option repeats; a genuinely finer clarification needs an explicit parent and new-information reason. New outputs request zero or one question. Invalid contracts fail for retry rather than silently completing the consultation. Full structured proposals and errors remain exported. See [the rule-based logic inventory](docs/RULE_BASED_LOGIC.md).
 
 Existing browser-only sessions remain compatible. Use **Prepare source** to upload their saved original and connect to the backend.
 
@@ -133,6 +135,12 @@ An opt-in live check uses a one-second synthetic clip and at most two inference 
 It can incur Meta usage. It uses a temporary workspace, never uploads personal footage, and attempts to delete its synthetic remote upload afterward. Normal automated tests make no live requests.
 
 The test-only browser server is tests.offline_app:app. It returns explicitly labeled synthetic observations and is separate from normal startup. Passing offline tests does not establish live Muse quality.
+
+An additional opt-in generated-footage check exercises Phase 2 planning/render/review with at most two renders, two critic calls and five total inference calls, with SAM forbidden:
+
+    .venv/bin/python -m takeone.verify --phase2 --live
+
+This can incur Meta usage and is never part of ordinary tests. Verification preferences/workspaces are temporary, so synthetic evidence does not populate real user memory. No new live Phase 2 check was run for the offline motorcycle replay described in the Phase 2 report.
 
 ## Troubleshooting
 

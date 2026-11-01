@@ -30,6 +30,9 @@ You choose the next question. Return zero or ONE candidate; it will be shown dir
 Python ranking or semantic duplicate filtering. Multiple candidates are legacy-compatible only;
 if supplied, the first is the chosen question. Output only the requested schema.
 Give each follow-up a new question ID. Option IDs must be unique within that question.
+Use a stable scope-specific decision_id for the same actual preference across paraphrases; do not rename it to
+evade repetition. A genuinely finer clarification may cite followup_to plus clarification_reason
+explaining the new information and materially different alternatives. Read recent_contract_errors.
 Extract explicit preservation constraints as exact quotes from user_request in explicit_constraints.
 Never invent or paraphrase those quotes. Ask one useful question at a time, within rubric_budget_remaining.
 After each answer, reconsider the remaining choices using previous_decisions and the full chosen outcome.
@@ -75,6 +78,7 @@ def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=Non
         "answers": [a.model_dump() for a in session.answers],
         "previous_decisions": session.answered_decisions(),
         "current_video_feedback": session.inputs.project_feedback,
+        "recent_contract_errors":session.inputs.recent_contract_errors,
         "previously_addressed_keys": sorted(session.resolved_keys),
         "rubric_budget_remaining": session.max_decisions - session.asked_count,
     }

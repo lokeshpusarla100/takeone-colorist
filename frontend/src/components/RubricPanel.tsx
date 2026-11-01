@@ -38,7 +38,7 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
       <button disabled={disabled||!state?.preview||!online||!health?.muse_configured
         ||(!changed&&!!state&&['awaiting_answer','brief_ready','render_ready','failed','cancelled'].includes(state.status))}
         onClick={onStart}>{changed&&state?.request?'Start with new direction':'Start analysis'}</button></div>}
-    {working&&!['rendering','segmenting'].includes(state.status)&&<div className="consultation-status" role="status"><span>{stageLabel(state.stage)}</span><button disabled={sending||!online||state.stage==='cancelling'} onClick={onCancel}>Cancel</button></div>}
+    {working&&!['rendering','segmenting','reviewing'].includes(state.status)&&<div className="consultation-status" role="status"><span>{stageLabel(state.stage)}</span><button disabled={sending||!online||state.stage==='cancelling'} onClick={onCancel}>Cancel</button></div>}
     {state&&(state.status==='failed'||state.status==='cancelled')&&state.error?.details.stage!=='segment'&&<div className="consultation-actions">
       <span>{state.status==='cancelled'?'The operation was cancelled. Saved answers are kept.':'The last step failed. Saved evidence and answers are kept.'}</span>
       <button disabled={disabled||!online} onClick={onRetry}>Retry failed step</button>

@@ -3,14 +3,14 @@
 
 **Version:** 1.1<br>
 **Prepared:** 31 October 2026, IST  
-**Implementation status updated:** 1 November 2026, IST<br>
+**Implementation status updated:** 2 November 2026, IST<br>
 **Project folder on Lokesh's computer:** /home/lokesh/takeone-colorist  
 **Product:** Autonomous Creative Director + Precise Colorist  
 **Purpose of this document:** Consolidate the project discussions into one implementation plan that a new Codex session can understand without this chat.
 
 This is a design and delivery plan. It does not establish that the application is implemented, that the existing rubric is integrated, or that real footage has been graded successfully.
 
-Sections 2.3 and 26 record the current implementation handoff. The original scope, schedule and historical evidence below remain design context; consult README.md for current run commands and limits. An implemented path is not evidence of real-footage visual acceptance.
+Sections 2.3, 26 and 27 record the current implementation handoff. The original scope, schedule and historical evidence below remain design context; consult README.md for current run commands and limits. An implemented path is not evidence of real-footage visual acceptance.
 
 ---
 
@@ -42,6 +42,7 @@ Sections 2.3 and 26 record the current implementation handoff. The original scop
 24. [Remaining choices and first Codex task](#24-remaining-choices-and-first-codex-task)
 25. [Sources and earlier artifacts](#25-sources-and-earlier-artifacts)
 26. [Preference memory: capture-only addition](#26-preference-memory-capture-only-addition)
+27. [Phase 2: adaptive evidence and bounded creative review](#27-phase-2-adaptive-evidence-and-bounded-creative-review)
 
 ---
 
@@ -1175,9 +1176,9 @@ Their UI and execution hooks must be connected when actual manual controls are i
 
 PromptMemoryGate is the single reusable-preference projection boundary. With the rollout capability,
 profile application flag, or project opt-in disabled, it supplies no applicable preference data.
-Implemented rubric and colorist prompts pass through this gate. Factual scene analysis receives only
-the media input and inspection instructions. Critic/look-selection/preview-planning use cases have
-a prepared gate interface; no new model pipelines are built for them.
+Implemented rubric, colorist and Phase 2 critic prompts pass through this gate. Factual scene analysis
+receives only the media input and inspection instructions. Look-selection/preview-planning use cases
+retain a prepared gate interface; no additional model pipelines are built for them.
 
 A future rollout requires all three explicit actions:
 
@@ -1215,3 +1216,36 @@ Focused offline checks cover persistence/deduplication, one-video evidence count
 isolation, edits/deletion replay, context-sensitive retrieval, frozen bindings, current-instruction
 precedence, actual SDK prompt construction while disabled, and current feedback while capture is paused.
 No billable API calls are part of this feature's verification.
+
+
+## 27. Phase 2: adaptive evidence and bounded creative review
+
+Implementation builds on the automatic SAM path in commit 8e20d01. It preserves the editor, five
+rubric dimensions, source identity, frame mapping, validated mask cache and FFmpeg compositor.
+See [Phase 2 implementation and verification](docs/PHASE2_ADAPTIVE_INTELLIGENCE.md) for the
+current contracts, budgets, measurements and acceptance boundaries.
+
+New recipes separate free creative intent, typed executable controls and measured results. The v3
+operator treats encoded Rec.709 luminance separately from OpenColorIO ASC CDL colour adjustments.
+Explicit black/white points and protected-subject tonal treatment are supported. Fixed aesthetic
+brightness/clipping targets no longer reject v3 results; declared execution bounds and technical
+integrity checks still apply. Old recipe operators retain their interpretation.
+
+Source evidence uses a bounded, cached scan with shot, lighting, movement and local-interval coverage.
+The critic receives corresponding actual source/rendered images, mask-region views where available,
+measurements and current feedback. Its opinions remain distinct from technical facts and user approval.
+Supported targeted revisions render from the original, retain prior versions and stop at repeated plans,
+a preferred earlier version or the default three-render limit. Review errors retain valid renders;
+corrupt evidence never gets a creative pass. Review progress, evidence references, usage and stop reasons
+are visible in the existing editor.
+
+Rubric validation retains evidence, provenance, feasibility and five-question ceilings. Model-provided
+scope-specific decision IDs help reject reworded resolved choices without adding aesthetic keyword
+rules. A clear request can still produce zero questions. Preference capture/application controls,
+profile isolation and deletion semantics are unchanged; personalization remains off by default.
+
+Offline validation used synthetic media and mocked providers. A separate real motorcycle replay reused
+existing SAM masks for 0–5 seconds only, leaving the remainder neutral and preserving 1,197 frames/39.9
+seconds. Sampled images and the first eight seconds of preview playback were inspected. No new Meta
+calls were made. Full-video localized grading, live critic compliance and final creative acceptance
+remain pending; this is not a claim of professional cinematic quality.

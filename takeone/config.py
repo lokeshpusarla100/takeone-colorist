@@ -25,6 +25,12 @@ class Settings:
     # Rollout capability, deliberately not enabled by an environment variable.
     memory_application_available: bool = False
     sam_model: str = "sam-3.1"
+    sample_scan_frames: int = 96
+    sample_count: int = 8
+    sample_width: int = 160
+    sample_memory_bytes: int = 16 * 1024 * 1024
+    sample_image_bytes: int = 1024 * 1024
+    max_render_iterations: int = 3
 
     @classmethod
     def from_env(cls):
@@ -45,4 +51,10 @@ class Settings:
             ffprobe=shutil.which("ffprobe") or "ffprobe",
             key_file=ROOT / ".env",
             memory_root=ROOT / ".takeone-memory",
+            sample_scan_frames=max(8,min(512,int(os.getenv('TAKEONE_SAMPLE_SCAN_FRAMES','96')))),
+            sample_count=max(2,min(12,int(os.getenv('TAKEONE_SAMPLE_COUNT','8')))),
+            sample_width=max(64,min(256,int(os.getenv('TAKEONE_SAMPLE_WIDTH','160')))),
+            sample_memory_bytes=max(1,min(64,int(os.getenv('TAKEONE_SAMPLE_MEMORY_MB','16'))))*1024*1024,
+            sample_image_bytes=max(64,min(2048,int(os.getenv('TAKEONE_SAMPLE_IMAGE_KB','1024'))))*1024,
+            max_render_iterations=max(1,min(3,int(os.getenv('TAKEONE_MAX_RENDER_ITERATIONS','3')))),
         )

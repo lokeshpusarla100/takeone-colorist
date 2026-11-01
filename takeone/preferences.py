@@ -429,7 +429,8 @@ class PromptMemoryGate:
         if not binding or not binding.get("enabled"):
             return []
         current_keys = set(overridden_keys or set())
-        current_keys.update(f.get("preference_key","") for f in state.feedback)
+        from .contracts import current_feedback
+        current_keys.update(f.get("preference_key","") for f in current_feedback(state))
         rubric=state.rubric or {}
         questions={q["id"]:q for q in rubric.get("questions",[])}
         for answer in rubric.get("answers",[]):

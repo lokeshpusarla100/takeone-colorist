@@ -121,7 +121,8 @@ export default function App() {
         <RenderPanel state={project.backend} health={consultation.health} online={consultation.online}
           sending={sending||busy||!!project.pendingBackend} direction={direction}
           onGenerate={()=>{w.clearError();void consultation.generate();}}
-          onRetry={()=>{w.clearError();void consultation.retry();}} onCancel={()=>void consultation.cancel()}/>
+          onRetry={()=>{w.clearError();void consultation.retry();}} onCancel={()=>void consultation.cancel()}
+          viewCandidateId={selected?.candidateId} onReview={id=>{w.clearError();void consultation.review(id);}}/>
         <SamPanel key={project.id} state={project.backend} health={consultation.health} online={consultation.online}
           locked={locked} sending={sending} onTrack={(concept,durationSeconds)=>{w.clearError();void consultation.segment(concept,durationSeconds);}}
           onCancel={()=>void consultation.cancel()} onRetry={()=>{w.clearError();void consultation.retry();}}/>

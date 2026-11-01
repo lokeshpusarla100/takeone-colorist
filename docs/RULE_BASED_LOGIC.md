@@ -1,5 +1,7 @@
 # Rule-based logic inventory
 
+Phase 2 update: new recipes use bounded adaptive evidence, luminance-only tone with OCIO CDL colour, declared execution bounds and model-opinion review. Exact repetition and scope-specific model decision IDs are validated without restoring keyword/family inference or aesthetic ranking. See [Phase 2](PHASE2_ADAPTIVE_INTELLIGENCE.md) for current behavior; legacy v1/v2 numerical policy remains versioned.
+
 This inventories application-level policies, heuristics, numerical processing and integrity checks in the current runtime. These are ordinary code paths; there is no separate validator-model call.
 
 ## Removed from creative question selection

@@ -13,7 +13,7 @@ const {tokenUsage}=await load('tokenUsage');
 const {mutationLocked,runProgress}=await load('workflow');
 
 test('mutating workspace actions lock during local, remote and command processing',()=>{
-  for(const status of ['ingesting','analyzing','rendering','segmenting'])assert.equal(mutationLocked({status}),true);
+  for(const status of ['ingesting','analyzing','rendering','segmenting','reviewing'])assert.equal(mutationLocked({status}),true);
   for(const status of ['ready','awaiting_answer','brief_ready','render_ready','failed','cancelled'])assert.equal(mutationLocked({status}),false);
   assert.equal(mutationLocked(undefined,true),true);
   assert.equal(mutationLocked({status:'ready'},false,true),true);
@@ -40,6 +40,8 @@ test('progress distinguishes waiting for a single answer from model processing a
   const tracking=runProgress({...state,status:'segmenting',stage:'segment_subject',brief:{},segmentations:[{status:'streaming',frame_count:12,frames_with_masks:4}]});
   assert.equal(tracking.working,true);
   assert.equal(tracking.steps[5].phase,'active');
+  const review=runProgress({...state,status:'reviewing',stage:'creative_review',brief:{},candidates:[{status:'ready'}]});
+  assert.equal(review.working,true);assert.equal(review.steps[6].phase,'active');
 });
 test('progress reports persisted failures and source preparation without fake completion',()=>{
   const pending=runProgress(undefined,true,'Uploading source');
@@ -233,6 +235,7 @@ test('ready localized candidates require a valid layer plan and mask references'
   assert.equal(parseBackend(ready).candidates[0].recipe.proposal.mode,'localized');
   assert.throws(()=>parseBackend({...ready,candidates:[{...candidate,mask_run_ids:[]}]}),{code:'API_RESPONSE_INVALID'});
   assert.throws(()=>parseBackend({...ready,candidates:[{...candidate,recipe:{proposal:{...candidate.recipe.proposal,local:null}}}]}),{code:'API_RESPONSE_INVALID'});
+  assert.throws(()=>parseBackend({...ready,candidates:[{...candidate,creative_review:{decision:'sufficient',summary:3,issues:[]}}]}),{code:'API_RESPONSE_INVALID'});
 });
 test('a prepared source is accepted without creating a browser decoder or fetching the preview',t=>{
   const previousDocument=globalThis.document;

@@ -75,6 +75,7 @@ class RubricInput(StrictModel):
     project_id: str | None = None
     memory_defaults: list[RememberedDefault] = Field(default_factory=list)
     project_feedback: list[dict] = Field(default_factory=list)
+    recent_contract_errors: list[str] = Field(default_factory=list,max_length=3)
 
 
 class Option(StrictModel):
@@ -101,6 +102,9 @@ class Candidate(StrictModel):
     options: list[Option] = Field(min_length=2, max_length=3)
     memory_refs: list[str] = Field(default_factory=list, max_length=10)
     memory_conflict: bool = False
+    decision_id: str | None = Field(default=None,min_length=1,max_length=160)
+    followup_to: str | None = None
+    clarification_reason: str = Field(default='',max_length=800)
 
 
 class Proposal(StrictModel):
@@ -203,6 +207,7 @@ class RubricSession:
                 "decision_fork": fork, "response_type": answer.response_type,
                 "response": answer.response, "selected_outcome": outcome,
                 "options": [o.model_dump(mode="json") for o in question.options] if question else [],
+                "decision_id":question.decision_id if question else None,
             })
         return decisions
 
@@ -210,6 +215,19 @@ class RubricSession:
         """Data/tool boundary only; never infer creative overlap, relevance or priority."""
         if c.id in {a.question_id for a in self.answers}:
             raise ValueError("question ID already used; a follow-up needs a unique ID")
+        def wording(q):
+            norm=lambda value:' '.join(value.casefold().strip().rstrip('?.!').split())
+            return (norm(q.scope),norm(q.question),sorted((norm(o.label),norm(o.intended_outcome)) for o in q.options))
+        answered={a.question_id for a in self.answers}
+        history={q.id:q for q in self.questions if q.id in answered}
+        if c.followup_to and c.followup_to not in history:raise ValueError('Follow-up references an unknown answered question')
+        for previous in history.values():
+            if wording(c)==wording(previous):raise ValueError('Question and alternatives exactly repeat an answered question')
+            if c.decision_id and c.decision_id==previous.decision_id:
+                if c.followup_to!=previous.id or not c.clarification_reason.strip():
+                    raise ValueError('Decision ID already addressed; a genuine clarification needs followup_to and new-information reason')
+                if {o.intended_outcome.strip().casefold() for o in c.options}=={o.intended_outcome.strip().casefold() for o in previous.options}:
+                    raise ValueError('Clarification repeats the same outcome alternatives')
         if len({o.id for o in c.options}) != len(c.options):
             raise ValueError("option IDs must be unique")
         if any(not value.strip() for value in [c.id,c.question,c.scope,c.target_key,c.decision_fork,

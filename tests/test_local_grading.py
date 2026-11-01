@@ -72,7 +72,7 @@ class Masks:
 def done(c,id):
     for _ in range(1500):
         state=c.get('/api/projects/'+id).json()
-        if state['status'] not in {'rendering','analyzing','segmenting','ingesting'}:return state
+        if state['status'] not in {'rendering','analyzing','segmenting','ingesting','reviewing'}:return state
         time.sleep(.02)
     raise AssertionError('Fixture job did not finish')
 
@@ -303,7 +303,7 @@ def test_local_contract_rejects_unexecutable_or_unnecessary_plans(case):
             summary='Invalid fixture',decisions=[{'parameter':'local_treatment','reason':'Fixture','source_ids':['user_request']}],limitations=[])
 
 
-def test_local_noop_is_not_published_as_visible_selective_edit(settings,scene):
+def test_subtle_local_changes_are_measured_without_universal_aesthetic_failure(settings,scene):
     class TinyPlanner(Planner):
         def grade(self,*args,**kwargs):
             plan,usage=super().grade(*args,**kwargs)
@@ -311,7 +311,7 @@ def test_local_noop_is_not_published_as_visible_selective_edit(settings,scene):
             return GradeProposal.model_validate(value),usage
     with TestClient(create_app(settings,TinyPlanner(local=True),Masks()),base_url='http://127.0.0.1') as c:
         result=generate(c,start(c,upload(c,scene),'explicit local tiny fixture'))
-        assert result['status']=='failed' and result['error']['code']=='LOCAL_NO_VISIBLE_EFFECT'
-        assert result['candidates'][-1]['preview_url'] is None
+        assert result['status']=='render_ready',result.get('error')
+        assert result['candidates'][-1]['validation']['review_status']=='needs_user_review'
         path=settings.workspace/result['id']/'candidates'/result['candidates'][-1]['id']/'validation.json'
-        assert json.loads(path.read_text())['review_status']=='rejected'
+        assert 'change_below_encoding_resolution' in json.loads(path.read_text())['subject_protection']

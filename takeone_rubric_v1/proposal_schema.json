@@ -88,6 +88,38 @@
           "default": false,
           "title": "Memory Conflict",
           "type": "boolean"
+        },
+        "decision_id": {
+          "anyOf": [
+            {
+              "maxLength": 160,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decision Id"
+        },
+        "followup_to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Followup To"
+        },
+        "clarification_reason": {
+          "default": "",
+          "maxLength": 800,
+          "title": "Clarification Reason",
+          "type": "string"
         }
       },
       "required": [

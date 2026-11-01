@@ -37,6 +37,9 @@ class SegmentCommand(Command):
     concept: str = Field(min_length=1,max_length=120)
     duration_seconds: float | None = Field(default=None,ge=1,le=120)
 
+class ReviewCommand(Command):
+    candidate_id: UUID
+
 
 def create_app(settings: Settings | None = None, provider=None, sam_provider=None):
     settings = settings or Settings.from_env()
@@ -202,6 +205,10 @@ def create_app(settings: Settings | None = None, provider=None, sam_provider=Non
     @application.post("/api/projects/{project_id}/render", status_code=202)
     def generate(project_id: UUID, body: Command):
         return service().generate(str(project_id), body.revision, str(body.command_id)).public()
+
+    @application.post('/api/projects/{project_id}/review',status_code=202)
+    def review(project_id:UUID,body:ReviewCommand):
+        return service().review_candidate(str(project_id),str(body.candidate_id),body.revision,str(body.command_id)).public()
 
     @application.post('/api/projects/{project_id}/segment',status_code=202)
     def segment(project_id:UUID,body:SegmentCommand):

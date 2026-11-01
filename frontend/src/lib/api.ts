@@ -14,11 +14,16 @@ export type Brief = {
   answers:{question_id:string;response_type:string;response:string}[];
   unresolved:string[];
 };
-export type GradeValues={contrast:number;saturation:number;gamma:number;brightness_gain?:number;cooling?:number};
+export type GradeValues={contrast:number;saturation:number;gamma:number;brightness_gain?:number;cooling?:number;black_point?:number;white_point?:number};
 export type RenderCandidate = {
   id:string;name:string;created_at:string;brief_sha256:string;source_sha256:string;
   status:'planning'|'rendering'|'ready'|'failed'|'cancelled';
   mask_run_ids?:string[];
+  iteration?:number;parent_id?:string|null;revision_stop_reason?:string|null;review_brief_sha256?:string|null;review_attempts?:number;
+  creative_review?:null|{decision:'sufficient'|'revise'|'needs_user'|'not_evaluable';summary:string;
+    issues:{id:string;description:string;evidence_ids:string[];correctable:boolean}[];preferred_candidate_id:string|null};
+  review_error?:null|{message:string;action:string};
+  review_evidence?:{frame_index:number;time:number;roles:string[]}[];
   recipe:null|{tone_operator?:string;proposal:{parameters:GradeValues;mode?:'global'|'localized';
     local?:null|{concept:string;foreground:GradeValues;background:GradeValues;intervals:{start:number;end:number}[];preserve_subject_color:boolean};
     summary:string;decisions:{parameter:string;reason:string;source_ids:string[]}[];limitations:string[]}};
@@ -28,13 +33,14 @@ export type RenderCandidate = {
 };
 export type BackendState = {
   id:string;revision:number;
-  status:'ingesting'|'ready'|'analyzing'|'awaiting_answer'|'brief_ready'|'rendering'|'render_ready'|'segmenting'|'failed'|'cancelled';
+  status:'ingesting'|'ready'|'analyzing'|'awaiting_answer'|'brief_ready'|'rendering'|'render_ready'|'segmenting'|'reviewing'|'failed'|'cancelled';
   stage:string;filename:string;request:string;answered_count:number;max_questions:number;model_calls:number;
   source:null|{name:string;bytes:number;sha256:string;width:number;height:number;duration:number;
     video_codec:string;audio_codec:string|null;technical_notes:string[]};
   preview:null|{url:string;width:number;height:number;duration:number;bytes:number};
   analysis:null|{summary:string;caveats:string[]};
   question:Question|null;brief:Brief|null;events:SessionEvent[];
+  brief_sha256?:string|null;
   consultation?:null|{reason:'question_selected'|'question_limit'|'no_candidates'|'no_valid_candidates';
     message:string;model_explanation:string;proposed_count:number;rejected_count:number};
   error:null|{code:string;message:string;action:string;details:ErrorDetails};
@@ -76,7 +82,7 @@ function invalidResponse():never {
 }
 export function parseBackend(value:unknown):BackendState {
   if(!record(value)||!uuid(value.id)||!Number.isInteger(value.revision)||Number(value.revision)<0
-    ||!['ingesting','ready','analyzing','awaiting_answer','brief_ready','rendering','render_ready','segmenting','failed','cancelled'].includes(value.status as string)
+    ||!['ingesting','ready','analyzing','awaiting_answer','brief_ready','rendering','render_ready','segmenting','reviewing','failed','cancelled'].includes(value.status as string)
     ||!text(value.stage)||!text(value.filename)||!text(value.request)||!finite(value.answered_count)
     ||!finite(value.max_questions)||!finite(value.model_calls)||!Array.isArray(value.events)||!value.events.every(validEvent)){
     return invalidResponse();
@@ -129,6 +135,15 @@ export function parseBackend(value:unknown):BackendState {
         ||!Array.isArray(p.local.intervals)||!p.local.intervals.length||!p.local.intervals.every(i=>record(i)&&finite(i.start)&&finite(i.end)&&Number(i.end)>Number(i.start))))return false;
       if(c.status==='ready'&&p.mode==='localized'&&(!Array.isArray(c.mask_run_ids)||!c.mask_run_ids.length||!c.mask_run_ids.every(uuid)))return false;
     }
+    if(c.creative_review!==undefined&&c.creative_review!==null){
+      const r=c.creative_review;
+      if(!record(r)||!['sufficient','revise','needs_user','not_evaluable'].includes(r.decision as string)||!text(r.summary)
+        ||!Array.isArray(r.issues)||!r.issues.every(i=>record(i)&&text(i.id)&&text(i.description)&&strings(i.evidence_ids)&&typeof i.correctable==='boolean'))return false;
+    }
+    if(c.review_error!==undefined&&c.review_error!==null&&(!record(c.review_error)||!text(c.review_error.message)||!text(c.review_error.action)))return false;
+    if(c.review_evidence!==undefined&&(!Array.isArray(c.review_evidence)||!c.review_evidence.every(f=>record(f)
+      &&Number.isInteger(f.frame_index)&&Number(f.frame_index)>=0&&finite(f.time)&&Number(f.time)>=0&&strings(f.roles))))return false;
+    if(c.review_attempts!==undefined&&(!Number.isInteger(c.review_attempts)||Number(c.review_attempts)<0))return false;
     if(c.status==='ready'){
       const prefix='/api/projects/'+value.id+'/candidates/'+c.id;
       return c.preview_url===prefix+'/preview'&&c.download_url===prefix+'/download'
@@ -143,7 +158,7 @@ export function parseBackend(value:unknown):BackendState {
   if(value.status==='render_ready'&&!value.selected_candidate_id)return invalidResponse();
   return value as unknown as BackendState;
 }
-export const activeJob=(s:BackendState)=>s.status==='ingesting'||s.status==='analyzing'||s.status==='rendering'||s.status==='segmenting';
+export const activeJob=(s:BackendState)=>s.status==='ingesting'||s.status==='analyzing'||s.status==='rendering'||s.status==='segmenting'||s.status==='reviewing';
 export function stageLabel(stage:string) {
   const labels:Record<string,string>={
     inspect_source:'Inspecting source metadata',prepare_preview:'Preparing video previews',
@@ -157,6 +172,8 @@ export function stageLabel(stage:string) {
     validate_local_masks:'Validating alignment, mask edges and temporal stability',
     render_local_grade:'Rendering and compositing foreground/background adjustments',
     check_output_quality:'Checking frame timing, subject preservation and clipping',
+    creative_review:'Muse is reviewing actual rendered/source evidence',
+    creative_review_failed:'Render available; creative review needs attention',plan_revision:'Preparing a targeted revision from the original',
   };
   return labels[stage]??stage;
 }
@@ -206,7 +223,7 @@ export async function upload(file:File,signal:AbortSignal) {
   form.append('profile_id',nextProfile());form.append('preference_context',JSON.stringify(nextContext()));
   return parseBackend(await request<unknown>('/api/projects',{method:'POST',body:form,signal},120000));
 }
-export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment',body:Record<string,unknown>) {
+export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review',body:Record<string,unknown>) {
   return parseBackend(await request<unknown>('/api/projects/'+id+'/'+kind,{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({...body,command_id:crypto.randomUUID()}),

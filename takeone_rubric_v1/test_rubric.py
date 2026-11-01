@@ -185,7 +185,10 @@ def test_history_survives_restart_without_legacy_semantic_rejection():
         decision = restored.answered_decisions()[0]
         assert decision["selected_outcome"] == "Darker shadows with cinematic depth"
         repeated = tonal_question(id="new_id",target_key="new_key")
-        assert restored.next_question(Proposal(candidates=[repeated])).id=="new_id"
+        if legacy:
+            assert restored.next_question(Proposal(candidates=[repeated])).id=="new_id"
+        else:
+            with pytest.raises(ValueError,match='exactly repeat'):restored.next_question(Proposal(candidates=[repeated]))
 
 
 def test_adapter_sends_question_meaning_not_only_option_ids():
@@ -217,3 +220,16 @@ def test_budget_stop_is_disclosed_without_inventing_missing_preferences():
     assert s.next_question(Proposal()) is None
     assert any("question limit" in note for note in s.brief().unresolved)
     assert len(s.brief().directives) == 1
+
+
+def test_stable_decision_id_blocks_paraphrase_but_allows_genuine_clarification():
+    s=session();first=tonal_question(decision_id='night-tone:clip')
+    s.next_question(Proposal(candidates=[first]))
+    s.record_answer(Answer(question_id=first.id,response_type='option',response='dark'))
+    paraphrase=tonal_question(id='different_words',decision_id='night-tone:clip',question='Lift the image or retain the low-key night feeling?')
+    with pytest.raises(ValueError,match='Decision ID already addressed'):s.next_question(Proposal(candidates=[paraphrase]))
+    finer=tonal_question(id='strength',decision_id='night-tone:clip',followup_to=first.id,
+        clarification_reason='The initial answer selected a dark direction but did not choose its strength.',question='Subtle or stronger darkness?',
+        options=[Option(id='subtle',label='Subtle',intended_outcome='Mild low-key treatment',required_operations=['global_grade']),
+                 Option(id='strong',label='Strong',intended_outcome='Strong low-key treatment',required_operations=['global_grade'])])
+    assert s.next_question(Proposal(candidates=[finer])).id=='strength'

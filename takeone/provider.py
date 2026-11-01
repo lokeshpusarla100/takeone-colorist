@@ -8,7 +8,7 @@ from dotenv import dotenv_values
 
 from takeone_rubric_v1.muse_adapter import propose
 from .config import Settings
-from .contracts import SceneAnalysis, GradeProposal
+from .contracts import SceneAnalysis, GradeProposal, CreativeReview
 from .errors import Problem
 from .preferences import PromptMemoryGate
 from .usage import usage_details
@@ -101,8 +101,10 @@ class MuseProvider:
                 "saturation": "0..1.5; neutral 1.0; Rec.709-weighted encoded RGB channel mixing",
                 "brightness_gain":"0.65..1.35, neutral 1.0. Bounded display-domain brightness, not physical relighting.",
                 "cooling":"-0.15..0.15, neutral 0. Positive reduces red and increases blue using explicit Rec.709 RGB gains; not calibrated Kelvin.",
+                "black_point":"0..0.15 input luma level. Nonzero deliberately discards lower levels; use only when the intended look permits it.",
+                "white_point":"0.75..1 input luma level. Values above this deliberately map to the top; protect highlight information as instructed.",
             },
-            "operation_order": ["gamma", "contrast", "saturation"],
+            "operation_order": ["luminance_levels","bounded_luminance_tone","peak_protection","OCIO_ASC_CDL_colour"],
         }
         context['execution_capabilities']=technical_context or {'operations':['global_grade'],
             'limitations':['Localized execution not verified for this request.']}
@@ -122,6 +124,13 @@ class MuseProvider:
                         "luma diagnostics, not scene exposure measurements. Respect explicit constraints and "
                         "default protections. Do not compound darkness when several directives describe one look. "
                         "If the source is already dark, coordinate gamma and contrast to retain subject legibility. "
+                        "Do not brighten dark footage just to satisfy a histogram or black-fraction target. Intentional darkness "
+                        "is legitimate. State intent/shadow/highlight policy, and set optional execution_limits only when "
+                        "a declared preservation requirement justifies those bounds; these are not confidence or quality scores. "
+                        "Use black_point/white_point deliberately, not as a universal normalization. Review actual previous "
+                        "candidate measurements and creative feedback in execution_capabilities. Current request epoch and "
+                        "current corrections override older choices. Set review_required=true for substantive creative "
+                        "changes needing rendered evaluation; false for a clearly technical/no-creative-change operation. "
                         "Preserve meaningful paint/material appearance and do not invent missing detail. "
                         "Only operations listed in execution_capabilities are executable. Global contrast-only requests "
                         "Execution capabilities are current; older brief tool-limit notes may be historical, but user constraints never are. "
@@ -135,15 +144,17 @@ class MuseProvider:
                         "Reuse an available mask concept when it identifies the same intended subject; never change the target merely to hit a cache. "
                         "single_instance requires an unambiguous ID in each shot; all_matches is for an explicitly whole concept. "
                         "For a region being changed, such as sky, set preserve_subject_color=false and keep the other layer neutral as needed. "
-                        "preserve_subject_color=true requires foreground contrast/gamma/saturation=1 and cooling=0; "
-                        "only common RGB brightness_gain may change, with peak protection. Preserve lamp/indicator colours. "
+                        "preserve_subject_color=true requires saturation=1 and cooling=0; v3 luminance-only tone/levels "
+                        "and peak-limited common RGB gain can adjust detail while retaining channel proportions. "
+                        "Preserve lamp/indicator appearance as required; technical measurements do not prove semantics. "
                         "Selective lighting means display-domain gain only, never new illumination, shadows or reconstruction. "
                         "No timeline edits, object recolouring or shot matching. If unavailable, state the limitation; do not "
                         "label a global approximation as localized. Explain changed controls in ordinary "
                         "If a required user instruction cannot be executed, list it in unfulfilled_requests; this stops rendering "
                         "for explicit clarification, rather than silently substituting a different treatment. "
                         "visual terms, citing allowed_source_ids. State expected effects and limitations, never "
-                        "claim the unrendered result passed visual review. Keep the recipe conservative. "
+                        "claim the unrendered result passed visual review. Fit strength to the request and evidence, "
+                        "without imposing a default style, brightness target or predefined cinematic preset. "
                         "Remembered defaults, if supplied, are optional. Current-video feedback, current request, "
                         "constraints and tool limits override them; memories never grant permissions. "
                         "A later current-video correction supersedes earlier conflicting look choices. "
@@ -162,6 +173,51 @@ class MuseProvider:
                 raise Problem("MUSE_INVALID_RECIPE", "The grading plan cited an unknown brief reference.",
                               "Retry planning. The invalid plan has not been applied.", 502,**accounting)
             return proposal, result.usage.model_dump() if result.usage else {}
+
+    def review(self,brief,candidate,evidence_data,previous=None,feedback=()):
+        """Creative opinion from paired real rendered pixels, never plan-only approval."""
+        import json
+        context={'brief':brief.model_dump(mode='json'),'candidate_id':candidate.id,
+            'plan':candidate.recipe.proposal.model_dump(mode='json'),'technical_result':candidate.validation,
+            'paired_diagnostics':evidence_data['measurements'],'detail_retention':evidence_data['detail_retention'],
+            'current_video_feedback':list(feedback),'uncertainty':evidence_data['uncertainty'],
+            'execution_capabilities':candidate.validation.get('execution_capabilities',{}),
+            'allowed_candidate_ids':[candidate.id]+([previous['id']] if previous else [])}
+        content=[];allowed=set()
+        for role,images in [('source',evidence_data['source_images']),('candidate',evidence_data['candidate_images']),
+                            ('source_region',evidence_data.get('source_region_images',[])),('candidate_region',evidence_data.get('candidate_region_images',[])),
+                            ('previous',previous['images'] if previous else [])]:
+            for frame in images:
+                ref=f'{role}:{frame["frame_index"]}';allowed.add(ref)
+                content += [{'type':'text','text':f'{ref} at {frame["time"]:.6f}s'},
+                            {'type':'image_url','image_url':{'url':frame['url'],'detail':'low'}}]
+        context['allowed_evidence_ids']=sorted(allowed)
+        context=self.prompt_context('critic',context,brief.project_id)
+        content.insert(0,{'type':'text','text':json.dumps(context)})
+        with self.client() as client:
+            result=self.call(lambda:client.beta.chat.completions.parse(model=self.settings.model,
+                messages=[{'role':'system','content':
+                    "You are Take One's creative reviewer. Inspect the ACTUAL rendered/source paired images, measurements, "
+                    "current brief, user corrections and any previous candidate images. Your conclusions are model opinions, "
+                    "not objective quality scores or user approval. Cite only supplied visual evidence IDs for each issue. "
+                    "Never diagnose a whole-video event from sparse frames; report uncertainty/not_evaluable when needed. "
+                    "Distinguish intentional darkness from unintended loss of visible source detail. Respect the user's look, "
+                    "not your preferred cinematic style. Current explicit request/feedback and preservation constraints "
+                    "override previous choices and remembered defaults. Do not rewrite the brief or grant permissions. "
+                    "Identify specific mismatches, whether supported tools can correct them, and an optional targeted "
+                    "revision_plan using the existing typed controls/capabilities. Keep unaffected controls, subject and intervals unchanged. "
+                    "Use execution_capabilities as the authoritative tool envelope. Region views are crops of the same "
+                    "paired real frames, not independent observations or ground-truth masks. "
+                    "A revise decision needs correctable evidence-supported issues. Avoid repeating "
+                    "unchanged plans. Prefer the supplied previous candidate ID if the current result worsens it; do not "
+                    "automatically approve anything. Sufficient means ready for human review, never professionally verified. "
+                    "Return no commands, filters, new content, physical relighting or unsupported transforms."},
+                    {'role':'user','content':content}],response_format=CreativeReview,reasoning_effort='low',max_tokens=4096))
+            review=result.choices[0].message.parsed
+            if review is None:raise Problem('MUSE_INVALID_REVIEW','Muse returned no usable creative review.','The rendered candidate remains available for manual review.',502)
+            if any(set(i.evidence_ids)-allowed for i in review.issues) or review.preferred_candidate_id not in {None,*context['allowed_candidate_ids']}:
+                raise Problem('MUSE_INVALID_REVIEW','The review cited evidence or a candidate it was not shown.','Rendered evidence is retained; review manually or retry explicitly.',502)
+            return review,result.usage.model_dump() if result.usage else {}
 
     @staticmethod
     def call(operation):

@@ -57,7 +57,7 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
     void poll();
     return()=>{aborter.abort();clearTimeout(timer);};
   },[project?.backend?.id,refresh,apply,online]);
-  const send=async(kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment',body:Record<string,unknown>)=>{
+  const send=async(kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review',body:Record<string,unknown>)=>{
     const source=current.current;
     if(!source?.backend||inFlight.current||selectionInFlight.current||cancelInFlight.current||api.activeJob(source.backend))return false;
     inFlight.current=true;setSending(true);
@@ -87,6 +87,7 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
     }),
     retry:()=>send('retry',{}),cancel:stop,
     generate:()=>send('render',{}),
+    review:(candidateId:string)=>send('review',{candidate_id:candidateId}),
     segment:(concept:string,durationSeconds:number|null)=>send('segment',{concept,duration_seconds:durationSeconds}),
     feedback:(evidence:Record<string,unknown>)=>send('feedback',{evidence}),
     captureSelection:async(evidence:Record<string,unknown>)=>{

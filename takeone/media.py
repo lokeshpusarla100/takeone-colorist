@@ -10,9 +10,9 @@ from .contracts import Source, Preview
 from .errors import Problem
 
 
-def command(args: list[str], cancel: threading.Event, timeout: float = 180) -> str:
+def command(args: list[str], cancel: threading.Event, timeout: float = 180, *, binary=False,cwd=None):
     try:
-        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=not binary,cwd=cwd)
     except FileNotFoundError:
         raise Problem("MEDIA_TOOL_MISSING", "FFmpeg or FFprobe is not installed.",
                       "Set the tool paths or install the required media tools.", 503)
@@ -34,7 +34,7 @@ def command(args: list[str], cancel: threading.Event, timeout: float = 180) -> s
     if process.returncode:
         raise Problem("MEDIA_TOOL_FAILED", "The media tool could not process this video.",
                       "Inspect the source or use another video. The original upload is preserved.", 422,
-                      tool=Path(args[0]).name, exit_code=process.returncode, diagnostic=stderr[-5000:])
+                      tool=Path(args[0]).name, exit_code=process.returncode, diagnostic=(stderr.decode(errors='replace') if binary else stderr)[-5000:])
     return stdout
 
 
@@ -132,7 +132,7 @@ def capabilities(source: Source):
     return {
         "operations": (["global_grade","regional_grade"] if source.rotation==0 else ["global_grade"]) if supported else [],
         "limitations": [
-            "SDR Rec.709 contrast, saturation, gamma, bounded brightness gain and RGB cooling are supported.",
+            "SDR Rec.709 luminance tone, black/white points, bounded brightness and OCIO CDL saturation/RGB balance are supported. These are not calibrated scene-exposure or Kelvin estimates.",
             "Localized grading requires verified upright CFR timing and complete, unambiguous SAM masks. No physical relighting, reconstruction or shot matching.",
             *source.technical_notes,
         ],

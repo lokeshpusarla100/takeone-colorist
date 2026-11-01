@@ -1,13 +1,16 @@
 # Take One
 ## Hackathon project plan and Codex handoff
 
-**Version:** 1.0  
+**Version:** 1.1<br>
 **Prepared:** 31 October 2026, IST  
+**Implementation status updated:** 1 November 2026, IST<br>
 **Project folder on Lokesh's computer:** /home/lokesh/takeone-colorist  
 **Product:** Autonomous Creative Director + Precise Colorist  
 **Purpose of this document:** Consolidate the project discussions into one implementation plan that a new Codex session can understand without this chat.
 
 This is a design and delivery plan. It does not establish that the application is implemented, that the existing rubric is integrated, or that real footage has been graded successfully.
+
+Sections 2.3 and 26 record the current implementation handoff. The original scope, schedule and historical evidence below remain design context; consult README.md for current run commands and limits. An implemented path is not evidence of real-footage visual acceptance.
 
 ---
 
@@ -87,7 +90,7 @@ Exact routes, internal file names, UI tokens, numerical limits, and schedule all
 
 ## 2. Current state and evidence
 
-### 2.1 What the conversation establishes
+### 2.1 Original planning evidence (31 October)
 
 | Component | Evidence available | Correct interpretation |
 |---|---|---|
@@ -111,6 +114,17 @@ The earlier rubric answer reported six offline tests passing. Its DESIGN.md expl
 Inspect the actual project files, Python lockfile, frontend package files, environment configuration names, installed FFmpeg path, and any copied rubric files. Determine which code exists before creating replacements.
 
 Do not repeat the installation sequence merely because a new chat lacks context. A dependency consistency check is not evidence that every processing path or API feature works.
+
+### 2.3 Implementation handoff (1 November)
+
+- The React editor and local FastAPI backend now handle upload/previews, rubric questions and answers, persisted Creative Briefs, version comparison and session logs.
+- An explicit global-grade generation path connects the brief to a bounded contrast/gamma/saturation recipe and original-source render. Localized grading, SAM and automatic critique remain pending. Real-footage visual acceptance is not established by this handoff.
+- Current-video feedback creates a brief revision independently of cross-project memory. Applying it to pixels requires an explicit subsequent generation action.
+- Capture-only preference memory is implemented as described in Section 26: empty initial collection, separate feedback/interpretation layers, owner/profile isolation, atomic JSON, deduplication, edit/delete controls and replay-safe tombstones.
+- Capture defaults on; application defaults off and is unavailable through the normal API. Prepared future application requires deployment capability, profile enablement and explicit opt-in for a new project. No iteration count enables it.
+- The recorded feature verification passed 62 Python tests, 15 frontend tests, 12 offline browser checks and the frontend build. No billable model calls were made for memory verification. These checks do not establish live personalization quality or autonomous grading quality.
+
+Working code and future interfaces are distinguished in docs/PREFERENCE_MEMORY.md. Manual adjustment/lock evidence has a capture contract; actual manual controls/execution remain a future integration point. Existing project artifacts were preserved during the feature's startup checks.
 
 ## 3. Hackathon scope and delivery boundary
 

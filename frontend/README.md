@@ -1,6 +1,6 @@
 # Take One frontend
 
-React + TypeScript + Vite. The screen contains video playback, creative direction/rubric interaction, version selection and a session log.
+React + TypeScript + Vite. The screen contains video playback, creative direction/rubric interaction, global-grade generation, version selection, current-video feedback, preference management and a session log.
 
 ## Run
 
@@ -32,7 +32,7 @@ Start analysis submits the request to the actual API. The panel presents one val
 
 Polling merges authoritative state/events into the browser session. Stable IDs prevent duplicate log rows. Refresh restores the pending question or brief. Backend errors preserve their code, recovery action and technical details.
 
-Health and job status come from the backend. No simulated questions, progress or usage are included in normal startup. Automatic colorist generation, SAM and final rendering remain unavailable.
+Health and job status come from the backend. No simulated questions, progress or usage are included in normal startup. After a brief is ready, Generate graded video explicitly requests a bounded global recipe and render. Selected source frames and the brief go to Meta; FFmpeg renders the original. Completed versions can be compared and downloaded. SAM, local edits and automatic critique remain unavailable. Render/media checks do not establish visual quality.
 
 Legacy browser-only sessions can use Prepare source. Existing saved recipe drafts remain readable.
 
@@ -44,6 +44,8 @@ Submitted direction, rubric answers, feedback and explicit version choices are c
 
 Reusable records live on the backend, separate from IndexedDB and project artifacts. See [the memory contract](../docs/PREFERENCE_MEMORY.md) for endpoints, deletion semantics and the prepared future application gate.
 
+The selected profile and category/scene/purpose labels are next-upload defaults only. Existing videos retain their bound profile. Automatic entries are tentative and project-scoped; reusable scope and confirmation require explicit management. Deleting an entry prevents replay resurrection while retaining the separate feedback audit. Capture errors are shown alongside the current-video workflow; an outbox retry endpoint is documented in the contract.
+
 ## Main files
 
 - api.ts: requests, errors, response validation, upload and polling.
@@ -53,6 +55,7 @@ Reusable records live on the backend, separate from IndexedDB and project artifa
 - errors.ts: stable codes, messages, recovery actions and diagnostics.
 - storage.ts: IndexedDB transactions and state validation.
 - RubricPanel.tsx: prompt, question/answer controls and brief.
+- RenderPanel.tsx: explicit global-grade request, progress, recipe and render checks.
 - MemoryView.tsx: scoped preference management and supporting evidence.
 - preferenceApi.ts / preferenceContext.ts: memory API and next-upload profile/context defaults.
 - ErrorBoundary.tsx: recovery screen for rendering exceptions.
@@ -61,6 +64,6 @@ IndexedDB remains at schema version 1; backend state is optional, preserving leg
 
 ## Verification boundary
 
-Automated frontend tests use Node's test library and the installed Vite compiler. Browser integration should exercise upload → Start → question → answer → brief.
+Automated frontend tests use Node's test library and the installed Vite compiler. Browser integration should exercise upload → Start → question → answer → brief, preference add/edit/delete and profile isolation, and feedback with capture paused. A real generated render requires a separate visual review; offline memory verification makes no model calls.
 
 tests.offline_app:app is a separate fixture-backed test server. Normal startup always uses the real Muse provider. Offline checks verify wiring and state behavior, not live model quality.

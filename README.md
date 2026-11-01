@@ -1,11 +1,12 @@
 # Take One
 
-Local video preparation, a React editor, and a Muse-powered creative-direction consultation.
+Local video preparation, a React editor, Muse-powered creative direction, and capture-only editing preference memory.
 
     Upload original → prepare preview → enter request → Start analysis
     → answer useful questions → save/download the creative brief
+    → request a global grade → compare versions → download
 
-Automatic colorist execution and SAM masking are not connected yet. A bounded global SDR tool exists on the backend, but this UI currently stops at the creative brief.
+The code connects the saved brief to an explicit **Generate graded video** action for bounded global SDR contrast, saturation and gamma. This is one treatment across the clip. SAM masking, local corrections, shot matching and automatic visual critique remain unavailable. The generation path's presence does not establish acceptable visual quality on real footage; review the moving result before accepting it.
 
 ## Configure
 
@@ -47,6 +48,8 @@ For a frontend build preview, run npm run build and npm run preview inside front
 3. **Start analysis.** This sends the silent analysis video and request to Meta. Uploading or typing alone does not call Muse.
 4. **Clarify if needed.** The existing rubric validates evidence and available operations, then selects one question. Answer using an option, free text, Skip or You decide.
 5. **Review the brief.** The original request, approved outcomes, preservation constraints and unresolved limitations are saved. Download the brief or full session log.
+6. **Generate when ready.** Generate graded video sends selected source frames and the saved brief to Meta for a bounded recipe, then renders from the original. This is a separate action and may incur model usage.
+7. **Compare and revise.** Select a version, compare with Original, and download the chosen render. Save feedback to revise the current brief; generate again explicitly to apply that revision.
 
 Default question budget: three, with a hard maximum of five. A clear request can receive zero questions. The five rubric dimensions are internal coverage categories.
 
@@ -64,6 +67,7 @@ Existing browser-only sessions remain compatible. Use **Prepare source** to uplo
 - The frontend saves source metadata and the backend preview URL in IndexedDB. Preview playback streams independently from the backend with byte-range support; a browser decoder timeout cannot block rubric analysis.
 - It polls persisted backend state and deduplicates log events by ID.
 - Exported JSON includes consultation/version metadata, events and diagnostics, without video blobs, thumbnails or credentials.
+- Preference records live separately in .takeone-memory/. A persisted project outbox supports idempotent capture retry; memory changes do not rewrite a frozen brief.
 
 Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and ports 5173 and 4173, have separate storage. Backend files survive browser site-data clearing, but a backend-project browser is not implemented.
 
@@ -76,7 +80,7 @@ Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and por
 - Scene understanding uses the complete silent proxy; it is not a calibrated color measurement.
 - The base global tool supports SDR display-domain contrast, saturation and gamma. Local grading, relighting, reconstruction and shot matching are unavailable.
 - Imported renders can be compared when dimensions and duration match; imported outputs have no verified recipe provenance.
-- Final rendering and autonomous review are not connected to the brief yet.
+- A global-grade render path is connected to the brief. Autonomous review, localized edits and a broader final-delivery pipeline remain outside this implementation; media checks do not establish aesthetic quality or preservation.
 
 ## Check
 
@@ -87,6 +91,10 @@ From the project root:
     npm --prefix frontend run build
 
 Backend tests inject a fixture provider and exercise real upload, FFprobe/FFmpeg, question selection, answer forms, persistence, idempotency, retry, cancellation, limits and a global-tool pixel effect. They do not call Meta.
+
+Preference tests also cover profile isolation, deletion/replay protection, recovery, context retrieval, current-instruction precedence and disabled memory at actual prompt construction. For a focused run:
+
+    .venv/bin/python -m pytest -q tests/test_preferences.py
 
 Frontend tests cover media diagnostics, cancellation, resource cleanup, storage validation and API contracts. Live Muse connectivity and question quality need a separate run with the configured key.
 
@@ -109,6 +117,7 @@ The test-only browser server is tests.offline_app:app. It returns explicitly lab
 - **Save failed:** keep the page open, export the log, then retry saving.
 - **Port 5173 occupied:** open the existing editor, or run npm run dev -- --port 5174 inside frontend. Each origin has separate sessions.
 - **Workspace in use:** stop the other backend or configure another TAKEONE_WORKSPACE.
+- **Preference capture needs attention:** accepted current-video feedback is retained. Inspect the capture error; after fixing storage, use POST /api/projects/{id}/preference-capture/retry or restart to retry the persisted outbox. Do not delete profile files to clear an error.
 
 ## Preference memory (capture only)
 
@@ -121,6 +130,15 @@ The banner reads **Recording preferences — personalization off.** Capture and 
 independent; application is centrally disabled in this release and cannot be enabled through the API.
 Current-video feedback still revises that video's brief with capture/application off.
 
+To manage preferences:
+
+1. Open Preferences and review stored entries, scope and supporting evidence.
+2. Use Add instruction for a reusable statement; choose this project, matching context, or explicitly general scope. Edit an automatic entry to review its interpretation or status.
+3. Pause Record new project feedback to stop automatic capture. Explicit memory management remains available.
+4. Choose a profile and category/scene/purpose labels before the next upload. Existing videos retain their original profile.
+
+Deleted entries cannot return through replay of previously processed events. Their raw supporting feedback remains in the separate audit history. Capturing, confirming or repeating preferences never enables application, and explicit version selection never proves approval of every adjustment.
+
 Records live in the ignored .takeone-memory/ directory, separate from project artifacts.
 Existing interactions are not backfilled. See [the memory contract](docs/PREFERENCE_MEMORY.md)
 and Section 26 of the project plan for persistence, deletion semantics, APIs, prepared future
@@ -131,6 +149,7 @@ opt-in interfaces and verification boundaries.
 - [Frontend notes](frontend/README.md)
 - [Original project plan](Take_One_Hackathon_Project_Plan.md)
 - [Creative-direction rubric](takeone_rubric_v1/README.md)
+- [Preference memory contract and API](docs/PREFERENCE_MEMORY.md)
 - takeone/: FastAPI application, media tools, Muse integration, jobs and persistence
 - requirements-lock.txt: existing pinned Python dependencies
 

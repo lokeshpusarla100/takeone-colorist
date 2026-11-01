@@ -4,7 +4,7 @@ Implementation of only the **creative-intent question rubric**, not the video ed
 
 - `DESIGN.md`: purpose, architecture position, coverage, contracts, example, limitations.
 - `rubric.py`: Pydantic data contracts, evidence/feasibility question selection, per-answer state, creative brief, diagnostics.
-- `muse_adapter.py`: optional **Meta Muse Spark 1.3** structured-output adapter. Requires `MODEL_API_KEY`; it hasn't been tested against a live account.
+- `muse_adapter.py`: **Meta Muse Spark 1.3** structured-output adapter. Requires `MODEL_API_KEY`; offline checks use mocked requests and do not establish live question quality.
 - `test_rubric.py`: offline unit tests; no API key needed.
 - `proposal_schema.json` and `creative_brief_schema.json`: generated JSON Schemas for integrations.
 

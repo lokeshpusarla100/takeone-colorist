@@ -53,6 +53,9 @@ These are **coverage fields**, not a mandatory form. Ideally ask **0–3**, at m
 - `capabilities.limitations[]`: relevant failure risks or unsupported operations.
 - `technical_envelope[]`: source/render constraints, known only from metadata or authoritative measurements.
 - `explicit_constraints[]`: e.g. preserve appearance of vehicle paint, preserve factual content.
+- `project_id`: optional application project reference for the central prompt gate.
+- `project_feedback[]`: literal current-video feedback, independent of cross-project memory settings.
+- `memory_defaults[]`: optional prepared future interface; the application supplies no defaults in capture-only mode.
 
 ### Muse Spark request: `propose(session)`
 
@@ -128,12 +131,20 @@ The colorist later determines feasible adjustments; the critic checks readabilit
 | Real feasibility, masks, render quality | Renderer / colorist |
 | Verify constraints and diagnose failures | Reviewer + technical checks |
 
-**Limits:** A valid capability name does **not** prove a specific edit works; rendering trials remain essential. This v1 doesn't implement advanced conflict resolution, preview generation, persistence, reference retrieval, dynamic interpretation of free-text choices, or production-grade authentication. Hard restrictions are **carried in the brief**, not independently enforced by the colorist here. This package is a consultative decision module only.
+**Limits:** A valid capability name does **not** prove a specific edit works; rendering trials remain essential. This module exposes snapshots; application-level JSON persistence lives in takeone/service.py and takeone/store.py. It does not implement preview rendering, general reference retrieval, dynamic interpretation of free-text choices, or production-grade authentication. Hard restrictions are **carried in the brief**, not independently enforced by this module. It remains a consultative decision module.
+
+## Capture-only preference integration
+
+The application records editing evidence and scoped interpretations separately in takeone/preferences.py. Raw rubric answers preserve option IDs/labels or literal text with question/project references. Skip and delegation are interaction evidence, not proof of a specific aesthetic preference. No extra extraction model call is made.
+
+PromptMemoryGate filters the actual rubric context. With application disabled, remembered defaults and memory-derived directives are excluded while the current request, current-video answers and feedback remain available. The same boundary covers colorist context; future critic/look-selection/preview builders must use it as well.
+
+Prepared future fields include Candidate.memory_refs and memory_conflict, Proposal.memory_used_ids, and memory-provenance brief directives/influence records. Relevant confirmed defaults may be advisory only after explicit new-project opt-in and the other application gates. Current instructions, constraints and tool limits take precedence; memory never grants permission. Existing frozen briefs are not rewritten when stored entries change. See [the application memory contract](../docs/PREFERENCE_MEMORY.md) for exact rollout limits.
 
 ## Verification status
 
 - Offline automated tests validate selection, schema parsing, answer provenance, unsupported operations, missing evidence, duplication and budget.
-- **No Meta API call or real-video evaluation has been performed.** Actual model compliance, question relevance, and visual-quality improvement remain unverified.
+- Preference integration tests use local fixtures and mocked SDK requests, with no billable calls. They verify prompt isolation and current-video feedback, not live model compliance, question relevance, or visual-quality improvement.
 - Meta API docs: https://dev.meta.ai/docs/cookbook/structured-output and https://dev.meta.ai/docs/video-understanding
 - Research basis: user-supplied report *Deep Research Mission — Designing a Universal Creative-Direction Rubric for Autonomous Cinematic Color Grading*, particularly its “Final universal rubric”, “Adaptive question selection”, “Executable creative direction” and “Recommended v1” sections.
 
@@ -161,6 +172,6 @@ brief = session.brief()  # In an app, repeat propose/ask only when needed.
 print(brief.model_dump_json(indent=2))
 ```
 
-## Suggested location when integrating into Take One
+## Current location in Take One
 
-`takeone/creative_direction/rubric.py` and `takeone/creative_direction/muse_adapter.py`. Do not make a standalone rubric agent or duplicate editing responsibilities.
+The module remains in `takeone_rubric_v1/`; `takeone/service.py` orchestrates it and `takeone/provider.py` connects the Muse adapter. Do not duplicate it as a standalone agent. Application preference storage and its API live separately in `takeone/preferences.py` and `takeone/preference_api.py`.

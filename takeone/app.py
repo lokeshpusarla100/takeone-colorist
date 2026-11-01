@@ -1,11 +1,12 @@
 import asyncio
 from contextlib import asynccontextmanager
 import os
+import json
 from pathlib import Path
 import shutil
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field
@@ -16,6 +17,8 @@ from .config import Settings
 from .contracts import Event, State
 from .errors import Problem, safe_problem
 from .service import Service
+from .preference_api import install_preferences
+from .preferences import context_values
 
 
 class Command(StrictModel):
@@ -86,6 +89,8 @@ def create_app(settings: Settings | None = None, provider=None):
     def service() -> Service:
         return application.state.service
 
+    install_preferences(application,service)
+
     @application.get("/api/health")
     def health():
         return {
@@ -99,8 +104,17 @@ def create_app(settings: Settings | None = None, provider=None):
         }
 
     @application.post("/api/projects", status_code=202)
-    async def upload(file: UploadFile = File(...)):
+    async def upload(file: UploadFile = File(...),profile_id:str=Form("default"),
+                     preference_context:str=Form("{}"),use_preferences:bool=Form(False)):
         project_id = str(uuid4())
+        try:
+            context = context_values(json.loads(preference_context))
+        except (ValueError,TypeError,AttributeError):
+            raise Problem("MEMORY_CONTEXT_INVALID","Invalid editing context.","Use category, scene and purpose labels.",422)
+        prefs=service().preferences
+        binding=prefs.bind_new_project(profile_id,project_id,context,use_preferences) if prefs else None
+        if prefs is None and (profile_id!="default" or use_preferences):
+            service().require_memory()
         directory = service().store.directory(project_id)
         directory.mkdir(parents=True, exist_ok=False)
         temporary = directory / "source.upload"
@@ -121,6 +135,8 @@ def create_app(settings: Settings | None = None, provider=None):
             state = State(id=project_id, status="ingesting", stage="inspect_source",
                           filename=Path((file.filename or "video").replace("\\", "/")).name[:255],
                           max_questions=settings.max_questions,
+                          owner_id=prefs.owner_id if prefs else None,profile_id=profile_id,
+                          preference_context=context,memory_binding=binding,
                           events=[Event(title="Source uploaded", details={"bytes": size})])
             with service().store.lock:
                 service().submit(state, "ingest")

@@ -10,11 +10,13 @@ from takeone_rubric_v1.muse_adapter import propose
 from .config import Settings
 from .contracts import SceneAnalysis, GradeProposal
 from .errors import Problem
+from .preferences import PromptMemoryGate
 
 
 class MuseProvider:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, prompt_gate=None):
         self.settings = settings
+        self.prompt_gate = prompt_gate
 
     def available(self):
         return bool(self.key())
@@ -73,7 +75,12 @@ class MuseProvider:
 
     def propose(self, session):
         with self.client() as client:
-            return self.call(lambda: propose(session, self.settings.model, client=client))
+            def filtered(context):
+                return self.prompt_context("rubric", context, session.inputs.project_id)
+            return self.call(lambda: propose(session, self.settings.model, client=client, context_filter=filtered))
+
+    def prompt_context(self, stage, payload, project_id=None):
+        return self.prompt_gate.build(stage, payload, project_id) if self.prompt_gate else PromptMemoryGate.clean(payload)
 
     def grade(self, brief, analysis, source, sample_stats, images):
         import json
@@ -93,6 +100,7 @@ class MuseProvider:
             },
             "operation_order": ["gamma", "contrast", "saturation"],
         }
+        context = self.prompt_context("colorist", context, brief.project_id)
         content = [{"type": "text", "text": json.dumps(context)}]
         for image in images:
             content += [{"type": "text", "text": f'Source sample requested at {image["time"]:.3f}s.'},
@@ -113,6 +121,9 @@ class MuseProvider:
                         "recoloring, timeline edits or shot matching. Explain each changed control in ordinary "
                         "visual terms, citing allowed_source_ids. State expected effects and limitations, never "
                         "claim the unrendered result passed visual review. Keep the recipe conservative. "
+                        "Remembered defaults, if supplied, are optional. Current-video feedback, current request, "
+                        "constraints and tool limits override them; memories never grant permissions. "
+                        "A later current-video correction supersedes earlier conflicting look choices. "
                         "Return the requested schema; do not emit commands."
                     )},
                     {"role": "user", "content": content},
@@ -122,7 +133,7 @@ class MuseProvider:
             if proposal is None:
                 raise Problem("MUSE_INVALID_RECIPE", "Muse returned no usable grading plan.",
                               "Retry planning. The source and brief are preserved.", 502)
-            allowed = set(references)
+            allowed = set(context["allowed_source_ids"])
             if any(set(d.source_ids) - allowed for d in proposal.decisions):
                 raise Problem("MUSE_INVALID_RECIPE", "The grading plan cited an unknown brief reference.",
                               "Retry planning. The invalid plan has not been applied.", 502)

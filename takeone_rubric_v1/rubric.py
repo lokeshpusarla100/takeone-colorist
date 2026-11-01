@@ -58,12 +58,24 @@ class CapabilityManifest(StrictModel):
     supports_look_previews: bool = False
 
 
+class RememberedDefault(StrictModel):
+    id: str
+    revision: int
+    dimension: Dimension
+    key: str
+    outcome: str
+    conflicted: bool = False
+
+
 class RubricInput(StrictModel):
     user_request: str
     observations: list[Observation]
     capabilities: CapabilityManifest
     technical_envelope: list[str] = Field(default_factory=list)
     explicit_constraints: list[str] = Field(default_factory=list)
+    project_id: str | None = None
+    memory_defaults: list[RememberedDefault] = Field(default_factory=list)
+    project_feedback: list[dict] = Field(default_factory=list)
 
 
 class Option(StrictModel):
@@ -88,6 +100,8 @@ class Candidate(StrictModel):
     answerability: Level
     interaction: Literal["question", "preview"] = "question"
     options: list[Option] = Field(min_length=2, max_length=3)
+    memory_refs: list[str] = Field(default_factory=list, max_length=10)
+    memory_conflict: bool = False
 
 
 class Proposal(StrictModel):
@@ -95,6 +109,7 @@ class Proposal(StrictModel):
     explicit_constraints: list[str] = Field(default_factory=list)
     observation_gap: str = ""  # Requires more inspection, not a user question.
     knowledge_gap: str = ""  # May justify skill/retrieval, not a user question.
+    memory_used_ids: list[str] = Field(default_factory=list, max_length=10)
 
 
 class Answer(StrictModel):
@@ -107,11 +122,12 @@ class Directive(StrictModel):
     dimension: Dimension
     scope: str
     outcome: str
-    provenance: Literal["user_request", "user_answer", "model_default"]
+    provenance: Literal["user_request", "user_answer", "model_default", "memory_default"]
     strength: Literal["hard", "strong", "optional"]
     source_id: str
     verification_hint: str
     operations_are_suggestions: list[str] = Field(default_factory=list)
+    memory_refs: list[str] = Field(default_factory=list)
 
 
 class CreativeBrief(StrictModel):
@@ -125,6 +141,8 @@ class CreativeBrief(StrictModel):
     answers: list[Answer]
     delegated_or_skipped: list[str]
     unresolved: list[str]
+    project_id: str | None = None
+    memory_influences: list[dict] = Field(default_factory=list)
     review_rule: str = (
         "Translate the directives into one coordinated treatment; do not compound the strength "
         "when several statements describe the same look. "
@@ -197,6 +215,8 @@ class RubricSession:
         self.events: list[dict] = []
         self.rejected: list[dict] = []
         self.questions: list[Candidate] = []
+        self.used_memory_ids: set[str] = set()
+        self.blocked_memory_ids: set[str] = set()
 
     def answered_decisions(self) -> list[dict]:
         questions = {q.id: q for q in self.questions}
@@ -227,6 +247,10 @@ class RubricSession:
     def _validate_candidate(self, c: Candidate) -> str | None:
         if c.uncertainty_type != "preference":
             return "not a preference uncertainty"
+        if set(c.memory_refs) - {m.id for m in self.inputs.memory_defaults}:
+            return "question cites unavailable preference memory"
+        if c.memory_conflict and not c.memory_refs:
+            return "memory conflict question has no supporting memory"
         if c.target_key in self.resolved_keys:
             return "preference already resolved"
         if c.id in {a.question_id for a in self.answers}:
@@ -264,12 +288,23 @@ class RubricSession:
             previous_outcomes = {normalized(o["intended_outcome"]) for o in decision["options"]}
             if previous_outcomes and previous_outcomes == candidate_outcomes:
                 return "same outcome choices already presented in this scope"
+        if not c.preservation_risk and not c.memory_conflict:
+            covered = {m.key for m in self.inputs.memory_defaults if not m.conflicted}
+            if c.target_key in covered or candidate_families.intersection(covered):
+                return "low-risk preference covered by an applicable remembered default"
         return None
 
     def next_question(self, proposal: Proposal) -> Candidate | None:
         """Choose at most one *consequential* question per cycle; never batch ask."""
         if self.pending is not None:
             raise RuntimeError("answer/skip the pending question before proposing another")
+        allowed_memories = {m.id for m in self.inputs.memory_defaults if not m.conflicted}
+        self.blocked_memory_ids.update(ref for c in proposal.candidates if c.memory_conflict for ref in c.memory_refs
+                                       if ref in {m.id for m in self.inputs.memory_defaults})
+        allowed_memories -= self.blocked_memory_ids
+        self.used_memory_ids.update(set(proposal.memory_used_ids) & allowed_memories)
+        if set(proposal.memory_used_ids) - allowed_memories:
+            self.rejected.append({"candidate_id": "memory", "reason": "unavailable or conflicting memory cannot supply a default"})
         for quote in proposal.explicit_constraints:
             if quote.strip() and quote in self.inputs.user_request:
                 if quote not in self.inputs.explicit_constraints:
@@ -305,7 +340,7 @@ class RubricSession:
         self.questions.append(selected.model_copy(deep=True))
         self.asked_count += 1
         self.events.append({"event": "question_selected", "id": selected.id,
-                            "reason": selected.decision_fork})
+                            "reason": selected.decision_fork, "memory_refs": selected.memory_refs})
         return selected
 
     def record_answer(self, answer: Answer) -> None:
@@ -321,6 +356,7 @@ class RubricSession:
                 provenance="user_answer", strength="strong", source_id=c.id,
                 verification_hint=f"Assess '{option.intended_outcome}' on {c.scope} against source and approved previews.",
                 operations_are_suggestions=option.required_operations,
+                memory_refs=c.memory_refs,
             ))
         elif answer.response_type == "free_text":
             if not answer.response.strip():
@@ -349,9 +385,29 @@ class RubricSession:
         ]
         if any(e.get("event") == "stop" and e.get("reason") == "question budget exhausted" for e in self.events):
             unresolved.append("Consultation ended at the question limit; additional preference gaps were not evaluated.")
+        directives = list(self.directives)
+        for feedback in self.inputs.project_feedback:
+            if feedback.get("text"):
+                directives.append(Directive(dimension=feedback.get("dimension","appearance"),scope="whole clip",
+                    outcome=feedback["text"],provenance="user_answer",strength="strong",
+                    source_id=feedback["event_id"],
+                    verification_hint="Latest current-video feedback takes priority over earlier conflicting direction."))
+        influences = []
+        for memory in self.inputs.memory_defaults:
+            if memory.id not in self.used_memory_ids or memory.id in self.blocked_memory_ids or memory.conflicted:
+                continue
+            # Explicit project answers supersede remembered defaults in that dimension.
+            if any(d.dimension == memory.dimension and d.provenance == "user_answer" for d in directives):
+                continue
+            source_id = f"memory:{memory.id}:{memory.revision}"
+            directives.append(Directive(dimension=memory.dimension, scope="whole clip", outcome=memory.outcome,
+                provenance="memory_default", strength="optional", source_id=source_id,
+                verification_hint="Advisory default only; current instructions and protections take priority.",
+                memory_refs=[memory.id]))
+            influences.append({"entry_id":memory.id,"revision":memory.revision,"stage":"brief","target":source_id})
         return CreativeBrief(
             initial_request=self.inputs.user_request,
-            directives=self.directives,
+            directives=directives,
             explicit_constraints=self.inputs.explicit_constraints,
             default_protections=DEFAULT_PROTECTIONS.copy(),
             technical_envelope=self.inputs.technical_envelope + self.inputs.capabilities.limitations,
@@ -359,6 +415,8 @@ class RubricSession:
             answers=self.answers,
             delegated_or_skipped=[a.question_id for a in self.answers if a.response_type in ("skip", "delegate")],
             unresolved=unresolved,
+            project_id=self.inputs.project_id,
+            memory_influences=influences,
         )
 
     def snapshot(self) -> dict:
@@ -367,6 +425,8 @@ class RubricSession:
             directives=self.directives, resolved_keys=sorted(self.resolved_keys),
             pending=self.pending, asked_count=self.asked_count, events=self.events, rejected=self.rejected,
             questions=self.questions,
+            used_memory_ids=sorted(self.used_memory_ids),
+            blocked_memory_ids=sorted(self.blocked_memory_ids),
         ).model_dump(mode="json")
 
     @classmethod
@@ -376,6 +436,8 @@ class RubricSession:
         for name in ("answers", "directives", "pending", "asked_count", "events", "rejected", "questions"):
             setattr(session, name, getattr(state, name))
         session.resolved_keys = set(state.resolved_keys)
+        session.used_memory_ids = set(state.used_memory_ids)
+        session.blocked_memory_ids = set(state.blocked_memory_ids)
         return session
 
 
@@ -390,3 +452,5 @@ class RubricSnapshot(StrictModel):
     events: list[dict]
     rejected: list[dict]
     questions: list[Candidate] = Field(default_factory=list)
+    used_memory_ids: list[str] = Field(default_factory=list)
+    blocked_memory_ids: list[str] = Field(default_factory=list)

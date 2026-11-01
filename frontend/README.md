@@ -36,6 +36,14 @@ Health and job status come from the backend. No simulated questions, progress or
 
 Legacy browser-only sessions can use Prepare source. Existing saved recipe drafts remain readable.
 
+## Preference capture
+
+Preferences opens the profile-based memory view. It starts empty and shows **Recording preferences — personalization off.** Users can inspect evidence, add/edit/delete scoped entries, pause automatic capture, and choose a profile/context for the next upload. There is no personalization toggle in this release.
+
+Submitted direction, rubric answers, feedback and explicit version choices are captured through backend APIs. Selecting a version records that choice; it does not imply approval of all its adjustments. Current-video feedback revises the brief even when capture is paused. Saving feedback does not automatically render a new version.
+
+Reusable records live on the backend, separate from IndexedDB and project artifacts. See [the memory contract](../docs/PREFERENCE_MEMORY.md) for endpoints, deletion semantics and the prepared future application gate.
+
 ## Main files
 
 - api.ts: requests, errors, response validation, upload and polling.
@@ -45,6 +53,8 @@ Legacy browser-only sessions can use Prepare source. Existing saved recipe draft
 - errors.ts: stable codes, messages, recovery actions and diagnostics.
 - storage.ts: IndexedDB transactions and state validation.
 - RubricPanel.tsx: prompt, question/answer controls and brief.
+- MemoryView.tsx: scoped preference management and supporting evidence.
+- preferenceApi.ts / preferenceContext.ts: memory API and next-upload profile/context defaults.
 - ErrorBoundary.tsx: recovery screen for rendering exceptions.
 
 IndexedDB remains at schema version 1; backend state is optional, preserving legacy sessions. Export excludes thumbnails, video blobs and backend-private credentials.

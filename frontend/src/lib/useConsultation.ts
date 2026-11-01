@@ -53,16 +53,18 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
     void poll();
     return()=>{aborter.abort();clearTimeout(timer);};
   },[project?.backend?.id,refresh,apply,online]);
-  const send=async(kind:'analyze'|'answers'|'retry'|'render',body:Record<string,unknown>)=>{
+  const send=async(kind:'analyze'|'answers'|'retry'|'render'|'feedback',body:Record<string,unknown>)=>{
     const source=current.current;
-    if(!source?.backend||inFlight.current)return;
+    if(!source?.backend||inFlight.current)return false;
     inFlight.current=true;setSending(true);
     const id=source.backend.id;
     try{
       const state=await api.command(id,kind,{revision:source.backend.revision,...body});
       if(current.current?.backend?.id===id)apply(state);
+      return true;
     }catch(cause){
       if(current.current?.backend?.id===id)reportError(cause,'backend.'+kind);
+      return false;
     }finally{inFlight.current=false;setSending(false);setRefresh(n=>n+1);}
   };
   const stop=async()=>{
@@ -77,6 +79,15 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
     }),
     retry:()=>send('retry',{}),cancel:stop,
     generate:()=>send('render',{}),
+    feedback:(evidence:Record<string,unknown>)=>send('feedback',{evidence}),
+    captureSelection:async(evidence:Record<string,unknown>)=>{
+      const source=current.current;
+      if(!source?.backend)return;
+      try{
+        const state=await api.command(source.backend.id,'feedback',{revision:source.backend.revision,evidence});
+        if(current.current?.backend?.id===state.id)apply(state);
+      }catch(cause){reportError(cause,'memory.selection');}
+    },
     refresh:()=>setRefresh(n=>n+1),
     unavailable:()=>reportError(new AppError('SOURCE_NOT_PREPARED','Prepare the source before analysis.',
       'Upload the original video to the local backend first.'),'backend.source'),

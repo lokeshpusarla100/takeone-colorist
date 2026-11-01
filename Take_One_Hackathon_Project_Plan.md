@@ -38,6 +38,7 @@ This is a design and delivery plan. It does not establish that the application i
 23. [Submission and demo](#23-submission-and-demo)
 24. [Remaining choices and first Codex task](#24-remaining-choices-and-first-codex-task)
 25. [Sources and earlier artifacts](#25-sources-and-earlier-artifacts)
+26. [Preference memory: capture-only addition](#26-preference-memory-capture-only-addition)
 
 ---
 
@@ -71,6 +72,7 @@ This is general-purpose across subject matter: people, vehicles, products, lands
 | UI | Browser editor inspired by Lightroom, with live activity, previews, controls, and history |
 | Visual design | Restrained, muted palette; no neon colors or glow effects |
 | Working method | Incremental end-to-end milestones; inspect actual output at each stage |
+| Preference memory | Capture editing evidence and editable scoped preferences; cross-project application stays disabled |
 | Project origin | New hackathon project, separate from Video Story Indexer and its benchmark repo |
 
 ### 1.3 Status language used in this plan
@@ -667,7 +669,9 @@ No vector database or generic RAG system is required for v1. Retrieve project-sp
 
 Web research remains optional and outside the critical path. Use it for an unfamiliar named reference, technique, or consequential current specification. Do not browse merely because the footage contains a familiar subject.
 
-Do not automatically convert one user's feedback into a universal grading rule. Store project feedback with scope and provenance; reusable preference learning can wait.
+Do not automatically convert one user's feedback into a universal grading rule. The capture-only
+preference-memory addition in Section 26 records scoped evidence and editable interpretations.
+It does not train weights, and cross-project application remains disabled.
 
 ## 16. Tools, orchestration, and persistence
 
@@ -705,6 +709,8 @@ For v1, versioned JSON artifacts plus an append-only event log are sufficient. U
 | Candidate artifacts | Previews, thumbnails, comparisons |
 | Review reports | Findings and dispositions |
 | Event/usage records | Stage, call/tool identity, timing, tokens, cost status |
+| Project preference outbox | Durable, idempotent handoff of user evidence to the separate preference store |
+| Owner/profile preference JSON | Feedback ledger, editable scoped entries, settings and deletion tombstones; separate from project media |
 | Final export | Selected rendered video and accompanying metadata |
 
 ### 16.4 Cache
@@ -1076,3 +1082,115 @@ The next evidence that matters is a real short clip processed through the agreed
 - **[S5] Official hackathon event page:** Public themes, track descriptions, schedule, and schedule-change caveat. Participant-only terms require a separate check. https://events.cerebralvalley.ai/e/meta-ai-developer-hackathon
 
 The architecture, budgets, UI layout, implementation milestones, and acceptance gates in this document are project design decisions or recommendations. They are not empirical findings supplied by the API documentation.
+
+
+## 26. Preference memory: capture-only addition
+
+### 26.1 Scope and settings
+
+This addition is application-level memory, independent of ChatGPT/Codex memory and model training.
+It uses filesystem JSON and existing user interactions. No vector store, database framework,
+additional model, or per-interaction extraction call is added.
+
+Each profile starts with an empty collection and independent settings:
+
+    capture_enabled = true
+    application_enabled = false
+
+The normal application also has memory_application_available=false. It deliberately has no
+environment variable that can activate that rollout capability. The current API rejects application
+enablement and new-project personalization requests. Capturing more evidence never changes either flag.
+
+### 26.2 Evidence and preference entries
+
+Two layers remain distinct:
+
+- Feedback events preserve user wording/selection, event/project/question/version references,
+  timestamp and editing context. Selection records do not imply approval of every adjustment.
+- Preference entries hold scoped interpretations, dimension, topic, basis, status, supporting
+  references and revision history. Automatic interpretations are tentative and project-scoped.
+  Explicit reusable instructions can be added and confirmed by the user.
+
+Capture covers submitted direction, rubric choices/free text, explicit current-video feedback,
+version selections/rejections, and an evidence contract for manual adjustments/locks.
+Skips/delegation may be retained as interaction evidence but create no specific aesthetic preference.
+Model critique and automatic revisions are not capture sources. Source analysis, personal profile
+information and unrelated media metadata are not mined for reusable preferences.
+
+Scope is project, matching category/scene/purpose conditions, or explicitly general.
+Context labels are user-supplied editing labels. Repetition within one video remains one supporting
+project and never promotes an entry to general or confirmed. Conflicts are preserved separately.
+
+### 26.3 Persistence and isolation
+
+Reusable memory lives in .takeone-memory/, outside workspace/<project-id>/ artifacts and ignored by Git.
+An owner manifest assigns a stable local owner ID; each profile has an independent JSON document.
+Documents contain settings, feedback events, preferences, processed-event receipts and fingerprint
+tombstones. File locks serialize updates; temporary writes, fsync and replacement make each update atomic.
+
+Projects bind to their profile at upload. Changing the profile in the memory view affects new uploads,
+not an existing video's ownership. APIs reject cross-profile supporting-project references and
+copied owner/profile records. This is local filesystem namespacing, not multi-user authentication.
+
+A project outbox persists user evidence before the separate memory write. Retried delivery is
+idempotent. A memory write failure does not cancel accepted answers or ordinary current-video feedback.
+
+Deleted entries disappear from the active view and cannot be resurrected by old event replays.
+The tombstone retains identity/reference metadata and hashes; its interpreted text/history is cleared.
+The separate feedback audit and project history remain retained. Deleting an interpretation is not
+a request to erase the underlying project's event history.
+
+### 26.4 Current-video behavior
+
+Feedback on the current video explicitly creates a new brief revision, keeping the previous brief
+in project history. It works with capture paused and application off. It does not automatically call
+a model, generate a render, or change personalization settings.
+
+Explicit version selections are captured; automatically selecting a newly rendered candidate is not
+user preference evidence. Manual-adjustment/lock capture endpoints record requested actions only.
+Their UI and execution hooks must be connected when actual manual controls are implemented.
+
+### 26.5 Central prompt boundary and future application
+
+PromptMemoryGate is the single reusable-preference projection boundary. With the rollout capability,
+profile application flag, or project opt-in disabled, it supplies no applicable preference data.
+Implemented rubric and colorist prompts pass through this gate. Factual scene analysis receives only
+the media input and inspection instructions. Critic/look-selection/preview-planning use cases have
+a prepared gate interface; no new model pipelines are built for them.
+
+A future rollout requires all three explicit actions:
+
+1. Deploy with memory_application_available=true after validating the future mode.
+2. Explicitly enable application for the desired profile.
+3. Opt a newly uploaded project in using use_preferences=true, with its editing context.
+
+There is no endpoint to retrofit an existing frozen brief or project binding. Bindings freeze
+eligible confirmed preference values/revisions. Later edits do not rewrite that snapshot or the brief;
+deleted/contradicted entries stop being supplied to subsequent prompts.
+
+Retrieval matches context, excludes explicit overridden topics and suppresses conflicting defaults.
+Conflicting entries are labeled for clarification rather than resolved by last-write-wins.
+Current requests, current-video answers/feedback, explicit constraints and tool limitations dominate
+advisory defaults. Memory cannot grant permission to change protected content.
+
+The prepared rubric protocol accepts memory references for influenced questions and IDs of defaults
+actually used. Defaults become optional memory-provenance directives; current answers take precedence.
+Questions/defaults/grade decisions retain entry IDs and revisions. Unknown or disabled references
+are rejected. This protocol and future opt-in path are checked with local fixtures, not enabled in
+the current release or validated for model quality.
+
+### 26.6 Minimal UI and verification
+
+The existing editor adds a Preferences view with:
+
+- Recording preferences — personalization off.
+- Profile and recording controls, stored entries, scope, basis and evidence.
+- Explicit reusable-instruction creation and edit/delete controls.
+- Supporting project counts and revision history.
+
+A small current-video feedback field updates the current brief independently of memory flags.
+
+Focused offline checks cover persistence/deduplication, one-video evidence counting, profile/owner
+isolation, edits/deletion replay, context-sensitive retrieval, frozen bindings, current-instruction
+precedence, actual SDK prompt construction while disabled, and current feedback while capture is paused.
+No billable API calls are part of this feature's verification.

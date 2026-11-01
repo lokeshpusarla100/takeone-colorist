@@ -21,6 +21,9 @@ class Settings:
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
     key_file: Path | None = None
+    memory_root: Path | None = None
+    # Rollout capability, deliberately not enabled by an environment variable.
+    memory_application_available: bool = False
 
     @classmethod
     def from_env(cls):
@@ -40,4 +43,5 @@ class Settings:
             ffmpeg=shutil.which("ffmpeg") or "ffmpeg",
             ffprobe=shutil.which("ffprobe") or "ffprobe",
             key_file=ROOT / ".env",
+            memory_root=ROOT / ".takeone-memory",
         )

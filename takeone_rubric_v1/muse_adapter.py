@@ -5,6 +5,7 @@ are deliberately outside the rubric boundary. Requires MODEL_API_KEY.
 """
 import json
 import os
+from collections.abc import Callable
 
 from openai import OpenAI
 
@@ -37,10 +38,18 @@ without re-asking how dark the image should be. Keep different subjects/regions 
 The user chooses visible outcomes, not one question per gamma, contrast or saturation knob.
 Use ordinary visual language in question, option labels and decision_fork.
 Stop when the useful preferences are resolved; do not fill the question budget.
+Only if remembered_defaults is supplied, use clear non-conflicting preferences as optional defaults.
+Current request, current-video answers, preservation rules and available tools always take priority.
+Ask when a current request conflicts with a remembered default or a consequential permission is
+unresolved. Do not turn memory into permission. Use memory_refs for questions actually influenced
+and memory_conflict=true when asking about a conflict or uncertain applicability.
+and memory_used_ids only for defaults used in the brief. Conflicted entries cannot supply defaults.
+If no remembered_defaults is supplied, both reference lists must be empty and memory_conflict=false.
 """
 
 
-def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=None) -> Proposal:
+def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=None,
+            context_filter: Callable[[dict], dict] | None = None) -> Proposal:
     if session.pending is not None:
         raise RuntimeError("Finish current user question first")
     context = {
@@ -51,9 +60,12 @@ def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=Non
         "technical_envelope": session.inputs.technical_envelope,
         "answers": [a.model_dump() for a in session.answers],
         "previous_decisions": session.answered_decisions(),
+        "current_video_feedback": session.inputs.project_feedback,
         "resolved_preference_keys": sorted(session.resolved_keys),
         "rubric_budget_remaining": session.max_decisions - session.asked_count,
     }
+    if context_filter:
+        context = context_filter(context)
     if client is None:
         api_key = os.getenv("MODEL_API_KEY")
         if not api_key:

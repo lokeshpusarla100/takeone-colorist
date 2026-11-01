@@ -46,6 +46,7 @@ coverage/
 /logs/
 /tmp/
 /.cache/
+/.takeone-memory/
 *.mp4
 *.mov
 *.webm

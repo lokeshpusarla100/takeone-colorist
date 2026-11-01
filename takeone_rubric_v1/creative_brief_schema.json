@@ -62,7 +62,8 @@
           "enum": [
             "user_request",
             "user_answer",
-            "model_default"
+            "model_default",
+            "memory_default"
           ],
           "title": "Provenance",
           "type": "string"
@@ -89,6 +90,13 @@
             "type": "string"
           },
           "title": "Operations Are Suggestions",
+          "type": "array"
+        },
+        "memory_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Memory Refs",
           "type": "array"
         }
       },
@@ -170,6 +178,26 @@
         "type": "string"
       },
       "title": "Unresolved",
+      "type": "array"
+    },
+    "project_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Project Id"
+    },
+    "memory_influences": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Memory Influences",
       "type": "array"
     },
     "review_rule": {

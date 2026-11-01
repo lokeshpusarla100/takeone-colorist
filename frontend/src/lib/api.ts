@@ -1,6 +1,7 @@
 import { AppError } from './errors';
 import type { ErrorDetails } from './errors';
 import type { SessionEvent } from './types';
+import { nextProfile, nextContext } from './preferenceContext';
 
 export type Question = {
   id:string; question:string; scope:string; decision_fork:string;
@@ -34,6 +35,8 @@ export type BackendState = {
   error:null|{code:string;message:string;action:string;details:ErrorDetails};
   candidates?:RenderCandidate[];
   selected_candidate_id?:string|null;
+  owner_id?:string|null;profile_id?:string;preference_context?:Record<string,string>;
+  memory_capture_error?:{message:string}|null;
 };
 export type Health = {
   status:string;model:string;muse_configured:boolean;ffmpeg_available:boolean;ffprobe_available:boolean;
@@ -155,9 +158,10 @@ export async function health() {
 export const getState=async(id:string,signal?:AbortSignal)=>parseBackend(await request<unknown>('/api/projects/'+id,{signal}));
 export async function upload(file:File,signal:AbortSignal) {
   const form=new FormData();form.append('file',file);
+  form.append('profile_id',nextProfile());form.append('preference_context',JSON.stringify(nextContext()));
   return parseBackend(await request<unknown>('/api/projects',{method:'POST',body:form,signal},120000));
 }
-export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render',body:Record<string,unknown>) {
+export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback',body:Record<string,unknown>) {
   return parseBackend(await request<unknown>('/api/projects/'+id+'/'+kind,{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({...body,command_id:crypto.randomUUID()}),

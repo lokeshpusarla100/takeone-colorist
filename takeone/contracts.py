@@ -159,6 +159,15 @@ class State(StrictModel):
     candidates: list[RenderCandidate] = Field(default_factory=list)
     selected_candidate_id: str | None = None
     render_target_id: str | None = None
+    owner_id: str | None = None
+    profile_id: str = "default"
+    preference_context: dict[str, str] = Field(default_factory=dict)
+    memory_binding: dict | None = None
+    memory_outbox: list[dict] = Field(default_factory=list)
+    memory_capture_error: dict | None = None
+    memory_influences: list[dict] = Field(default_factory=list)
+    feedback: list[dict] = Field(default_factory=list)
+    brief_revision: int = 0
 
     def public(self):
-        return self.model_dump(mode="json", exclude={"rubric", "receipts", "remote_file_id", "active_job", "job_kind", "history", "render_target_id"})
+        return self.model_dump(mode="json", exclude={"rubric", "receipts", "remote_file_id", "active_job", "job_kind", "history", "render_target_id", "memory_binding", "memory_outbox"})

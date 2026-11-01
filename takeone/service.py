@@ -6,7 +6,7 @@ from pathlib import Path
 import threading
 from uuid import uuid4
 
-from takeone_rubric_v1.rubric import Answer, CapabilityManifest, Observation, RubricInput, RubricSession
+from takeone_rubric_v1.rubric import Answer, CapabilityManifest, Directive, Observation, RememberedDefault, RubricInput, RubricSession
 from .config import Settings
 from .contracts import Event, State, GradeRecipe, RenderCandidate
 from .errors import Problem, safe_problem
@@ -14,6 +14,8 @@ from .media import capabilities, inspect_source, make_previews
 from .provider import MuseProvider
 from .store import Store
 from . import rendering
+from .preferences import FeedbackEvidence, PreferenceStore, PromptMemoryGate
+from .preferences import context_values
 
 
 class Service:
@@ -27,7 +29,18 @@ class Service:
             self.process_lock.close()
             raise Problem("WORKSPACE_IN_USE", "Another backend is using this workspace.",
                           "Run one backend worker, or select a separate workspace.", 503)
-        self.provider = provider or MuseProvider(settings)
+        self.memory_startup_error = None
+        try:
+            self.preferences = PreferenceStore(
+                settings.memory_root or settings.workspace.parent / (settings.workspace.name + "-preferences"),
+                application_available=settings.memory_application_available)
+        except Exception as cause:
+            self.preferences = None
+            self.memory_startup_error = {"code":"MEMORY_UNAVAILABLE","message":"Preference storage is unavailable.",
+                "action":"Current-video workflows can continue. Check preference storage permissions.",
+                "details":{"exception_type":type(cause).__name__}}
+        self.prompt_gate = PromptMemoryGate(self.preferences, self.store.get)
+        self.provider = provider or MuseProvider(settings, self.prompt_gate)
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="takeone-job")
         self.slots = threading.BoundedSemaphore(4)
         self.cancels: dict[str, threading.Event] = {}
@@ -47,6 +60,8 @@ class Service:
                 state.error = failure.public()
                 state.events.append(Event(kind="error", title=failure.message, reason=failure.action, details=failure.details))
                 self.store.save(state)
+            if state.memory_outbox:
+                self.drain_memory(state)
 
     def close(self):
         self.closed = True
@@ -57,7 +72,54 @@ class Service:
         self.process_lock.close()
 
     def event(self, state: State, title: str, reason="", actor="app", kind="activity", **details):
-        state.events.append(Event(title=title, reason=reason, actor=actor, kind=kind, details=details))
+        event = Event(title=title, reason=reason, actor=actor, kind=kind, details=details)
+        state.events.append(event)
+        return event
+
+    def require_memory(self):
+        if self.preferences is None:
+            raise Problem("MEMORY_UNAVAILABLE","Preference storage is unavailable.",
+                          "Current-video feedback is still available. Check preference storage permissions.",503)
+        return self.preferences
+
+    def queue_memory(self, state: State, evidence: FeedbackEvidence):
+        pending = None
+        try:
+            memory = self.require_memory()
+            if state.owner_id not in {None, memory.owner_id}:
+                raise Problem("MEMORY_OWNER_MISMATCH","Project belongs to a different memory owner.",
+                              "Start a new project under the current owner.",409)
+            state.owner_id = memory.owner_id
+            pending = {"owner_id":memory.owner_id,"profile_id":state.profile_id,
+                       "evidence":evidence.model_dump(mode="json")}
+            # Preserve delivery if reading settings fails. Retry checks capture again.
+            state.memory_outbox.append(pending)
+            if not memory.settings(state.profile_id).capture_enabled:
+                state.memory_outbox.remove(pending)
+        except Exception as cause:
+            if pending is None and self.preferences is None and state.owner_id:
+                # Only replay under the owner already bound to this project.
+                state.memory_outbox.append({"owner_id":state.owner_id,"profile_id":state.profile_id,
+                                            "evidence":evidence.model_dump(mode="json")})
+            state.memory_capture_error = safe_problem(cause,"memory.capture").public()
+
+    def drain_memory(self, state: State):
+        if not state.memory_outbox:
+            return
+        remaining = []
+        failure = None
+        for item in state.memory_outbox:
+            try:
+                memory = self.require_memory()
+                if item["owner_id"] != memory.owner_id or item["profile_id"] != state.profile_id:
+                    raise Problem("MEMORY_OWNER_MISMATCH","Capture ownership changed.","Inspect the saved outbox.",409)
+                memory.record(item["profile_id"], FeedbackEvidence.model_validate(item["evidence"]))
+            except Exception as cause:
+                remaining.append(item)
+                failure = safe_problem(cause,"memory.capture").public()
+        state.memory_outbox = remaining
+        state.memory_capture_error = failure
+        self.store.save(state)
 
     @staticmethod
     def fingerprint(kind, value):
@@ -138,8 +200,12 @@ class Service:
             state.model_calls = 0
             state.render_target_id = None
             state.receipts[command_id] = fingerprint
-            self.event(state, "Creative direction submitted", request or "Use a conservative direction.", actor="user")
+            event = self.event(state, "Creative direction submitted", request or "Use a conservative direction.", actor="user")
+            if request:
+                self.queue_memory(state,FeedbackEvidence(event_id=event.id,project_id=state.id,kind="feedback",
+                    original_wording=request,preference_key="initial_request",context=state.preference_context))
             self.submit(state, "analysis")
+            self.drain_memory(state)
             return state
 
     def answer(self, project_id, answer: Answer, revision: int, command_id: str):
@@ -160,11 +226,79 @@ class Service:
             state.question = None
             state.answered_count = len(session.answers)
             state.receipts[command_id] = fingerprint
-            self.event(state, "Answer saved", answer.response or answer.response_type, actor="user",
+            event = self.event(state, "Answer saved", answer.response or answer.response_type, actor="user",
                        question_id=answer.question_id, response_type=answer.response_type)
+            answered = next(q for q in session.questions if q.id == answer.question_id)
+            option = next((o for o in answered.options if o.id == answer.response), None) if answer.response_type == "option" else None
+            self.queue_memory(state, FeedbackEvidence(event_id=event.id,project_id=state.id,kind="rubric_answer",
+                original_wording=answer.response,dimension=answered.dimension,
+                preference_key=answered.preference_family.value if answered.preference_family.value!="other" else answered.target_key,
+                question_id=answered.id,context=state.preference_context,
+                details={"response_type":answer.response_type,"selected_label":option.label if option else "",
+                         "selected_outcome":option.intended_outcome if option else answer.response,"scope":answered.scope}))
             # Commit the answer before making another billable model request.
             self.store.save(state)
+            self.drain_memory(state)
             self.submit(state, "analysis")
+            return state
+
+    def feedback_event(self, project_id, evidence: FeedbackEvidence, revision:int, command_id:str):
+        fingerprint = self.fingerprint("feedback",evidence.model_dump(mode="json",exclude={"timestamp","event_id"}))
+        with self.store.lock:
+            state = self.store.get(project_id)
+            if self.receipt(state,command_id,fingerprint):
+                return state
+            metadata_only = evidence.kind in {"version_selected","manual_adjustment","manual_lock"} or (
+                evidence.kind=="version_rejected" and not evidence.original_wording.strip())
+            if not metadata_only:
+                self.check_revision(state,revision)
+            evidence.project_id = state.id
+            evidence.event_id = "feedback:" + command_id
+            evidence.context = {**state.preference_context,**evidence.context}
+            evidence.context = context_values(evidence.context)
+            if evidence.version_id and evidence.version_id!="source":
+                known = {c.id for c in state.candidates}
+                if evidence.version_id not in known and not evidence.version_id.startswith("client:"):
+                    raise Problem("VERSION_REFERENCE_INVALID","Version is not part of this project.",
+                                  "Select a version from this project.",422)
+                if evidence.version_id.startswith("client:"):
+                    from uuid import UUID
+                    try:
+                        UUID(evidence.version_id[7:])
+                    except ValueError:
+                        raise Problem("VERSION_REFERENCE_INVALID","Invalid client version reference.","Select a valid version.",422)
+            titles={"feedback":"Feedback saved","version_selected":"Version selected","version_rejected":"Version rejected",
+                    "manual_adjustment":"Manual adjustment recorded (not executed)","manual_lock":"Manual lock recorded (not executed)",
+                    "reusable_instruction":"Reusable instruction recorded"}
+            if evidence.kind=="rubric_answer":
+                raise Problem("FEEDBACK_INVALID","Rubric answers must use the answers endpoint.","Answer the pending question.",422)
+            current_text = evidence.original_wording.strip() if evidence.kind in {"feedback","version_rejected"} else ""
+            if evidence.kind=="feedback" and not current_text:
+                raise Problem("FEEDBACK_INVALID","Enter editing feedback.","Describe the change you want.",422)
+            if current_text and not state.brief:
+                raise Problem("BRIEF_NOT_READY","Feedback needs an existing brief.","Start the consultation first.",409)
+            body=evidence.model_dump(mode="json")
+            state.feedback.append({"event_id":evidence.event_id,"text":current_text,
+                "dimension":evidence.dimension.value,"preference_key":evidence.preference_key,
+                "kind":evidence.kind,"version_id":evidence.version_id,"timestamp":evidence.timestamp})
+            self.event(state,titles[evidence.kind],evidence.original_wording,actor="user",
+                       feedback_id=evidence.event_id,version_id=evidence.version_id)
+            if current_text:
+                state.history.append({"brief":state.brief.model_dump(mode="json"),
+                                      "brief_revision":state.brief_revision,"reason":"user_feedback"})
+                updated=state.brief.model_copy(deep=True)
+                updated.directives.append(Directive(dimension=evidence.dimension,scope="whole clip",
+                    outcome=evidence.original_wording,provenance="user_answer",
+                    strength="hard" if evidence.dimension.value=="boundaries" else "strong",source_id=evidence.event_id,
+                    verification_hint="Latest current-video feedback overrides earlier conflicting direction."))
+                state.brief=updated
+                state.brief_revision=max(1,state.brief_revision)+1
+                state.status,state.stage="brief_ready","brief_ready"
+                self.store.artifact(state.id,"brief.json",updated.model_dump(mode="json"))
+            self.queue_memory(state,FeedbackEvidence.model_validate(body))
+            state.receipts[command_id]=fingerprint
+            self.store.save(state)
+            self.drain_memory(state)
             return state
 
     def retry(self, project_id, revision: int, command_id: str):
@@ -323,6 +457,8 @@ class Service:
         else:
             session = RubricSession(RubricInput(
                 user_request=state.request,
+                project_id=state.id,
+                project_feedback=[f for f in state.feedback if f.get("text")],
                 observations=[Observation(id=o.id, scope=f"{o.start:.3f}-{o.end:.3f}s", source="muse_visual",
                                           description=o.description, uncertainty=o.uncertainty) for o in state.analysis.observations],
                 capabilities=CapabilityManifest(**capabilities(state.source)),
@@ -333,6 +469,10 @@ class Service:
                     *state.analysis.caveats,
                 ],
             ), max_decisions=state.max_questions)
+        session.inputs.project_id = state.id
+        session.inputs.project_feedback = [f for f in state.feedback if f.get("text")]
+        session.inputs.memory_defaults = [RememberedDefault.model_validate(v)
+                                         for v in self.prompt_gate.default_data(state.id)]
         proposal_usage = None
         proposal_call = None
         if session.asked_count >= session.max_decisions:
@@ -358,6 +498,14 @@ class Service:
             state.rubric = session.snapshot()
             state.question = question
             state.brief = brief
+            if brief:
+                state.brief_revision += 1
+                state.memory_influences += brief.memory_influences
+            if question:
+                for memory in session.inputs.memory_defaults:
+                    if memory.id in question.memory_refs:
+                        state.memory_influences.append({"entry_id":memory.id,"revision":memory.revision,
+                                                        "stage":"question","target":question.id})
             state.answered_count = len(session.answers)
             state.status = "awaiting_answer" if question else "brief_ready"
             state.stage = state.status
@@ -409,6 +557,12 @@ class Service:
                 for decision in proposal.decisions:
                     self.event(state, decision.parameter.capitalize() + " decision", decision.reason,
                                actor="muse", kind="decision", candidate=candidate.name)
+                    for reference in decision.source_ids:
+                        if reference.startswith("memory:"):
+                            parts=reference.split(":")
+                            if len(parts)==3 and parts[2].isdigit():
+                                state.memory_influences.append({"entry_id":parts[1],"revision":int(parts[2]),
+                                    "stage":"grade","target":candidate.id+":"+decision.parameter})
                 if usage:
                     self.event(state, "Colorist request usage", actor="muse", call=call_number,
                                input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"))

@@ -75,6 +75,19 @@
           "minItems": 2,
           "title": "Options",
           "type": "array"
+        },
+        "memory_refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Memory Refs",
+          "type": "array"
+        },
+        "memory_conflict": {
+          "default": false,
+          "title": "Memory Conflict",
+          "type": "boolean"
         }
       },
       "required": [
@@ -187,6 +200,14 @@
       "default": "",
       "title": "Knowledge Gap",
       "type": "string"
+    },
+    "memory_used_ids": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 10,
+      "title": "Memory Used Ids",
+      "type": "array"
     }
   },
   "title": "Proposal",

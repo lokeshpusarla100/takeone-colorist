@@ -22,3 +22,5 @@ Proposal.explicit_constraints accepts literal user-request quotes; invented cons
 ## Integration boundary
 
 Scene analysis and video I/O are **external**. Supply cached evidence + verified editing tool capabilities; query Muse for candidate creative questions; ask at most one per cycle; record answer; finish with a traceable CreativeBrief. No RAG required. Do not pass API credentials to browsers.
+
+The application currently records preferences with cross-project application disabled. Optional remembered defaults, question references/conflicts and brief provenance fields prepare a future opt-in interface; the central application prompt gate supplies none in normal startup. Literal current-video feedback remains part of the brief. See [the memory contract](../docs/PREFERENCE_MEMORY.md).

@@ -110,6 +110,22 @@ The test-only browser server is tests.offline_app:app. It returns explicitly lab
 - **Port 5173 occupied:** open the existing editor, or run npm run dev -- --port 5174 inside frontend. Each origin has separate sessions.
 - **Workspace in use:** stop the other backend or configure another TAKEONE_WORKSPACE.
 
+## Preference memory (capture only)
+
+Open **Preferences** in the editor. New collections start empty. Submitted requests, rubric answers,
+editing feedback and explicit version choices are recorded with profile/project provenance.
+Automatic interpretations are tentative and project-scoped. You can add, edit, confirm, scope or
+delete reusable instructions. Version selection alone does not imply liking every adjustment.
+
+The banner reads **Recording preferences — personalization off.** Capture and application are
+independent; application is centrally disabled in this release and cannot be enabled through the API.
+Current-video feedback still revises that video's brief with capture/application off.
+
+Records live in the ignored .takeone-memory/ directory, separate from project artifacts.
+Existing interactions are not backfilled. See [the memory contract](docs/PREFERENCE_MEMORY.md)
+and Section 26 of the project plan for persistence, deletion semantics, APIs, prepared future
+opt-in interfaces and verification boundaries.
+
 ## Repository
 
 - [Frontend notes](frontend/README.md)

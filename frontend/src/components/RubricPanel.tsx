@@ -71,7 +71,7 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
       {!!brief.explicit_constraints.length&&<><h3>Preserve</h3><ul>{brief.explicit_constraints.map((v,i)=><li key={i}>{v}</li>)}</ul></>}
       {!!brief.unresolved.length&&<><h3>Unresolved or delegated</h3><ul>{brief.unresolved.map((v,i)=><li key={i}>{v}</li>)}</ul></>}
       <details><summary>Protections and technical limits</summary><ul>{[...brief.default_protections,...brief.technical_envelope].map((v,i)=><li key={i}>{v}</li>)}</ul></details>
-      <p className="inline-help">Brief saved. Generate a global grade or request subject masks below. Regional grading is not enabled.</p>
+      <p className="inline-help">Brief saved. Generate a grade below; Muse chooses global correction or supported localized treatment with automatic SAM masks.</p>
     </section>}
   </section>;
 }

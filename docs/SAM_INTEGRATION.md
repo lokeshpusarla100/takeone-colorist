@@ -4,9 +4,9 @@ The app uses hosted sam-3.1 with the same MODEL_API_KEY/base URL as Muse. Instal
 
 ## Scope
 
-After a brief exists, explicitly request a short subject phrase. The UI defaults to the first five seconds; Full clip is an explicit alternative. There is no automatic segmentation on upload, analysis, answer submission or global grading.
+After a brief exists, the manual diagnostic panel accepts a short subject phrase and defaults to the first five seconds. Generate graded video now also invokes SAM automatically when Muse returns a supported localized plan. Global-only correction, upload and rubric answers do not invoke SAM.
 
-Results are diagnostic masks and a colour-coded proxy overlay. All returned object IDs remain distinct, with no automatic selection for editing. Regional grading/compositing, mask refinement and subject locks are not implemented by this addition. The existing global renderer continues independently.
+Manual results are diagnostic masks and a colour-coded proxy overlay. Automatic localized grading consumes those same raw artifact contracts: one unambiguous ID per shot interval, or an explicitly planned all-matches concept; no arbitrary instance is guessed. The renderer refines complete current-frame masks, composites separate treatments and checks the result. See [automatic grading](AUTOMATIC_GRADING.md). Subject locks and physical relighting remain unavailable.
 
 ## Mapping and artifacts
 

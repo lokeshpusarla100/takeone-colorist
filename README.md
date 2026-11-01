@@ -4,9 +4,9 @@ Local video preparation, a React editor, Muse-powered creative direction, and ca
 
     Upload original → prepare preview → enter request → Start analysis
     → answer useful questions → save/download the creative brief
-    → request a global grade → compare versions → download
+    → generate a global or localized grade → compare versions → download
 
-The code connects the saved brief to an explicit **Generate graded video** action for bounded global SDR contrast, saturation and gamma. This is one treatment across the clip. Hosted SAM subject tracking provides diagnostic masks and an overlay as a separate action. Regional grading, local corrections, shot matching and automatic visual critique remain unavailable. Review the moving results before accepting them.
+**Generate graded video** asks Muse Spark 1.3 to choose an executable global or localized SDR/Rec.709 plan from the saved brief and latest feedback. Global correction bypasses SAM. Localized treatment automatically obtains SAM 3.1 masks, validates them, and composites separate foreground/background adjustments with FFmpeg. Manual SAM diagnostics remain available. Physical relighting, reconstruction, shot matching and automatic aesthetic approval remain unavailable.
 
 ## Configure
 
@@ -48,7 +48,7 @@ For a frontend build preview, run npm run build and npm run preview inside front
 3. **Start analysis.** This sends the silent analysis video and request to Meta. Uploading or typing alone does not call Muse.
 4. **Clarify if needed.** Muse chooses the next question using the request and prior answers. The app checks the data and tool references, then shows it directly. Answer using an option, free text, Skip or You decide.
 5. **Review the brief.** The original request, approved outcomes, preservation constraints and unresolved limitations are saved. Download the brief or full session log.
-6. **Generate when ready.** Generate graded video sends selected source frames and the saved brief to Meta for a bounded recipe, then renders from the original. This is a separate action and may incur model usage.
+6. **Generate when ready.** Muse receives source frames, measured diagnostics, shot intervals and the current brief. A localized plan automatically requests only the required mask intervals. The renderer uses original pixels, not proxy images. This action can incur Muse and SAM usage.
 7. **Compare and revise.** Select a version, compare with Original, and download the chosen render. Save feedback to revise the current brief; generate again explicitly to apply that revision.
 
 Default question budget: three, with a hard maximum of five. A clear request can receive zero questions. The five rubric dimensions are internal coverage categories.
@@ -82,9 +82,9 @@ Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and por
 - Source color interpretation remains known/unknown. Global grading capabilities are restricted to supported source metadata.
 - Browser previews are compressed 8-bit working views. Original precision is retained in the upload.
 - Scene understanding uses the complete silent proxy; it is not a calibrated color measurement.
-- The base global tool supports SDR display-domain contrast, saturation and gamma. Local grading, relighting, reconstruction and shot matching are unavailable.
+- Tools support bounded contrast, saturation, gamma, brightness gain and explicit red/blue cooling in the SDR/Rec.709 display domain. Local execution supports one segmentation concept with foreground/background controls and up to twelve requested intervals, split at detected cuts. Local paths require upright, zero-start CFR footage and complete unambiguous masks. Physical relighting, reconstruction and shot matching are unavailable.
 - Imported renders can be compared when dimensions and duration match; imported outputs have no verified recipe provenance.
-- A global-grade render path is connected to the brief. Autonomous review, localized edits and a broader final-delivery pipeline remain outside this implementation; media checks do not establish aesthetic quality or preservation.
+- Local mask gaps, ambiguity, instability or preservation failures stop the candidate with no silent global fallback. Technical checks and mask-core statistics do not establish semantic mask accuracy or aesthetic success; moving-video approval remains yours.
 
 ## Run dashboard
 
@@ -96,9 +96,11 @@ Importing/replacing media, switching sessions, renaming, changing versions/prefe
 
 After the brief is ready, use **Subject masks · SAM**. Enter one subject phrase, such as motorcycle, choose **First 5 seconds** (default) or **Full clip**, and click **Track subject**. It uses the existing MODEL_API_KEY with hosted sam-3.1 and may incur per-frame usage. No local model weights or second API key are required.
 
-The backend verifies source/proxy frame counts, timestamps and scale-only geometry before upload. This first path supports constant-frame-rate, upright sources. SAM's explicit frame/object IDs are retained; gaps remain gaps and no object is automatically selected for editing. Download the manifest or inspect the moving, colour-coded overlay. Masks use analysis-proxy resolution and are not yet applied to a regional grade.
+The backend verifies source/proxy frame counts, timestamps and scale-only geometry before upload. This path supports CFR, upright sources. SAM's explicit frame/object IDs are retained and gaps remain gaps. Manual diagnostics show every match without selecting an editing target. Automatic grading requires one unambiguous ID per shot interval, or an explicitly planned all-matches concept. Valid masks are refined into an original-resolution matte and consumed by FFmpeg's masked merge.
 
 Network events are saved before local decoding, so a completed response can be replayed after a decode/overlay failure without another SAM request. Incomplete streams remain failed and require an explicit new remote attempt. Local decoding can take substantially longer than downloading the response. See [SAM integration and validation](docs/SAM_INTEGRATION.md) for APIs, limits and the bounded live test.
+
+See [automatic grading architecture and validation](docs/AUTOMATIC_GRADING.md) for planner activation, safe tonal processing, cache rules, frame alignment, quality gates and the actual-footage validation boundary.
 
 ## Token usage
 

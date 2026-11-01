@@ -17,7 +17,7 @@ export default function SamPanel({state,health,online,locked,sending,onTrack,onC
   const failed=state.error?.details.stage==='segment'&&['failed','cancelled'].includes(state.status);
   return <section className="sam-panel" aria-labelledby="sam-heading">
     <h2 id="sam-heading">Subject masks · SAM</h2>
-    <p className="inline-help">Track one subject in the silent analysis proxy using the same Meta key. This sends video to SAM and may incur per-frame usage. It creates diagnostic masks and an overlay; regional grading is not enabled.</p>
+    <p className="inline-help">Manual diagnostics: track one subject in the silent proxy using the same Meta key. This may incur per-frame usage. Ordinary localized grading requests SAM automatically; this panel remains available for inspecting masks.</p>
     <label htmlFor="sam-concept">Subject phrase</label>
     <div className="actions"><input id="sam-concept" value={concept} maxLength={120} disabled={locked}
       placeholder="e.g. motorcycle" onChange={e=>setConcept(e.target.value)}/>
@@ -37,10 +37,10 @@ export default function SamPanel({state,health,online,locked,sending,onTrack,onC
     {selected&&['failed','cancelled'].includes(selected.status)&&selected.error&&
       <p className="inline-help">Saved run {selected.status}: {selected.error.message}</p>}
     {selected&&(selected.status==='ready'||selected.status==='empty')&&<div className="sam-result">
-        <p>{selected.duration_seconds!=null?`First ${selected.duration_seconds} seconds (or the available clip). `:'Full clip. '}
+        <p>{selected.duration_seconds!=null?(selected.start_seconds?`${selected.start_seconds.toFixed(2)}–${(selected.start_seconds+selected.duration_seconds).toFixed(2)} seconds. `:`First ${selected.duration_seconds} seconds (or the available clip). `):'Full clip. '}
           {selected.status==='empty'?'No matching subjects found.':`${selected.tracks.length} object ID(s), ${selected.mask_count} masks across ${selected.frames_with_masks}/${selected.frame_count} frames.`}</p>
       {selected.preview_url&&<video controls playsInline preload="metadata" src={selected.preview_url} aria-label="SAM mask overlay"/>}
-      <p className="inline-help">Colours and ID labels show all matches. No object is automatically selected for editing. Gaps may mean absence or missed segmentation; masks are not carried across them. Inspect cuts, motion and occlusion.</p>
+      <p className="inline-help">Diagnostics show matched IDs. Reviewing them here does not change an editing target. Automatic grading uses its recorded selection policy and stops on ambiguity. Gaps may mean absence or missed segmentation; masks are not carried across them. Inspect cuts, motion and occlusion.</p>
       {selected.manifest_url&&<a href={selected.manifest_url} download>Download mask manifest</a>}
       <details><summary>Object visibility and gaps</summary><pre>{JSON.stringify(selected.tracks,null,2)}</pre></details>
     </div>}

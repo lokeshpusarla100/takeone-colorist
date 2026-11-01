@@ -12,6 +12,7 @@ import re
 import subprocess
 import time
 from uuid import uuid4
+from importlib.metadata import version
 
 import cv2
 import numpy as np
@@ -43,12 +44,16 @@ def checksum(path):
         return hashlib.file_digest(stream,'sha256').hexdigest()
 
 
+def processing_config(model):
+    return {'model':model,'parser':version('meta-sam-parser'),'mask_encoding':'one_bit','prompt':'concept'}
+
+
 def check(cancel):
     if cancel.is_set():
         raise Problem('JOB_CANCELLED','Segmentation cancelled.','Saved source, brief and masks are retained.',409)
 
 
-def frame_info(path,settings,cancel):
+def frame_info(path,settings,cancel,*,interval_tolerance=.00002):
     raw=json.loads(command([settings.ffprobe,'-v','error','-select_streams','v:0','-show_frames',
         '-show_entries','frame=best_effort_timestamp_time:stream=width,height,avg_frame_rate',
         '-of','json',str(path)],cancel,90))
@@ -58,7 +63,7 @@ def frame_info(path,settings,cancel):
         rate=Fraction(stream['avg_frame_rate'])
         if not pts or len(pts)>15000 or rate<=0 or not all(math.isfinite(t) for t in pts):raise ValueError()
         normalized=[t-pts[0] for t in pts]
-        if any(abs((b-a)-float(1/rate))>0.00002 for a,b in zip(normalized,normalized[1:])):raise ValueError()
+        if any(abs((b-a)-float(1/rate))>interval_tolerance for a,b in zip(normalized,normalized[1:])):raise ValueError()
     except (KeyError,ValueError,ZeroDivisionError,IndexError):
         raise Problem('SAM_TIMING_UNSUPPORTED','SAM preview currently requires a constant-frame-rate clip with valid frame timestamps.',
                       'Use a CFR source. No segmentation request was made.',422)

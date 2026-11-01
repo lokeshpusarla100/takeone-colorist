@@ -65,7 +65,7 @@ class Store:
         os.replace(temporary, directory / filename)
 
     def candidate_artifact(self, project_id: str, candidate_id: str, filename: str, value: dict):
-        if filename not in {"recipe.json", "validation.json"}:
+        if filename not in {"recipe.json", "validation.json", "plan.json"}:
             raise ValueError("Unknown candidate artifact")
         directory = self.directory(project_id) / "candidates" / str(UUID(candidate_id))
         directory.mkdir(parents=True, exist_ok=True)

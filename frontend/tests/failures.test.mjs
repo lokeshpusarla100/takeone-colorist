@@ -222,6 +222,18 @@ function readySource() {
       video_codec:'h264',audio_codec:null,technical_notes:[]},
     preview:{url:'/api/projects/'+id+'/preview',width:720,height:1280,duration:40,bytes:80}};
 }
+test('ready localized candidates require a valid layer plan and mask references',()=>{
+  const state=readySource();const id=crypto.randomUUID();const prefix='/api/projects/'+state.id+'/candidates/'+id;
+  const values={contrast:1,saturation:1,gamma:1,brightness_gain:1,cooling:0};
+  const local={concept:'subject',foreground:values,background:{...values,cooling:.1},intervals:[{start:0,end:1}],preserve_subject_color:true};
+  const candidate={id,name:'V1',created_at:new Date().toISOString(),status:'ready',recipe:{proposal:{mode:'localized',parameters:values,local,
+    summary:'Fixture',decisions:[],limitations:[]}},mask_run_ids:[crypto.randomUUID()],preview_url:prefix+'/preview',download_url:prefix+'/download',
+    width:720,height:1280,duration:40,validation:{warnings:[],limitations:[]}};
+  const ready={...state,status:'render_ready',stage:'render_ready',selected_candidate_id:id,candidates:[candidate]};
+  assert.equal(parseBackend(ready).candidates[0].recipe.proposal.mode,'localized');
+  assert.throws(()=>parseBackend({...ready,candidates:[{...candidate,mask_run_ids:[]}]}),{code:'API_RESPONSE_INVALID'});
+  assert.throws(()=>parseBackend({...ready,candidates:[{...candidate,recipe:{proposal:{...candidate.recipe.proposal,local:null}}}]}),{code:'API_RESPONSE_INVALID'});
+});
 test('a prepared source is accepted without creating a browser decoder or fetching the preview',t=>{
   const previousDocument=globalThis.document;
   const previousFetch=globalThis.fetch;

@@ -5,6 +5,7 @@ import json
 import math
 from pathlib import Path
 import threading
+from fractions import Fraction
 
 import cv2
 import numpy as np
@@ -67,6 +68,10 @@ def samples(path: Path, source: Source, settings: Settings, cancel: threading.Ev
             "median_encoded_luma": round(float(np.median(luma)), 4),
             "near_black_fraction": round(float(np.mean(luma <= 0.02)), 4),
             "near_white_fraction": round(float(np.mean(luma >= 0.98)), 4),
+            "black_fraction":round(float(np.mean(luma<=1/255)),4),
+            "p05_encoded_luma":round(float(np.quantile(luma,.05)),4),
+            "p95_encoded_luma":round(float(np.quantile(luma,.95)),4),
+            "median_rgb":[round(float(v)/255,4) for v in np.median(pixels,axis=(0,1))],
         })
         ok, jpeg = cv2.imencode(".jpg", pixels[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 80])
         if not ok:
@@ -75,9 +80,19 @@ def samples(path: Path, source: Source, settings: Settings, cancel: threading.Ev
     return records, images
 
 
-def filter_graph(parameters: GradeParameters) -> str:
+def treatment_filter(parameters: GradeParameters, *, operator='bounded_sigmoid_v2', protected=False):
     p = parameters
-    tone = f"clip((pow(val/maxval,1/{p.gamma:.8f})-0.5)*{p.contrast:.8f}+0.5,0,1)*maxval"
+    if protected:
+        if p.brightness_gain==1:return 'null'
+        peak='max(1,max(r(X,Y),max(g(X,Y),b(X,Y))))'
+        gain=f'min({p.brightness_gain:.8f},65535/{peak})'
+        return 'geq='+':'.join(f"{c}='{c}(X,Y)*{gain}'" for c in ['r','g','b'])
+    if operator=='legacy_fixed_pivot':
+        tone=f"clip((pow(val/maxval,1/{p.gamma:.8f})-0.5)*{p.contrast:.8f}+0.5,0,1)*maxval"
+    else:
+        x=f'pow(clip(val/maxval,0,1),1/{p.gamma:.8f})'
+        y=f'(pow({x},{p.contrast:.8f})/(pow({x},{p.contrast:.8f})+pow(1-{x},{p.contrast:.8f})))'
+        tone=f'({p.brightness_gain:.8f}*{y}/(1+({p.brightness_gain:.8f}-1)*{y}))*maxval'
     saturation = p.saturation
     weights = [0.2126, 0.7152, 0.0722]
     names = ["r", "g", "b"]
@@ -85,8 +100,41 @@ def filter_graph(parameters: GradeParameters) -> str:
         names[row] + names[col] + "=" + f"{((1-saturation)*weights[col] + (saturation if row==col else 0)):.8f}"
         for row in range(3) for col in range(3)
     )
-    return ("[0:v]format=gbrp16le,setparams=range=full,lutrgb=r='" + tone + "':g='" + tone + "':b='" + tone + "',"
-            "colorchannelmixer=" + matrix + ",format=gbrp16le,"
+    c=p.cooling
+    norm=1/(0.2126*(1-c)+0.7152+0.0722*(1+c))
+    balance=f'colorchannelmixer=rr={(1-c)*norm:.8f}:gg={norm:.8f}:bb={(1+c)*norm:.8f}'
+    return "lutrgb=r='"+tone+"':g='"+tone+"':b='"+tone+"',colorchannelmixer="+matrix+','+balance+',format=gbrp16le'
+
+
+def filter_graph(parameters: GradeParameters, *, recipe=None) -> str:
+    operator=recipe.tone_operator if recipe else 'bounded_sigmoid_v2'
+    start='[0:v]format=gbrp16le,setparams=range=full'
+    if recipe and recipe.proposal.mode=='localized':
+        local=recipe.proposal.local
+        ranges=recipe.timeline['active_frame_ranges']
+        condition='+'.join(f'(gte(n,{a})*lte(n,{b}))' for a,b in ranges)
+        mapping=recipe.timeline['frame_map'];rate=Fraction(mapping['proxy']['rate']);dt=float(1/rate)
+        weights=[];cuts=set(recipe.timeline['cut_frames'])
+        for a,b in ranges:
+            begin=mapping['frames'][a]['time'];end=mapping['frames'][b]['time']+dt
+            ramp=min(.15,(b-a+1)*dt/2)
+            incoming='1' if a in cuts else f'clip((T-{begin:.9f})/{ramp:.9f},0,1)'
+            outgoing='1' if b+1==mapping['frame_count'] or b+1 in cuts else f'clip(({end:.9f}-T)/{ramp:.9f},0,1)'
+            weights.append(f'(gte(T,{begin-dt*.25:.9f})*lt(T,{end-dt*.75:.9f})*min({incoming},{outgoing}))')
+        weight='+'.join(weights)
+        # On disabled frames maskedmerge passes its first input (the base treatment).
+        start+=',split=3[basein][fgin][bgin];'
+        start+='[basein]'+treatment_filter(parameters,operator=operator)+'[base];'
+        start+='[fgin]'+treatment_filter(local.foreground,operator=operator,protected=local.preserve_subject_color)+'[fg];'
+        start+='[bgin]'+treatment_filter(local.background,operator=operator)+'[bg];'
+        # Matroska stores milliseconds; rebase the verified CFR mask by frame index.
+        start+=f'[1:v]settb=expr={rate.denominator}/{rate.numerator},setpts=N,format=gbrp16le,setparams=range=full[mask];'
+        start+='[bg][fg][mask]maskedmerge=planes=7[local];'
+        # The base is selected outside requested intervals, not a repeated stale mask.
+        start+=f"[base][local]blend=all_expr='A+(B-A)*({weight})':enable='{condition}':eof_action=endall:repeatlast=0,"
+    else:
+        start+=','+treatment_filter(parameters,operator=operator)+','
+    return (start+
             "scale=in_range=pc:out_color_matrix=bt709:out_range=tv,format=yuv420p,"
             "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709,"
             "split=2[master][view];"
@@ -95,9 +143,11 @@ def filter_graph(parameters: GradeParameters) -> str:
 
 def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Settings, audio_codec: str | None):
     audio = "copy" if audio_codec in {"aac", "mp3", "alac"} else "aac"
+    inputs=['-i',str(source)]
+    if recipe.proposal.mode=='localized':inputs+=['-i',str(directory/'matte.mkv')]
     return [settings.ffmpeg, "-hide_banner", "-v", "error", "-nostdin", "-y",
-            "-filter_complex_threads", "2", "-copyts", "-start_at_zero", "-i", str(source),
-            "-filter_complex", filter_graph(recipe.proposal.parameters),
+            "-filter_complex_threads", "2", "-copyts", "-start_at_zero", *inputs,
+            "-filter_complex", filter_graph(recipe.proposal.parameters,recipe=recipe),
             "-map", "[master]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "17",
             "-threads", "4", "-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-c:a", audio,
             "-movflags", "+faststart", str(directory / "grade.partial.mp4"),
@@ -139,6 +189,8 @@ def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
             warnings.append(f'Check lost shadow detail near {before["requested_time"]:.2f}s.')
         if result["near_white_fraction"] > before["near_white_fraction"] + 0.03:
             warnings.append(f'Check bright-detail clipping near {before["requested_time"]:.2f}s.')
+        if result.get('black_fraction',0)>before.get('black_fraction',0)+.03:
+            warnings.append(f'New encoded-black pixels near {before["requested_time"]:.2f}s; inspect lost detail.')
     master.replace(directory / "grade.mp4")
     view.replace(directory / "preview.webm")
     version = command([settings.ffmpeg, "-version"], cancel, 10).splitlines()[0]
@@ -151,8 +203,10 @@ def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
         "bytes": (directory / "grade.mp4").stat().st_size,
         "source_samples": recipe.source_samples, "output_samples": after, "warnings": warnings,
         "review_status": "needs_user_review",
+        "mode":recipe.proposal.mode,"tone_operator":recipe.tone_operator,
         "limitations": [
             "Technical checks and four sampled frames do not establish aesthetic improvement or full constraint compliance.",
-            "One global treatment is applied across all source shots. No tracking, local correction or shot matching.",
+            "Localized foreground/background treatment on validated intervals; no physical relighting or shot matching."
+            if recipe.proposal.mode=='localized' else "One global treatment is applied across source shots. No shot matching.",
         ],
     }

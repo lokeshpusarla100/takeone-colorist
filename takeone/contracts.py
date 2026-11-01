@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from takeone_rubric_v1.rubric import StrictModel, Candidate, CreativeBrief
 
@@ -76,19 +76,55 @@ class GradeParameters(StrictModel):
     contrast: float = Field(ge=0.75, le=1.25, strict=True, allow_inf_nan=False)
     saturation: float = Field(ge=0, le=1.5, strict=True, allow_inf_nan=False)
     gamma: float = Field(ge=0.8, le=1.2, strict=True, allow_inf_nan=False)
+    brightness_gain: float = Field(default=1.0,ge=0.65,le=1.35,allow_inf_nan=False)
+    cooling: float = Field(default=0.0,ge=-0.15,le=0.15,allow_inf_nan=False)
+
+
+class GradeInterval(StrictModel):
+    start: float = Field(ge=0,allow_inf_nan=False)
+    end: float = Field(gt=0,allow_inf_nan=False)
+
+    @model_validator(mode='after')
+    def ordered(self):
+        if self.end<=self.start:raise ValueError('Interval end must follow start')
+        return self
+
+
+class LocalizedPlan(StrictModel):
+    concept: str = Field(min_length=1,max_length=120)
+    selection: Literal['single_instance','all_matches'] = 'single_instance'
+    intervals: list[GradeInterval] = Field(min_length=1,max_length=12)
+    foreground: GradeParameters
+    background: GradeParameters
+    preserve_subject_color: bool = True
+    feather_px: float = Field(default=1.0,ge=0.5,le=2.0,allow_inf_nan=False)
+
+    @model_validator(mode='after')
+    def executable(self):
+        ordered=sorted(self.intervals,key=lambda i:i.start)
+        if any(a.end>b.start for a,b in zip(ordered,ordered[1:])):raise ValueError('Local intervals overlap')
+        if any(c in self.concept for c in [',',';','\n','<','>']):raise ValueError('Use one subject phrase')
+        if self.foreground==self.background:raise ValueError('Localized treatments must differ; otherwise SAM is unnecessary')
+        if self.preserve_subject_color and any(abs(getattr(self.foreground,k)-v)>1e-8 for k,v in
+            [('contrast',1),('gamma',1),('saturation',1),('cooling',0)]):
+            raise ValueError('Colour-protected subject supports neutral colour/tone and common RGB brightness gain only')
+        return self
 
 
 class GradeDecision(StrictModel):
-    parameter: Literal["contrast", "saturation", "gamma"]
+    parameter: Literal["contrast", "saturation", "gamma","brightness_gain","cooling","local_treatment"]
     reason: str = Field(min_length=1, max_length=500)
     source_ids: list[str] = Field(min_length=1, max_length=10)
 
 
 class GradeProposal(StrictModel):
+    mode: Literal['global','localized'] = 'global'
     parameters: GradeParameters
+    local: LocalizedPlan | None = None
     summary: str = Field(min_length=1, max_length=1000)
-    decisions: list[GradeDecision] = Field(min_length=1, max_length=3)
+    decisions: list[GradeDecision] = Field(min_length=1, max_length=6)
     limitations: list[str] = Field(max_length=8)
+    unfulfilled_requests: list[str] = Field(default_factory=list,max_length=8)
 
     @field_validator("decisions")
     @classmethod
@@ -97,13 +133,18 @@ class GradeProposal(StrictModel):
             raise ValueError("Each parameter has one coordinated decision")
         return decisions
 
+    @model_validator(mode='after')
+    def mode_matches(self):
+        if (self.mode=='localized') != (self.local is not None):raise ValueError('Localized mode requires exactly one local plan; global mode has none')
+        return self
+
 
 class GradeRecipe(StrictModel):
-    schema_version: Literal["takeone-global-v1"] = "takeone-global-v1"
+    schema_version: Literal["takeone-global-v1","takeone-grade-v2"] = "takeone-global-v1"
     source_sha256: str
     brief_sha256: str
     model: str
-    prompt_version: Literal["colorist-v1"] = "colorist-v1"
+    prompt_version: Literal["colorist-v1","colorist-v2"] = "colorist-v1"
     color_domain: Literal["display-encoded-rec709"] = "display-encoded-rec709"
     working_pixel_format: Literal["gbrp16le"] = "gbrp16le"
     output_pixel_format: Literal["yuv420p"] = "yuv420p"
@@ -111,6 +152,8 @@ class GradeRecipe(StrictModel):
     proposal: GradeProposal
     source_samples: list[dict]
     created_at: str = Field(default_factory=now)
+    tone_operator: Literal['legacy_fixed_pivot','bounded_sigmoid_v2'] = 'legacy_fixed_pivot'
+    timeline: dict | None = None
 
 
 class RenderCandidate(StrictModel):
@@ -128,6 +171,7 @@ class RenderCandidate(StrictModel):
     duration: float | None = None
     validation: dict | None = None
     error: dict | None = None
+    mask_run_ids: list[str] = Field(default_factory=list)
 
 
 class ConsultationSummary(StrictModel):
@@ -146,6 +190,9 @@ class SegmentationRun(StrictModel):
     status: Literal["queued","preparing","streaming","overlay","ready","empty","failed","cancelled"] = "queued"
     return_status: Literal["brief_ready","render_ready"] = "brief_ready"
     duration_seconds: float | None = None
+    start_seconds: float = 0
+    first_frame: int | None = None
+    last_frame: int | None = None
     received_frames: int = 0
     frame_count: int = 0
     frames_with_masks: int = 0

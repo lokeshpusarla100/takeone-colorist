@@ -130,10 +130,10 @@ def global_grade(directory: Path, settings: Settings, cancel: threading.Event, *
 def capabilities(source: Source):
     supported = source.pixel_format == "yuv420p" and source.color_transfer == "bt709" and source.color_primaries == "bt709"
     return {
-        "operations": ["global_grade"] if supported else [],
+        "operations": (["global_grade","regional_grade"] if source.rotation==0 else ["global_grade"]) if supported else [],
         "limitations": [
-            "Only global SDR display-domain contrast, saturation and gamma are implemented in the base tool.",
-            "Only global treatment is available. Local masks, relighting, reconstruction and shot matching are unavailable.",
+            "SDR Rec.709 contrast, saturation, gamma, bounded brightness gain and RGB cooling are supported.",
+            "Localized grading requires verified upright CFR timing and complete, unambiguous SAM masks. No physical relighting, reconstruction or shot matching.",
             *source.technical_notes,
         ],
         "supports_look_previews": False,

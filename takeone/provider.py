@@ -84,7 +84,7 @@ class MuseProvider:
     def prompt_context(self, stage, payload, project_id=None):
         return self.prompt_gate.build(stage, payload, project_id) if self.prompt_gate else PromptMemoryGate.clean(payload)
 
-    def grade(self, brief, analysis, source, sample_stats, images):
+    def grade(self, brief, analysis, source, sample_stats, images, technical_context=None):
         import json
         references = ["user_request", "default_protections",
                       *(d.source_id for d in brief.directives),
@@ -96,12 +96,16 @@ class MuseProvider:
             "sample_statistics": sample_stats,
             "allowed_source_ids": references,
             "controls": {
-                "contrast": "0.75..1.25; neutral 1.0; multiplies encoded RGB around 0.5",
+                "contrast": "0.75..1.25; neutral 1.0; bounded sigmoid x^c/(x^c+(1-x)^c), no fixed-pivot subtraction",
                 "gamma": "0.8..1.2; neutral 1.0; RGB power 1/gamma: above 1 lifts midtones, below 1 darkens",
                 "saturation": "0..1.5; neutral 1.0; Rec.709-weighted encoded RGB channel mixing",
+                "brightness_gain":"0.65..1.35, neutral 1.0. Bounded display-domain brightness, not physical relighting.",
+                "cooling":"-0.15..0.15, neutral 0. Positive reduces red and increases blue using explicit Rec.709 RGB gains; not calibrated Kelvin.",
             },
             "operation_order": ["gamma", "contrast", "saturation"],
         }
+        context['execution_capabilities']=technical_context or {'operations':['global_grade'],
+            'limitations':['Localized execution not verified for this request.']}
         context = self.prompt_context("colorist", context, brief.project_id)
         content = [{"type": "text", "text": json.dumps(context)}]
         for image in images:
@@ -112,15 +116,32 @@ class MuseProvider:
                 model=self.settings.model,
                 messages=[
                     {"role": "system", "content": (
-                        "You are Take One's colorist. Produce ONE bounded global treatment from the whole brief, "
+                        "You are Take One's colorist/planner. Choose global or localized execution from the whole brief, "
                         "the actual source frames, cached scene observations and declared controls. Source frames "
                         "are analysis thumbnails, not the final rendering source. Statistics are sampled encoded "
                         "luma diagnostics, not scene exposure measurements. Respect explicit constraints and "
                         "default protections. Do not compound darkness when several directives describe one look. "
                         "If the source is already dark, coordinate gamma and contrast to retain subject legibility. "
                         "Preserve meaningful paint/material appearance and do not invent missing detail. "
-                        "Only these three global controls are supported; no masks, temperature shift, relighting, "
-                        "recoloring, timeline edits or shot matching. Explain each changed control in ordinary "
+                        "Only operations listed in execution_capabilities are executable. Global contrast-only requests "
+                        "Execution capabilities are current; older brief tool-limit notes may be historical, but user constraints never are. "
+                        "use mode=global and local=null, with no segmentation. If subject/background need DIFFERENT "
+                        "treatments or explicit subject protection, use mode=localized with a concrete SAM noun phrase, "
+                        "one or more necessary time intervals, and absolute foreground/background controls. Example: "
+                        "dark/cool surroundings while preserving a red motorcycle needs local protection, not a global substitute. "
+                        "Darkening sky while preserving buildings can target sky, with other pixels unchanged. "
+                        "parameters is the base treatment OUTSIDE local intervals, not an extra compounded grade. "
+                        "Use supplied shot boundaries. Do not request tracking in unaffected intervals. "
+                        "Reuse an available mask concept when it identifies the same intended subject; never change the target merely to hit a cache. "
+                        "single_instance requires an unambiguous ID in each shot; all_matches is for an explicitly whole concept. "
+                        "For a region being changed, such as sky, set preserve_subject_color=false and keep the other layer neutral as needed. "
+                        "preserve_subject_color=true requires foreground contrast/gamma/saturation=1 and cooling=0; "
+                        "only common RGB brightness_gain may change, with peak protection. Preserve lamp/indicator colours. "
+                        "Selective lighting means display-domain gain only, never new illumination, shadows or reconstruction. "
+                        "No timeline edits, object recolouring or shot matching. If unavailable, state the limitation; do not "
+                        "label a global approximation as localized. Explain changed controls in ordinary "
+                        "If a required user instruction cannot be executed, list it in unfulfilled_requests; this stops rendering "
+                        "for explicit clarification, rather than silently substituting a different treatment. "
                         "visual terms, citing allowed_source_ids. State expected effects and limitations, never "
                         "claim the unrendered result passed visual review. Keep the recipe conservative. "
                         "Remembered defaults, if supplied, are optional. Current-video feedback, current request, "

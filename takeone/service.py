@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import threading
 from uuid import uuid4
+from fractions import Fraction
 
 from takeone_rubric_v1.rubric import Answer, CapabilityManifest, Directive, Observation, RememberedDefault, RubricInput, RubricSession
 from .config import Settings
@@ -18,6 +19,7 @@ from .preferences import FeedbackEvidence, PreferenceStore, PromptMemoryGate
 from .preferences import context_values
 from .usage import usage_details
 from . import sam
+from . import local_grading
 
 
 class Service:
@@ -398,9 +400,9 @@ class Service:
             self.submit(state,'segment')
             return state
 
-    def run_segmentation(self,project_id,cancel):
+    def run_segmentation(self,project_id,cancel,run_id=None,automatic=False):
         state=self.store.get(project_id)
-        target=next((r for r in state.segmentations if r.id==state.segmentation_target_id),None)
+        target=next((r for r in state.segmentations if r.id==(run_id or state.segmentation_target_id)),None)
         if not target or not state.source:raise Problem('SAM_STATE_INVALID','Tracking has no matching source/run.','Refresh the project.',409)
         directory=self.store.directory(project_id);output=directory/'segmentations'/target.id
         output.mkdir(parents=True,exist_ok=True)
@@ -413,22 +415,27 @@ class Service:
         update('preparing','verify_segmentation_input')
         frame_map=sam.mapping(directory,state.source,self.settings,cancel)
         input_path=directory/'analysis.mp4'
-        if target.duration_seconds is not None:
-            count=sum(f['time']<target.duration_seconds for f in frame_map['frames'])
+        if target.duration_seconds is not None or target.start_seconds or target.first_frame is not None:
+            selected=([f for f in frame_map['frames'] if target.first_frame<=f['index']<=target.last_frame]
+                      if target.first_frame is not None else
+                      [f for f in frame_map['frames'] if target.start_seconds<=f['time']<target.start_seconds+(target.duration_seconds or state.source.duration)])
+            if not selected:raise Problem('SAM_INTERVAL_EMPTY','The requested mask interval has no frames.','Use a source interval.',422)
+            count=len(selected);first=selected[0]['index'];last=selected[-1]['index']
             frame_map['source_frame_count']=frame_map['frame_count']
-            frame_map['frames']=frame_map['frames'][:count];frame_map['frame_count']=count
+            frame_map['frames']=selected;frame_map['frame_count']=count
             input_path=output/'input.mp4'
             if not input_path.is_file():
                 temporary=output/'input.partial.mp4'
                 sam.command([self.settings.ffmpeg,'-v','error','-y','-i',str(directory/'analysis.mp4'),
-                    '-an','-frames:v',str(count),'-c:v','libx264','-preset','veryfast','-crf','26',
+                    '-an','-vf',fr'select=between(n\,{first}\,{last}),setpts=PTS-STARTPTS','-frames:v',str(count),'-c:v','libx264','-preset','veryfast','-crf','26',
                     '-fps_mode','passthrough','-movflags','+faststart',str(temporary)],cancel,120)
                 temporary.replace(input_path)
             inspected=sam.frame_info(input_path,self.settings,cancel)
-            if len(inspected['pts'])!=count or any(abs(f['proxy_pts']-t)>0.002 for f,t in zip(frame_map['frames'],inspected['pts'])):
+            origin=selected[0]['proxy_pts']
+            if len(inspected['pts'])!=count or any(abs(f['proxy_pts']-origin-t)>0.002 for f,t in zip(frame_map['frames'],inspected['pts'])):
                 raise Problem('SAM_EXCERPT_MAPPING','The excerpt changed frame mapping.','Inspect the prepared proxy.',422)
             frame_map['proxy_sha256']=sam.checksum(input_path)
-        frame_map['scope']={'start_seconds':0,'requested_duration':target.duration_seconds,'full_source_frames':
+        frame_map['scope']={'start_seconds':target.start_seconds,'requested_duration':target.duration_seconds,'full_source_frames':
                             frame_map.get('source_frame_count',frame_map['frame_count'])}
         previous_map=json.loads((output/'frame-map.json').read_text()) if (output/'frame-map.json').exists() else None
         if (output/'stream-complete.json').exists() and previous_map!=frame_map:
@@ -466,8 +473,10 @@ class Service:
             result=self.sam_provider.segment(input_path,target.concept,remote,remember,cancel,progress,
                 output/'raw.txt',usage,requested)
             manifest=sam.persist_result(result,frame_map,output,cancel)
+            manifest['processing_config']=sam.processing_config(target.model)
+            sam.atomic(output/'manifest.json',manifest)
         self.check_cancel(cancel)
-        if manifest['mask_count']:
+        if manifest['mask_count'] and not automatic:
             update('overlay','render_mask_overlay')
             sam.overlay(input_path,output,manifest,self.settings,cancel)
         self.check_cancel(cancel)
@@ -477,13 +486,66 @@ class Service:
             run.frame_count=frame_map['frame_count'];run.mask_count=manifest['mask_count']
             run.frames_with_masks=manifest['frames_with_masks'];run.tracks=manifest['tracks'];run.error=None
             prefix=f'/api/projects/{project_id}/segmentations/{run.id}'
-            run.preview_url=prefix+'/preview' if run.status=='ready' else None
+            run.preview_url=prefix+'/preview' if run.status=='ready' and not automatic else None
             run.manifest_url=prefix+'/manifest'
-            s.status=run.return_status;s.stage='segmentation_ready';s.active_job=None
+            if not automatic:s.status=run.return_status;s.stage='segmentation_ready';s.active_job=None
             self.event(s,'Subject masks ready' if run.status=='ready' else 'No matching subject found',
-                       'Review object IDs and the moving overlay. Regional grading is not enabled.',
+                       'Masks will be validated before localized compositing.' if automatic else 'Review object IDs and the moving overlay; no diagnostic mask is applied without a grading plan.',
                        mask_count=run.mask_count,frames_with_masks=run.frames_with_masks,frame_count=run.frame_count)
         self.mutate(project_id,ready)
+        return manifest,output
+
+    def local_masks(self,project_id,candidate_id,evidence,plan,cancel):
+        state=self.store.get(project_id);source=state.source;directory=self.store.directory(project_id)
+        ranges=local_grading.plan_ranges(plan,evidence,source);records={};step=float(1/Fraction(evidence['frame_map']['proxy']['rate']))
+        for first,last in ranges:
+            self.check_cancel(cancel);state=self.store.get(project_id);found=None
+            for run in reversed(state.segmentations):
+                if run.concept.casefold()!=plan.concept.strip().casefold() or run.model!=self.settings.sam_model:continue
+                path=directory/'segmentations'/run.id/'manifest.json'
+                if not path.is_file():continue
+                manifest=json.loads(path.read_text());mapping=manifest['frame_map']
+                # Original v1 diagnostics shipped with the pinned 0.1.0 parser.
+                config=manifest.get('processing_config',{'model':run.model,'parser':'0.1.0','mask_encoding':'one_bit','prompt':'concept'})
+                if config!=sam.processing_config(self.settings.sam_model):continue
+                covered={f['index'] for f in mapping['frames']}
+                if (mapping['source_sha256']==source.sha256 and set(range(first,last+1))<=covered
+                    and mapping['proxy']==evidence['frame_map']['proxy']
+                    and all(abs(f['time']-evidence['frame_map']['frames'][f['index']]['time'])<=.002 for f in mapping['frames'])):
+                    found=(run.id,manifest,path.parent);break
+            if found:
+                run_id,manifest,mask_directory=found
+                self.mutate(project_id,lambda s:self.event(s,'Reusing cached subject masks',concept=plan.concept,first_frame=first,last_frame=last))
+            else:
+                pending=next((r for r in reversed(state.segmentations) if r.id in next(c for c in state.candidates if c.id==candidate_id).mask_run_ids
+                    and r.concept==plan.concept and abs(r.start_seconds-evidence['frame_map']['frames'][first]['time'])<.002
+                    and r.status not in {'ready','empty'}),None)
+                run_id=pending.id if pending else str(uuid4())
+                def attach(s):
+                    if not pending:
+                        s.segmentations.append(SegmentationRun(id=run_id,concept=plan.concept,model=self.settings.sam_model,
+                            start_seconds=evidence['frame_map']['frames'][first]['time'],duration_seconds=(last-first+1)*step,
+                            first_frame=first,last_frame=last))
+                    target=next(c for c in s.candidates if c.id==candidate_id)
+                    if run_id not in target.mask_run_ids:target.mask_run_ids.append(run_id)
+                    self.event(s,'Automatic SAM masks required',concept=plan.concept,first_frame=first,last_frame=last,segmentation_id=run_id)
+                self.mutate(project_id,attach)
+                try:
+                    if not self.sam_provider.available() and not (directory/'segmentations'/run_id/'stream-complete.json').exists():
+                        raise Problem('SAM_NOT_CONFIGURED','The localized plan requires SAM, but the segmentation key is unavailable.',
+                                      'Configure SAM access or explicitly revise the brief; no global fallback was made.',503)
+                    manifest,mask_directory=self.run_segmentation(project_id,cancel,run_id,automatic=True)
+                except Exception as error:
+                    failure=safe_problem(error,'segment')
+                    def failed(s):
+                        r=next(r for r in s.segmentations if r.id==run_id);r.status='cancelled' if failure.code=='JOB_CANCELLED' else 'failed';r.error=failure.public()
+                    self.mutate(project_id,failed);raise
+            def attached(s):
+                target=next(c for c in s.candidates if c.id==candidate_id)
+                if run_id not in target.mask_run_ids:target.mask_run_ids.append(run_id)
+            self.mutate(project_id,attached)
+            records.update(local_grading.records_for_range(manifest,mask_directory,source,first,last,plan.selection))
+        return records,ranges
 
     def count_call(self, project_id, title):
         request_id = str(uuid4())
@@ -718,15 +780,46 @@ class Service:
         output.mkdir(parents=True, exist_ok=True)
         original = directory / "source.bin"
         rendering.verify_source(original, state.source, self.settings, cancel)
+        evidence=None;local_limitation=None
+        try:evidence=local_grading.timeline(directory,state.source,self.settings,cancel)
+        except Problem as error:
+            if error.code in {'SOURCE_CHANGED','JOB_CANCELLED'}:raise
+            local_limitation=error.message
+        technical={'operations':['global_grade','cooling','brightness_gain'],
+                   'localized_available':evidence is not None,
+                   'limitations':[] if evidence else [local_limitation or 'No verified local timeline.'],
+                   'shots':evidence['shots'] if evidence else [],
+                   'current_video_feedback':[f for f in state.feedback if f.get('text')]}
+        technical['available_masks']=[]
+        for run in state.segmentations:
+            manifest_path=directory/'segmentations'/run.id/'manifest.json'
+            if run.status!='ready' or not manifest_path.is_file():continue
+            saved=json.loads(manifest_path.read_text())
+            if saved['frame_map']['source_sha256']==state.source.sha256:
+                technical['available_masks'].append({'concept':run.concept,'start':run.start_seconds,
+                    'duration':run.duration_seconds or state.source.duration,'object_ids':[t['object_id'] for t in run.tracks]})
+        if evidence:technical['operations']+=['regional_grade','selective_gain']
         if not candidate.recipe:
             measurements, images = rendering.samples(original, state.source, self.settings, cancel)
             self.check_cancel(cancel)
             request_id = self.count_call(project_id, "Muse is preparing a global grading recipe")
             call_number = self.store.get(project_id).model_calls
-            proposal, usage = self.provider.grade(state.brief, state.analysis, state.source, measurements, images)
+            proposal, usage = self.provider.grade(state.brief, state.analysis, state.source, measurements, images,technical_context=technical)
             self.record_usage(project_id,request_id,"colorist",usage,call_number)
-            recipe = GradeRecipe(source_sha256=state.source.sha256, brief_sha256=candidate.brief_sha256,
-                                 model=self.settings.model, proposal=proposal, source_samples=measurements)
+            self.store.candidate_artifact(project_id,candidate.id,'plan.json',proposal.model_dump(mode='json'))
+            if proposal.unfulfilled_requests:
+                raise Problem('GRADE_REQUEST_UNFULFILLED','The planner reported required instructions it cannot execute.',
+                              'Clarify these instructions or choose a supported treatment. No replacement was rendered.',422,
+                              unfulfilled_count=len(proposal.unfulfilled_requests),unfulfilled_instructions='; '.join(proposal.unfulfilled_requests)[:1500])
+            if proposal.mode=='localized' and not evidence:
+                raise Problem('LOCAL_GRADE_UNAVAILABLE','The requested localized plan has no supported frame mapping.',
+                              'Use upright zero-start CFR SDR footage. No global fallback was made.',422,limitation=local_limitation)
+            recipe = GradeRecipe(schema_version='takeone-grade-v2',prompt_version='colorist-v2',
+                                 source_sha256=state.source.sha256, brief_sha256=candidate.brief_sha256,
+                                 model=self.settings.model, proposal=proposal, source_samples=measurements,
+                                 tone_operator='bounded_sigmoid_v2',timeline=evidence if proposal.mode=='localized' else None,
+                                 operation_order=['layer_treatment','mask_merge','interval_fade','output_rec709'] if proposal.mode=='localized'
+                                 else ['gamma','bounded_contrast','bounded_gain','saturation','cooling'])
             self.store.candidate_artifact(project_id, candidate.id, "recipe.json", recipe.model_dump(mode="json"))
             def planned(state):
                 target = next(c for c in state.candidates if c.id == candidate.id)
@@ -734,11 +827,11 @@ class Service:
                 target.status = "rendering"
                 target.error = None
                 state.stage = "render_grade"
-                self.event(state, "Grading recipe saved", proposal.summary, actor="muse", kind="decision",
+                self.event(state, "Grading recipe saved", proposal.summary, actor="muse", kind="decision",mode=proposal.mode,
                            candidate=candidate.name, contrast=proposal.parameters.contrast,
                            saturation=proposal.parameters.saturation, gamma=proposal.parameters.gamma)
                 for decision in proposal.decisions:
-                    self.event(state, decision.parameter.capitalize() + " decision", decision.reason,
+                    self.event(state, decision.parameter.replace('_',' ').capitalize() + " decision", decision.reason,
                                actor="muse", kind="decision", candidate=candidate.name)
                     for reference in decision.source_ids:
                         if reference.startswith("memory:"):
@@ -756,8 +849,41 @@ class Service:
                 self.event(state, "Resuming saved recipe", "No additional model call is needed.", candidate=candidate.name)
             self.mutate(project_id, resuming)
         self.check_cancel(cancel)
+        records=None;mask_qa=None
+        if recipe.proposal.mode=='localized':
+            if evidence is None or recipe.timeline['key']!=evidence['key']:
+                raise Problem('LOCAL_TIMELINE_CHANGED','The cached recipe has a different local source mapping.','Create a new candidate.',409)
+            records,ranges=self.local_masks(project_id,candidate.id,evidence,recipe.proposal.local,cancel)
+            # Frame-derived interval boundaries, never guessed request timestamps.
+            step=float(1/Fraction(evidence['frame_map']['proxy']['rate']))
+            recipe.timeline['active_ranges']=[[evidence['frame_map']['frames'][a]['time'],evidence['frame_map']['frames'][b]['time']+step] for a,b in ranges]
+            recipe.timeline['active_frame_ranges']=[list(pair) for pair in ranges]
+            def validating(s):
+                s.stage='validate_local_masks';self.event(s,'Validating localized masks',required_frames=len(records),shot_intervals=len(ranges))
+            self.mutate(project_id,validating)
+            mask_qa=local_grading.prepare_matte(directory/'analysis.mp4',output,state.source,evidence,records,
+                                               recipe.proposal.local,self.settings,cancel)
+            mask_qa['selection_policy']=recipe.proposal.local.selection
+            mask_qa['selected_objects_by_interval']=[{'first_frame':a,'last_frame':b,
+                'object_ids':sorted({r['object_id'] for i in range(a,b+1) for r in records[i]})} for a,b in ranges]
+            self.store.candidate_artifact(project_id,candidate.id,'recipe.json',recipe.model_dump(mode='json'))
+            def compositing(s):
+                s.stage='render_local_grade';self.event(s,'Rendering localized foreground/background grade',candidate=candidate.name)
+            self.mutate(project_id,compositing)
         result = rendering.render(original, output, recipe, state.source, self.settings, cancel)
         self.check_cancel(cancel)
+        def checking(s):
+            s.stage='check_output_quality';self.event(s,'Checking rendered output',candidate=candidate.name,mode=recipe.proposal.mode)
+        self.mutate(project_id,checking)
+        if records is not None:
+            try:
+                result['subject_protection']=local_grading.check_output(original,output/'grade.mp4',state.source,evidence,records,
+                    recipe.proposal.local,self.settings,cancel)
+                result['mask_validation']=mask_qa;result['warnings']+=mask_qa['warnings']
+                result['warnings']+=result['subject_protection']['warnings']
+            except Problem as failure:
+                self.store.candidate_artifact(project_id,candidate.id,'validation.json',{**result,'review_status':'rejected','error':failure.public()})
+                raise
         self.store.candidate_artifact(project_id, candidate.id, "validation.json", result)
         def accepted(state):
             target = next(c for c in state.candidates if c.id == candidate.id)
@@ -766,6 +892,7 @@ class Service:
             target.preview_url = f"/api/projects/{project_id}/candidates/{target.id}/preview"
             target.download_url = f"/api/projects/{project_id}/candidates/{target.id}/download"
             target.validation = result
+            target.recipe=recipe
             state.selected_candidate_id = target.id
             state.status, state.stage, state.active_job = "render_ready", "render_ready", None
             self.event(state, "Rendered " + target.name, "The video is ready for comparison. Visual approval is still required.",

@@ -80,7 +80,7 @@ export default function App() {
     </header>
     <div className="connection-note">{consultation.online
       ? 'Backend connected · '+(consultation.health?.muse_configured?'Muse configured':'Meta API key missing')
-        +' · '+(consultation.health?.grading_connected?'Global grading connected':'Grading unavailable')
+        +' · '+(consultation.health?.grading_connected?'Grading connected':'Grading unavailable')
       : 'Backend unavailable · Start the Python server to prepare video and run Muse'}</div>
     {error&&<ErrorNotice error={error} onDismiss={w.clearError} onRetry={error.code.startsWith('STORAGE')?()=>void w.retrySave():undefined}/>}
     {busy&&<div className="operation-status" role="status"><span>{w.progress??'Saving session…'}</span>{w.canCancel&&<button onClick={w.cancelImport}>Cancel import</button>}</div>}

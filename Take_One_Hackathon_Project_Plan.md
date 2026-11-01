@@ -118,7 +118,7 @@ Do not repeat the installation sequence merely because a new chat lacks context.
 ### 2.3 Implementation handoff (1 November)
 
 - The React editor and local FastAPI backend now handle upload/previews, rubric questions and answers, persisted Creative Briefs, version comparison and session logs.
-- An explicit global-grade generation path connects the brief to a bounded contrast/gamma/saturation recipe and original-source render. Hosted SAM subject tracking now has a separate diagnostic mask/overlay path. Localized grading and automatic critique remain pending. Real-footage grading acceptance is not established by this handoff.
+- Generation now connects the brief to global or localized recipes. A localized plan automatically obtains frame-bound SAM masks and composites distinct subject/background treatments. Manual mask diagnostics remain available. A live-planner, cached-mask demonstration renders the first five seconds of the motorcycle clip locally while retaining the full duration; a full-video visual fix and automatic aesthetic approval are not established. See docs/AUTOMATIC_GRADING.md.
 - Current-video feedback creates a brief revision independently of cross-project memory. Applying it to pixels requires an explicit subsequent generation action.
 - Capture-only preference memory is implemented as described in Section 26: empty initial collection, separate feedback/interpretation layers, owner/profile isolation, atomic JSON, deduplication, edit/delete controls and replay-safe tombstones.
 - Capture defaults on; application defaults off and is unavailable through the normal API. Prepared future application requires deployment capability, profile enablement and explicit opt-in for a new project. No iteration count enables it.
@@ -490,6 +490,8 @@ The first video test must establish:
 5. A playable overlay showing tracking quality.
 
 ### 11.2 Selective use
+
+**Automatic grading extension:** Muse now selects global/localized execution from the existing brief, latest feedback, measurements and actual capabilities. Local plans specify one subject concept, foreground/background controls and required intervals. The service splits intervals at detected cuts, reuses compatible raw mask caches, validates completeness/ambiguity/stability, prepares a frame-aligned matte, and composites real adjustments with FFmpeg. Global-only plans bypass SAM. Missing or invalid required masks fail explicitly without a silent global substitute. New recipes use a safer bounded tonal operator; legacy recipes preserve their interpretation. Full architecture, test coverage, scope limits and the bounded actual-footage demonstration are in docs/AUTOMATIC_GRADING.md.
 
 **Implemented integration (1 November):** An explicit subject phrase and five-second/full-clip choice call hosted sam-3.1 using the existing Meta key. The backend verifies a constant-frame-rate, upright source/proxy frame mapping, persists streamed events before decoding, and writes masks, visibility intervals, gaps and a playable diagnostic overlay. Completed network results can be replayed locally after decoding/overlay failure. Source media and the frozen brief remain unchanged; no object is automatically selected and no mask is applied to a regional grade.
 

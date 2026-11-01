@@ -14,10 +14,13 @@ export type Brief = {
   answers:{question_id:string;response_type:string;response:string}[];
   unresolved:string[];
 };
+export type GradeValues={contrast:number;saturation:number;gamma:number;brightness_gain?:number;cooling?:number};
 export type RenderCandidate = {
   id:string;name:string;created_at:string;brief_sha256:string;source_sha256:string;
   status:'planning'|'rendering'|'ready'|'failed'|'cancelled';
-  recipe:null|{proposal:{parameters:{contrast:number;saturation:number;gamma:number};
+  mask_run_ids?:string[];
+  recipe:null|{tone_operator?:string;proposal:{parameters:GradeValues;mode?:'global'|'localized';
+    local?:null|{concept:string;foreground:GradeValues;background:GradeValues;intervals:{start:number;end:number}[];preserve_subject_color:boolean};
     summary:string;decisions:{parameter:string;reason:string;source_ids:string[]}[];limitations:string[]}};
   preview_url:string|null;download_url:string|null;width:number|null;height:number|null;duration:number|null;
   validation:null|{warnings:string[];limitations:string[];review_status:string;bytes:number;audio_mode:string};
@@ -43,7 +46,7 @@ export type BackendState = {
     proposal:Record<string,unknown>}[];
   sam_calls?:number;
   segmentations?:{id:string;concept:string;model:string;status:'queued'|'preparing'|'streaming'|'overlay'|'ready'|'empty'|'failed'|'cancelled';
-    duration_seconds?:number|null;received_frames?:number;
+    duration_seconds?:number|null;received_frames?:number;start_seconds?:number;
     frame_count:number;frames_with_masks:number;mask_count:number;
     tracks:{object_id:string;visible_frames:number;intervals:number[][]}[];
     preview_url:string|null;manifest_url:string|null;error:null|{message:string}}[];
@@ -59,6 +62,8 @@ const finite=(value:unknown)=>typeof value==='number'&&Number.isFinite(value);
 const strings=(value:unknown)=>Array.isArray(value)&&value.every(text);
 const uuid=(value:unknown)=>text(value)&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value as string);
 const primitive=(value:unknown)=>value===null||text(value)||finite(value)||typeof value==='boolean';
+const gradeValues=(v:unknown)=>record(v)&&['contrast','saturation','gamma'].every(k=>finite(v[k]))
+  &&(v.brightness_gain===undefined||finite(v.brightness_gain))&&(v.cooling===undefined||finite(v.cooling));
 const details=(value:unknown)=>record(value)&&Object.values(value).every(primitive);
 const validEvent=(value:unknown)=>record(value)&&text(value.id)&&text(value.timestamp)
   &&Number.isFinite(Date.parse(value.timestamp as string))&&text(value.title)
@@ -117,6 +122,13 @@ export function parseBackend(value:unknown):BackendState {
       ||!['planning','rendering','ready','failed','cancelled'].includes(c.status as string))return false;
     if(c.recipe!==null&&(!record(c.recipe)||!record(c.recipe.proposal)||!record(c.recipe.proposal.parameters)
       ||!text(c.recipe.proposal.summary)||!Array.isArray(c.recipe.proposal.decisions)||!strings(c.recipe.proposal.limitations)))return false;
+    if(c.recipe!==null){
+      const p=(c.recipe as Record<string,unknown>).proposal as Record<string,unknown>;
+      if(!gradeValues(p.parameters)||p.mode!==undefined&&!['global','localized'].includes(p.mode as string))return false;
+      if(p.mode==='localized'&&(!record(p.local)||!text(p.local.concept)||!gradeValues(p.local.foreground)||!gradeValues(p.local.background)
+        ||!Array.isArray(p.local.intervals)||!p.local.intervals.length||!p.local.intervals.every(i=>record(i)&&finite(i.start)&&finite(i.end)&&Number(i.end)>Number(i.start))))return false;
+      if(c.status==='ready'&&p.mode==='localized'&&(!Array.isArray(c.mask_run_ids)||!c.mask_run_ids.length||!c.mask_run_ids.every(uuid)))return false;
+    }
     if(c.status==='ready'){
       const prefix='/api/projects/'+value.id+'/candidates/'+c.id;
       return c.preview_url===prefix+'/preview'&&c.download_url===prefix+'/download'
@@ -142,6 +154,9 @@ export function stageLabel(stage:string) {
     verify_segmentation_input:'Verifying source/proxy frame mapping',segment_subject:'SAM is tracking the subject',
     render_mask_overlay:'Rendering the mask diagnostic overlay',segmentation_ready:'Subject tracking complete',
     decode_segmentation_masks:'Validating and decoding saved SAM masks locally',
+    validate_local_masks:'Validating alignment, mask edges and temporal stability',
+    render_local_grade:'Rendering and compositing foreground/background adjustments',
+    check_output_quality:'Checking frame timing, subject preservation and clipping',
   };
   return labels[stage]??stage;
 }

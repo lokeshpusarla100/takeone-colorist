@@ -180,11 +180,16 @@ def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,firs
             return op+f":enable='{enabled(flags)}'" if fast_local and op.startswith('lut3d=') else op
         # SIMD copies cover steady sections. The original floating-point blend
         # expression remains solely on transition frames, preserving its math.
-        start+=(',split=4[basein][fgin][bgin][nativeclock];' if operator=='luminance_ocio_v3' else ',split=3[basein][fgin][bgin];')
+        regions=local.regions if operator=='luminance_ocio_v3' else []
+        start+=(f',split={4+len(regions)}[basein][fgin][bgin][nativeclock]'+''.join(f'[r{k}in]' for k in range(len(regions)))+';'
+                if operator=='luminance_ocio_v3' else ',split=3[basein][fgin][bgin];')
         start+='[basein]'+gated(parameters,[not x for x in steady])+'[base];'
         foreground_used=[any(a<=i<=b for a,b in ranges) for i in range(mapping['frame_count'])] if operator=='luminance_ocio_v3' else used
         start+='[fgin]'+gated(local.foreground,foreground_used,local.preserve_subject_color)+'[fg];'
         start+='[bgin]'+gated(local.background,used)+'[bg];'
+        for k,region in enumerate(regions):
+            # Region layers follow the subject's frame gating; their mattes are zero outside active frames.
+            start+=f'[r{k}in]'+gated(region.treatment,foreground_used)+f'[r{k}];'
         # Matroska stores milliseconds; rebase the verified CFR mask by frame
         # index and place each mask half a frame before its video frame.
         # The video keeps its preserved PTS (which may start after the audio/
@@ -192,19 +197,22 @@ def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,firs
         # mask at or before it, so an exactly coincident or late mask lags
         # one frame, while a zero-based mask misaligns when the video origin
         # is offset by a frame or more.
-        if mapping.get('schema_version')==3:
-            ticks=[f['source_tick'] for f in mapping['frames']]
-            tick=Fraction(mapping['source']['time_base'])
-            origin=round(Fraction(mapping['source']['format_start'])/tick)
-            lead=max(1,min((b-a for a,b in zip(ticks,ticks[1:])),default=2)//2)
-            def lookup(lo,hi):
-                if hi-lo==1:return str(ticks[lo]-origin-lead)
-                middle=(lo+hi)//2
-                return f'if(lt(N,{middle}),{lookup(lo,middle)},{lookup(middle,hi)})'
-            start+=f"[1:v]settb=expr={tick},setpts='{lookup(0,len(ticks))}',format=gbrp16le,setparams=range=full[mask];"
-        else:
+        def mask_chain(stream,label):
+            if mapping.get('schema_version')==3:
+                ticks=[f['source_tick'] for f in mapping['frames']]
+                tick=Fraction(mapping['source']['time_base'])
+                origin=round(Fraction(mapping['source']['format_start'])/tick)
+                lead=max(1,min((b-a for a,b in zip(ticks,ticks[1:])),default=2)//2)
+                def lookup(lo,hi):
+                    if hi-lo==1:return str(ticks[lo]-origin-lead)
+                    middle=(lo+hi)//2
+                    return f'if(lt(N,{middle}),{lookup(lo,middle)},{lookup(middle,hi)})'
+                return f"[{stream}:v]settb=expr={tick},setpts='{lookup(0,len(ticks))}',format=gbrp16le,setparams=range=full[{label}];"
             offset_ticks=round((float(first_frame_offset)-float(1/rate)/2)*90000)
-            start+=f'[1:v]settb=expr=1/90000,setpts=(N*{90000*rate.denominator})/{rate.numerator}+{offset_ticks},format=gbrp16le,setparams=range=full[mask];'
+            return f'[{stream}:v]settb=expr=1/90000,setpts=(N*{90000*rate.denominator})/{rate.numerator}+{offset_ticks},format=gbrp16le,setparams=range=full[{label}];'
+        start+=mask_chain(1,'mask')
+        # Region mattes are inputs 2.. in plan order, timed exactly like the subject matte.
+        for k in range(len(regions)):start+=mask_chain(2+k,f'm{k}')
         if operator=='luminance_ocio_v3':
             start+='[fg]null[subject];[bg]null[local];'
         else:start+='[bg][fg][mask]maskedmerge=planes=7[local];'
@@ -216,7 +224,12 @@ def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,firs
         else:start+=f"[base][local]blend=all_expr='A+(B-A)*({weight})':enable='{condition}':eof_action=endall:repeatlast=0"
         if operator=='luminance_ocio_v3':
             source_tb=native_time_base or mapping.get('source',{}).get('time_base','1/90000')
-            start+=f"[fadedbg];[fadedbg]settb=expr={source_tb}[nativebg];[nativebg][subject][mask]maskedmerge=planes=7[protected];"
+            # Precedence: background < regions (last listed lowest) < subject, so merge regions in reverse.
+            start+=f"[fadedbg];[fadedbg]settb=expr={source_tb}[nativebg];"
+            current='nativebg'
+            for k in reversed(range(len(regions))):
+                start+=f'[{current}][r{k}][m{k}]maskedmerge=planes=7[c{k}];';current=f'c{k}'
+            start+=f'[{current}][subject][mask]maskedmerge=planes=7[protected];'
             start+='[nativeclock][protected]blend=all_mode=normal:all_opacity=0:eof_action=endall:repeatlast=0,'
         else:start+=','
     else:
@@ -235,6 +248,7 @@ def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Se
     offset=0.
     if recipe.proposal.mode=='localized':
         inputs+=['-i',str(directory/'matte.mkv')]
+        for k in range(len(recipe.proposal.local.regions)):inputs+=['-i',str(directory/f'matte-region-{k}.mkv')]
         # In-filter first video PTS = absolute first-frame PTS minus the
         # container origin that -start_at_zero shifts by.
         try:

@@ -154,3 +154,49 @@ def test_service_persists_structured_timing_failure_and_retry_reuses_recipe(sett
         assert ready['status']=='render_ready',ready.get('error')
         assert len(ready['candidates'])==1 and ready['candidates'][-1]['id']==candidate
         assert planner.grade_calls==1 and masks.calls==0
+
+
+def test_shared_frame_probe_is_exact_cached_and_invalidated_by_file_changes(tmp_path, settings):
+    """One all-core decode serves sam.frame_info and evidence.frame_manifest; a rewritten file is re-probed."""
+    import subprocess as sp
+    import threading as th
+    from takeone import evidence as ev, frames, sam as sm
+    clip = tmp_path / 'clip.mp4'
+    def encode(seconds):
+        sp.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', f'testsrc2=size=192x108:rate=12', '-t', str(seconds),
+                '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(clip)], check=True)
+    encode(1)
+    cancel = th.Event()
+    reference = [int(f['best_effort_timestamp']) for f in __import__('json').loads(sp.run(
+        ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_frames', '-show_entries', 'frame=best_effort_timestamp',
+         '-of', 'json', str(clip)], capture_output=True, text=True, check=True).stdout)['frames']]
+    manifest = ev.frame_manifest(clip, settings, cancel)
+    calls = []
+    original = frames.command
+    frames.command = lambda *a, **k: calls.append(a) or original(*a, **k)
+    try:
+        info = sm.frame_info(clip, settings, cancel)
+        assert manifest['pts'] == info['ticks'] == reference and not calls  # served from the shared probe
+        frames._memory.clear()
+        assert ev.frame_manifest(clip, settings, cancel)['pts'] == reference and not calls  # disk cache after a restart
+        encode(2)  # rewritten file: new identity, probed again
+        assert len(ev.frame_manifest(clip, settings, cancel)['pts']) == 24 and len(calls) == 1
+    finally:
+        frames.command = original
+
+
+def test_extract_is_cached_per_file_and_frames_and_matches_a_fresh_decode(tmp_path, settings):
+    import subprocess as sp
+    import threading as th
+    import numpy as np
+    from takeone import evidence as ev
+    clip = tmp_path / 'clip.mp4'
+    sp.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=192x108:rate=12', '-t', '1',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p', str(clip)], check=True)
+    cancel = th.Event()
+    manifest = ev.frame_manifest(clip, settings, cancel)
+    first = ev.extract(clip, manifest, [0, 5, 11], settings, cancel)
+    assert list(clip.parent.glob('clip.mp4.samples-*.npz'))
+    second = ev.extract(clip, manifest, [0, 5, 11], settings, cancel)
+    other = ev.extract(clip, manifest, [3], settings, cancel)  # different frames: not served from the first entry
+    assert all(np.array_equal(first[i], second[i]) for i in [0, 5, 11]) and not np.array_equal(other[3], first[0])

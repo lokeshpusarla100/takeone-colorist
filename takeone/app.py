@@ -228,6 +228,14 @@ def create_app(settings: Settings | None = None, provider=None, sam_provider=Non
     def generate(project_id: UUID, body: Command):
         return service().generate(str(project_id), body.revision, str(body.command_id)).public()
 
+    @application.post('/api/projects/{project_id}/use-all-matches',status_code=202)
+    def use_all_matches(project_id:UUID,body:ReviewCommand):
+        return service().use_all_matches(str(project_id),str(body.candidate_id),body.revision,str(body.command_id)).public()
+
+    @application.post('/api/projects/{project_id}/render-supported',status_code=202)
+    def render_supported(project_id:UUID,body:ReviewCommand):
+        return service().render_supported(str(project_id),str(body.candidate_id),body.revision,str(body.command_id)).public()
+
     @application.post('/api/projects/{project_id}/review',status_code=202)
     def review(project_id:UUID,body:ReviewCommand):
         return service().review_candidate(str(project_id),str(body.candidate_id),body.revision,str(body.command_id)).public()

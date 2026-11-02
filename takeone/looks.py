@@ -18,7 +18,7 @@ from .contracts import GradeParameters, GradeProposal
 BOUNDS = {
     'contrast': (0.75, 1.25), 'saturation': (0., 1.5), 'gamma': (0.8, 1.2),
     'brightness_gain': (0.65, 1.35), 'cooling': (-0.15, 0.15),
-    'black_point': (0., 0.15), 'white_point': (0.75, 1.),
+    'black_point': (0., 0.15), 'white_point': (0.75, 1.), 'highlight_ceiling': (0.6, 1.),
 }
 FIELDS = list(BOUNDS)
 
@@ -35,14 +35,14 @@ def _vary(parameters, fn):
 
 def _toward_neutral(factor):
     def fn(v):
-        for k in ['contrast', 'gamma', 'brightness_gain']:
+        for k in ['contrast', 'gamma', 'brightness_gain', 'highlight_ceiling']:
             v[k] = 1 + (v[k] - 1) * factor
     return fn
 
 
 def _away_from_neutral(factor):
     def fn(v):
-        for k in ['contrast', 'gamma']:
+        for k in ['contrast', 'gamma', 'highlight_ceiling']:
             v[k] = 1 + (v[k] - 1) * factor
         v['brightness_gain'] = 1 + (v['brightness_gain'] - 1) * (1 + (factor - 1) * 0.66)
     return fn
@@ -63,6 +63,7 @@ def _describe(parameters, base):
     elif base.cooling - parameters.cooling > 0.005:
         parts.append('warmer')
     delta('black_point', 'shadow cutoff', 0.002)
+    delta('highlight_ceiling', 'highlight ceiling')
     return ', '.join(parts) if parts else 'as planned'
 
 
@@ -143,6 +144,9 @@ def build(base: GradeProposal, frame_rgb, *, brief_sha256, frame_index, frame_ti
             summary = _describe(proposal.local.background, base.local.background)
         description = ('As planned from your Creative Brief.' if name == 'Brief look'
                        else 'Brief look with ' + summary + '.')
+        if proposal.local is not None and proposal.local.regions:
+            # The still preview has only the subject mask; region treatments appear in the full render.
+            description += ' Regional treatments (' + ', '.join(r.concept for r in proposal.local.regions) + ') are not previewed.'
         image = render_frame(frame_rgb, proposal, alpha)
         looks.append({
             'id': look_id, 'name': name, 'description': description[:300],

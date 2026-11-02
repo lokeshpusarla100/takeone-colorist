@@ -86,6 +86,9 @@ class GradeParameters(StrictModel):
     cooling: float = Field(default=0.0,ge=-0.15,le=0.15,allow_inf_nan=False)
     black_point: float = Field(default=0.0,ge=0,le=.15,allow_inf_nan=False)
     white_point: float = Field(default=1.0,ge=.75,le=1,allow_inf_nan=False)
+    # Output level that pure white rolls down to (smooth shoulder t-(1-c)t^2 after tone).
+    # The only control that darkens near-white pixels; 0.6 keeps the top slope >= 0.2.
+    highlight_ceiling: float = Field(default=1.0,ge=.6,le=1,allow_inf_nan=False)
 
 
 class CreativeIntent(StrictModel):
@@ -93,7 +96,9 @@ class CreativeIntent(StrictModel):
     shadow_policy: Literal['preserve_detail','intentional_darkness','intentional_black','review'] = 'review'
     # intentional_lift / intentional_clipping are the only policies under which a
     # layer that darkens midtones may also brighten highlights (see render_preflight).
-    highlight_policy: Literal['preserve_detail','intentional_lift','intentional_clipping','review'] = 'review'
+    # subdue: highlights must not get brighter on a darkening layer (the brief asks for darker,
+    # subdued or controlled sky/highlights); enforced for every control, not just white_point.
+    highlight_policy: Literal['preserve_detail','subdue','intentional_lift','intentional_clipping','review'] = 'review'
 
 
 class ExecutionLimits(StrictModel):
@@ -114,6 +119,34 @@ class GradeInterval(StrictModel):
         return self
 
 
+def _single_phrase(concept):
+    if any(c in concept for c in [',',';','\n','<','>']):raise ValueError('Use one subject phrase')
+    return concept
+
+
+class RegionTreatment(StrictModel):
+    """An additional SAM region (sky, water, foliage, buildings...) with its own treatment.
+
+    Precedence when masks overlap: the plan's subject first, then regions in list order, then the
+    background. Regions share the plan's intervals and feather; everything they do not cover keeps
+    the background treatment.
+    """
+    concept: str = Field(min_length=1,max_length=120)
+    # Region concepts are usually spread over several fragments (sky between trees), so all_matches.
+    selection: Literal['single_instance','all_matches'] = 'all_matches'
+    treatment: GradeParameters
+    # Simpler SAM phrases tried in order when the concept matches nothing (see concepts.py).
+    concept_alternatives: list[str] = Field(default_factory=list,max_length=3)
+
+    @field_validator('concept')
+    @classmethod
+    def one_phrase(cls,concept):return _single_phrase(concept)
+
+    @field_validator('concept_alternatives')
+    @classmethod
+    def alternative_phrases(cls,values):return [_single_phrase(v.strip())[:120] for v in values if v.strip()]
+
+
 class LocalizedPlan(StrictModel):
     concept: str = Field(min_length=1,max_length=120)
     selection: Literal['single_instance','all_matches'] = 'single_instance'
@@ -122,12 +155,22 @@ class LocalizedPlan(StrictModel):
     background: GradeParameters
     preserve_subject_color: bool = True
     feather_px: float = Field(default=1.0,ge=0.5,le=2.0,allow_inf_nan=False)
+    regions: list[RegionTreatment] = Field(default_factory=list,max_length=4)
+    # Simpler SAM phrases for the subject, tried in order when the concept matches nothing.
+    concept_alternatives: list[str] = Field(default_factory=list,max_length=3)
+
+    @field_validator('concept_alternatives')
+    @classmethod
+    def alternative_phrases(cls,values):return [_single_phrase(v.strip())[:120] for v in values if v.strip()]
 
     @model_validator(mode='after')
     def executable(self):
         ordered=sorted(self.intervals,key=lambda i:i.start)
         if any(a.end>b.start for a,b in zip(ordered,ordered[1:])):raise ValueError('Local intervals overlap')
-        if any(c in self.concept for c in [',',';','\n','<','>']):raise ValueError('Use one subject phrase')
+        _single_phrase(self.concept)
+        names=[self.concept.strip().casefold(),*(r.concept.strip().casefold() for r in self.regions)]
+        if len(set(names))!=len(names):raise ValueError('Each region needs a distinct concept, different from the subject')
+        if any(r.treatment==self.background for r in self.regions):raise ValueError('A region identical to the background needs no mask')
         if self.foreground==self.background:raise ValueError('Localized treatments must differ; otherwise SAM is unnecessary')
         if self.preserve_subject_color and any(abs(getattr(self.foreground,k)-v)>1e-8 for k,v in [('saturation',1),('cooling',0)]):
             raise ValueError('Colour-protected subjects require neutral saturation/cooling; luminance-only tone is supported')
@@ -135,7 +178,7 @@ class LocalizedPlan(StrictModel):
 
 
 class GradeDecision(StrictModel):
-    parameter: Literal["contrast", "saturation", "gamma","brightness_gain","cooling","black_point","white_point","local_treatment"]
+    parameter: Literal["contrast", "saturation", "gamma","brightness_gain","cooling","black_point","white_point","highlight_ceiling","local_treatment"]
     reason: str = Field(min_length=1, max_length=500)
     source_ids: list[str] = Field(min_length=1, max_length=10)
 
@@ -189,9 +232,17 @@ class GradeRecipe(StrictModel):
         if self.tone_operator!='luminance_ocio_v3':
             layers=[self.proposal.parameters]+([self.proposal.local.foreground,self.proposal.local.background] if self.proposal.local else [])
             if any(p.black_point!=0 or p.white_point!=1 for p in layers):raise ValueError('Black/white points require v3 execution')
+            if any(p.highlight_ceiling!=1 for p in layers):raise ValueError('highlight_ceiling requires v3 execution')
+            if self.proposal.local and self.proposal.local.regions:raise ValueError('Additional regions require v3 execution')
             if self.proposal.local and self.proposal.local.preserve_subject_color and any(
                 getattr(self.proposal.local.foreground,k)!=1 for k in ['contrast','gamma']):raise ValueError('Protected luminance tone requires v3 execution')
         return self
+
+
+# Measurable direction an issue asks for, judged on the whole sampled frame (see convergence.py).
+IssueTarget=Literal['darker_highlights','brighter_highlights','darker_midtones','brighter_midtones',
+                    'deeper_shadows','lifted_shadows','cooler','warmer','more_contrast','less_contrast',
+                    'more_saturation','less_saturation']
 
 
 class CreativeIssue(StrictModel):
@@ -199,6 +250,16 @@ class CreativeIssue(StrictModel):
     description: str = Field(min_length=1,max_length=1200)
     evidence_ids: list[str] = Field(min_length=1,max_length=12)
     correctable: bool
+    # None when the issue is not a whole-frame tonal/colour direction (e.g. subject separation, edges).
+    target: IssueTarget | None = None
+
+
+class MaskAssessment(StrictModel):
+    """Critic's semantic check of one SAM concept from overlay frames: technical QA cannot see this."""
+    concept: str = Field(min_length=1,max_length=120)
+    verdict: Literal['matches','partial','wrong_object','not_evaluable']
+    description: str = Field(min_length=1,max_length=600)
+    evidence_ids: list[str] = Field(min_length=1,max_length=8)
 
 
 class CreativeReview(StrictModel):
@@ -207,6 +268,7 @@ class CreativeReview(StrictModel):
     issues: list[CreativeIssue] = Field(default_factory=list,max_length=8)
     revision_plan: GradeProposal | None = None
     preferred_candidate_id: str | None = None
+    mask_assessments: list[MaskAssessment] = Field(default_factory=list,max_length=6)
 
 
 class RenderCandidate(StrictModel):
@@ -237,6 +299,12 @@ class RenderCandidate(StrictModel):
     review_history: list[dict] = Field(default_factory=list)
     review_evidence: list[dict] = Field(default_factory=list)
     preflight_replan_attempted: bool = False
+    # Measured effect of this revision on its reviewed ancestor's targeted issues (convergence.py).
+    revision_progress: dict | None = None
+    # A plan the user explicitly approved to render without instructions the planner could not
+    # execute (render_supported). Rendered verbatim, without another planner call.
+    approved_proposal: GradeProposal | None = None
+    approved_omissions: list[str] = Field(default_factory=list)
 
 
 class LookPreview(StrictModel):

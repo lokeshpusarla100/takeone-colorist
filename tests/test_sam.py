@@ -133,7 +133,8 @@ def test_mapping_rejects_frame_loss_before_any_remote_request(tmp_path,settings,
 
 
 def test_vfr_is_rejected_explicitly(settings,monkeypatch):
-    monkeypatch.setattr(sam,'command',lambda *_:json.dumps({'streams':[{'width':192,'height':108,'avg_frame_rate':'30/1'}],
+    from takeone import frames  # frame_info reads timestamps through the shared probe
+    monkeypatch.setattr(frames,'command',lambda *_:json.dumps({'streams':[{'width':192,'height':108,'avg_frame_rate':'30/1'}],
         'frames':[{'best_effort_timestamp_time':str(t)} for t in [0,.033333,.2]]}))
     with pytest.raises(Problem,match='constant-frame-rate'):sam.frame_info(Path('fixture'),settings,threading.Event())
 

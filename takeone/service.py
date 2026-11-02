@@ -26,13 +26,25 @@ from . import evidence as visual_evidence
 from . import creative_review
 from . import grade_guard
 from . import render_preflight
+from . import convergence
+from . import concepts as sam_concepts
+
+
+def display_oriented(selection,source):
+    """Saved evidence whose frame geometry matches the source's display orientation. Evidence saved
+    before rotated sources were measured in decoded (auto-rotated) geometry is not reused."""
+    manifest=(selection or {}).get('manifest') or {}
+    width,height=manifest.get('width'),manifest.get('height')
+    if not width or not height:return False
+    return abs(width/height-source.width/source.height)<.01
 
 
 HIGHLIGHT_REPLAN_INSTRUCTION=('Revise the executable plan using the actual images and the measured highlight failure. Keep the same creative brief and execution limits. '
     'Do not just resubmit the failed controls. The failed plan darkens midtones but BRIGHTENS highlights: lowering white_point (an input cutoff that maps bright pixels to pure white) '
-    'and raising contrast both lift highlights and cannot subdue a bright sky, cloud or water glare. gamma/brightness_gain below 1 darken only upper midtones; no supported control '
-    'makes near-white pixels dark. If the brief requires darker or subdued highlights that the supported controls cannot deliver, list that in unfulfilled_requests instead of approximating it. '
-    'Set intent.highlight_policy to intentional_lift only if brighter highlights are genuinely wanted. Do not call this a review of a completed candidate.')
+    'and raising contrast both lift highlights and cannot subdue bright areas (sky, sand, snow, windows, glare). gamma/brightness_gain below 1 darken only upper midtones. '
+    'highlight_ceiling is the control that darkens highlights; the measured evidence includes the suggested_highlight_ceiling that would remove the lift. '
+    'If the brief requires darker or subdued highlights than highlight_ceiling 0.6 can deliver, list that in unfulfilled_requests instead of approximating it. '
+    'Keep intent.highlight_policy faithful to the brief: subdue when it asks for darker or controlled highlights, intentional_lift only if brighter highlights are genuinely wanted. Do not call this a review of a completed candidate.')
 
 
 class Service:
@@ -397,6 +409,90 @@ class Service:
             self.submit(state, "render")
             return state
 
+    def render_supported(self, project_id, candidate_id, revision: int, command_id: str):
+        """Render the executable part of a plan whose planner listed unfulfillable instructions.
+
+        Never automatic: the user explicitly chooses it after seeing exactly what will be left out.
+        The omitted instructions move into the plan's limitations and onto the new candidate.
+        """
+        with self.store.lock:
+            state = self.store.get(project_id)
+            fingerprint = self.fingerprint("render_supported", candidate_id)
+            if self.receipt(state, command_id, fingerprint):
+                return state
+            self.check_revision(state, revision)
+            if state.status not in {"failed", "brief_ready", "render_ready"} or state.active_job:
+                raise Problem("RENDER_NOT_READY", "The project is busy.", "Wait for the current operation to finish.", 409)
+            failed = next((c for c in state.candidates if c.id == candidate_id), None)
+            if not failed or failed.status != "failed" or (failed.error or {}).get("code") != "GRADE_REQUEST_UNFULFILLED":
+                raise Problem("SUPPORTED_PLAN_UNAVAILABLE", "That version has no plan waiting for approval.",
+                              "Generate a new version from the current brief.", 409)
+            brief_hash = rendering.fingerprint(state.brief.model_dump(mode="json")) if state.brief else None
+            plan_path = self.store.directory(project_id) / "candidates" / failed.id / "plan.json"
+            if failed.brief_sha256 != brief_hash or not plan_path.is_file():
+                raise Problem("SUPPORTED_PLAN_STALE", "The brief changed since that plan was made.",
+                              "Generate a new version from the current brief.", 409)
+            if sum(c.brief_sha256 == brief_hash for c in state.candidates) >= self.settings.max_render_iterations:
+                raise Problem("RENDER_BUDGET", "Three candidates have already been attempted for this brief.",
+                              "Review the saved candidates before changing the direction.", 409)
+            from .contracts import GradeProposal
+            proposal = GradeProposal.model_validate(json.loads(plan_path.read_text()))
+            omitted = list(proposal.unfulfilled_requests)
+            note = ("Not executed, by explicit user choice: " + "; ".join(omitted))[:1500]
+            proposal.limitations = [*proposal.limitations[:7], note]
+            proposal.unfulfilled_requests = []
+            proposal.summary = (proposal.summary + " Rendered without: " + "; ".join(omitted))[:1000]
+            candidate = RenderCandidate(id=str(uuid4()), name="V" + str(len(state.candidates) + 1), brief_sha256=brief_hash,
+                                        source_sha256=state.source.sha256, parent_id=failed.id, generation_id=str(uuid4()),
+                                        approved_proposal=GradeProposal.model_validate(proposal.model_dump()), approved_omissions=omitted)
+            state.render_iteration_limit = self.settings.max_render_iterations
+            state.candidates.append(candidate)
+            state.render_target_id = candidate.id
+            state.error = None
+            state.status = "render_ready" if state.status == "failed" else state.status
+            state.receipts[command_id] = fingerprint
+            self.event(state, "Rendering the supported part", "Approved by the user; these instructions are not executed: " + "; ".join(omitted),
+                       actor="user", candidate=candidate.name, parent_id=failed.id)
+            self.submit(state, "render")
+            return state
+
+    def use_all_matches(self, project_id, candidate_id, revision: int, command_id: str):
+        """User-approved: treat every SAM match of an ambiguous phrase as that area, then resume the render."""
+        with self.store.lock:
+            state = self.store.get(project_id)
+            fingerprint = self.fingerprint("use_all_matches", candidate_id)
+            if self.receipt(state, command_id, fingerprint):
+                return state
+            self.check_revision(state, revision)
+            if state.active_job:
+                raise Problem("RENDER_NOT_READY", "The project is busy.", "Wait for the current operation to finish.", 409)
+            target = next((c for c in state.candidates if c.id == candidate_id), None)
+            details = (target.error or {}).get("details", {}) if target else {}
+            if (not target or target.status != "failed" or (target.error or {}).get("code") != "LOCAL_SUBJECT_AMBIGUOUS"
+                    or not details.get("all_matches_available") or not target.recipe or not target.recipe.proposal.local):
+                raise Problem("ALL_MATCHES_UNAVAILABLE", "That version has no ambiguous mask waiting for a choice.",
+                              "Generate a new version or rephrase the area.", 409)
+            if target.brief_sha256 != rendering.fingerprint(state.brief.model_dump(mode="json")):
+                raise Problem("BRIEF_CHANGED", "The brief changed after this candidate was planned.", "Generate a new version.", 409)
+            local = target.recipe.proposal.local
+            planned = details.get("planned_concept")
+            layers = [local] if local.concept == planned else [r for r in local.regions if r.concept == planned]
+            if not layers:
+                raise Problem("ALL_MATCHES_UNAVAILABLE", "The ambiguous area is no longer part of this plan.", "Generate a new version.", 409)
+            for layer in layers:
+                layer.selection = "all_matches"
+            target.recipe.execution_adjustment = {**(target.recipe.execution_adjustment or {}), "kind": "user_selected_all_matches",
+                                                  "concept": planned, "object_count": details.get("object_count")}
+            target.status, target.error = "rendering", None
+            state.render_target_id = target.id
+            state.error = None
+            state.receipts[command_id] = fingerprint
+            self.store.candidate_artifact(project_id, target.id, "recipe.json", target.recipe.model_dump(mode="json"))
+            self.event(state, "Grading all matches", f'Approved by the user: every SAM match of "{planned}" is graded as that area.',
+                       actor="user", candidate=target.name, concept=planned, object_count=details.get("object_count"))
+            self.submit(state, "render")
+            return state
+
     def request_looks(self, project_id, revision: int, command_id: str):
         with self.store.lock:
             state = self.store.get(project_id)
@@ -462,7 +558,7 @@ class Service:
             if error.code in {'SOURCE_CHANGED', 'JOB_CANCELLED'}:
                 raise
             local_error=error.public()
-        technical = {'operations': ['global_grade', 'cooling', 'brightness_gain'],
+        technical = {'operations': ['global_grade', 'cooling', 'brightness_gain', 'highlight_ceiling'],
                      'localized_available': evidence is not None,
                      'limitations': [] if evidence else [local_error['message'] if local_error else 'No verified local timeline.'],
                      'localized_blocker':local_error,
@@ -720,6 +816,45 @@ class Service:
         return manifest,output
 
     def local_masks(self,project_id,candidate_id,evidence,plan,cancel):
+        """Masks for plan.concept, falling back to simpler phrases only when SAM finds nothing at all.
+
+        Returns (records, ranges, concept actually used, selection actually used). At most
+        concepts.MAX_ATTEMPTS phrases are tried; a partial gap is never "fixed" by switching phrase,
+        it goes through coverage recovery. A plural or material phrase ("rocks", "water") denotes every
+        match, so single_instance is not demanded of it; a singular countable phrase stays strict.
+        """
+        phrases=sam_concepts.candidates(plan.concept,plan.concept_alternatives)
+        for number,phrase in enumerate(phrases):
+            selection=('all_matches' if plan.selection=='single_instance' and sam_concepts.names_a_class(phrase) else plan.selection)
+            attempt=plan.model_copy(update={'concept':phrase,'selection':selection})
+            try:
+                records,ranges=self._local_masks(project_id,candidate_id,evidence,attempt,cancel)
+                if phrase!=plan.concept:
+                    self.mutate(project_id,lambda s:self.event(s,'Using a simpler SAM phrase',
+                        f'SAM found nothing for "{plan.concept}"; "{phrase}" matched.',planned_concept=plan.concept,concept=phrase))
+                if selection!=plan.selection:
+                    self.mutate(project_id,lambda s:self.event(s,'Using every match of a class phrase',
+                        f'"{phrase}" names a material or several objects, so every SAM match is graded rather than one chosen instance.',
+                        concept=phrase,object_count=len({r['object_id'] for rows in records.values() for r in rows})))
+                return records,ranges,phrase,selection
+            except Problem as failure:
+                if failure.code=='LOCAL_SUBJECT_AMBIGUOUS':
+                    # Never guess one instance: offer the user an explicit "grade all matches" choice instead.
+                    failure.details.update(candidate_id=candidate_id,planned_concept=plan.concept,concept=phrase,all_matches_available=True)
+                    failure.action=(f'SAM found {failure.details.get("object_count")} separate "{phrase}" objects. Choose "Grade all matches" to '
+                                    'treat every one as this area, or use a more specific phrase. No object was guessed.')
+                    raise
+                if not failure.details.get('no_masks_found'):raise
+                if number+1<len(phrases):
+                    self.mutate(project_id,lambda s:self.event(s,'SAM found no match',
+                        f'No mask for "{phrase}" in any required frame; trying "{phrases[number+1]}".',concept=phrase))
+                    continue
+                raise Problem('LOCAL_CONCEPT_NOT_FOUND','SAM found none of: '+', '.join(f'"{p}"' for p in phrases)+'.',
+                    'Name the area with a short common noun SAM can see (for example "rocks", "sky", "water", "boat"), or revise the '
+                    'direction. No global fallback was rendered.',422,planned_concept=plan.concept,tried=' | '.join(phrases),
+                    missing_frames=failure.details.get('missing_frames'),first_missing_frame=failure.details.get('first_missing_frame'))
+
+    def _local_masks(self,project_id,candidate_id,evidence,plan,cancel):
         state=self.store.get(project_id);source=state.source;directory=self.store.directory(project_id)
         ranges=local_grading.plan_ranges(plan,evidence,source);records={};step=float(1/Fraction(evidence['frame_map']['proxy']['rate']))
         for first,last in ranges:
@@ -770,6 +905,11 @@ class Service:
                 if run_id not in target.mask_run_ids:target.mask_run_ids.append(run_id)
             self.mutate(project_id,attached)
             current=local_grading.records_for_range(manifest,mask_directory,source,first,last,plan.selection,require_complete=False)
+            if not current:
+                # Nothing to anchor a recovery on: the phrase itself did not match (local_masks may try a simpler one).
+                raise Problem('LOCAL_MASK_GAP',f'SAM found no "{plan.concept}" in the required frames.',
+                    'Try a shorter common noun for this area. No global fallback was rendered.',422,
+                    missing_frames=last-first+1,first_missing_frame=first,no_masks_found=True,concept=plan.concept)
             if len(current)<last-first+1:
                 current=self.recover_mask_coverage(project_id,candidate_id,run_id,current,evidence,plan,first,last,cancel)
             records.update(current)
@@ -973,7 +1113,18 @@ class Service:
             state.stage = "prepare_preview"
             self.event(state, "Source inspected", video_codec=source.video_codec, duration=source.duration, sha256=source.sha256)
         self.mutate(project_id, preparing)
-        preview = make_previews(directory, source, project_id, self.settings, cancel)
+        # The exact frame-timestamp probe of the original (needed by masks, evidence and rendering) runs
+        # while the previews encode, so later stages read it from cache instead of decoding again.
+        from .frames import probe_frames
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix='takeone-frame-probe') as pool:
+            probe = pool.submit(probe_frames, directory / "source.bin", self.settings, cancel)
+            preview = make_previews(directory, source, project_id, self.settings, cancel)
+            try:
+                probe.result()
+            except Problem as error:
+                if error.code == "JOB_CANCELLED":
+                    raise
+                # Not fatal here: the same probe runs (and reports) where frame timing is actually required.
         self.check_cancel(cancel)
         def ready(state):
             state.preview = preview
@@ -1232,7 +1383,7 @@ class Service:
         except Problem as error:
             if error.code in {'SOURCE_CHANGED','JOB_CANCELLED'}:raise
             local_limitation=error.message
-        technical={'operations':['global_grade','cooling','brightness_gain'],
+        technical={'operations':['global_grade','cooling','brightness_gain','highlight_ceiling'],
                    'localized_available':evidence is not None,
                    'limitations':[] if evidence else [local_limitation or 'No verified local timeline.'],
                    'shots':evidence['shots'] if evidence else [],
@@ -1250,15 +1401,24 @@ class Service:
             if saved['frame_map']['source_sha256']==state.source.sha256:
                 technical['available_masks'].append({'concept':run.concept,'start':run.start_seconds,
                     'duration':run.duration_seconds or state.source.duration,'object_ids':[t['object_id'] for t in run.tracks]})
-        if evidence:technical['operations']+=['regional_grade','selective_gain']
+        if evidence:technical['operations']+=['regional_grade','selective_gain','multi_region_grade']
         if not candidate.recipe:
             # A look selected for this exact brief is the approved style
             # recipe: use its stored proposal verbatim, with no planner call.
             # Any feedback changes the brief hash, so a stale look never applies.
             selected_look=next((item for item in state.looks if item.id==state.selected_look_id),None)
             use_look=(selected_look is not None and state.looks_brief_sha256==candidate.brief_sha256
-                    and selected_look.brief_sha256==candidate.brief_sha256)
-            if use_look:
+                    and selected_look.brief_sha256==candidate.brief_sha256) and candidate.approved_proposal is None
+            if candidate.approved_proposal is not None:
+                # The user approved this exact plan (render_supported): no planner call, no substitution.
+                proposal=candidate.approved_proposal.model_copy(deep=True)
+                selection=visual_evidence.plan(original,state.source,self.settings,cancel,proxy=directory/'analysis.mp4',
+                    shots=evidence['shots'] if evidence else None,cache=directory/'source-evidence-v3.json')
+                measurements,_approved_images=rendering.samples(original,state.source,self.settings,cancel,selection=selection)
+                technical['sampling']={k:selection[k] for k in ['selected_indices','selection_reasons','scanned_frames','uncovered_shots','budget','uncertainty']}
+                self.mutate(project_id,lambda s:self.event(s,'Using the approved supported plan',
+                    'No planner call was made; the omitted instructions are recorded in the plan limitations.',candidate=candidate.name))
+            elif use_look:
                 proposal=selected_look.proposal.model_copy(deep=True)
                 selection=visual_evidence.plan(original,state.source,self.settings,cancel,proxy=directory/'analysis.mp4',
                     shots=evidence['shots'] if evidence else None,cache=directory/'source-evidence-v3.json')
@@ -1271,10 +1431,11 @@ class Service:
             # plan instead of resending the same brief, analysis and sample
             # images to the planner. Any feedback changes the brief hash, so
             # a changed brief always takes the full planning path below.
-            prior=None if use_look else next((c for c in reversed(state.candidates) if c.id!=candidate.id and c.status=='ready'
+            approved=candidate.approved_proposal is not None
+            prior=None if use_look or approved else next((c for c in reversed(state.candidates) if c.id!=candidate.id and c.status=='ready'
                         and c.brief_sha256==candidate.brief_sha256 and c.source_sha256==state.source.sha256
-                        and c.recipe and c.recipe.evidence_selection),None)
-            if use_look:
+                        and c.recipe and c.recipe.evidence_selection and display_oriented(c.recipe.evidence_selection,state.source)),None)
+            if use_look or approved:
                 pass
             elif prior is not None:
                 proposal=prior.recipe.proposal.model_copy(deep=True)
@@ -1297,8 +1458,10 @@ class Service:
             self.store.candidate_artifact(project_id,candidate.id,'plan.json',proposal.model_dump(mode='json'))
             if proposal.unfulfilled_requests:
                 raise Problem('GRADE_REQUEST_UNFULFILLED','The planner reported required instructions it cannot execute.',
-                              'Clarify these instructions or choose a supported treatment. No replacement was rendered.',422,
-                              unfulfilled_count=len(proposal.unfulfilled_requests),unfulfilled_instructions='; '.join(proposal.unfulfilled_requests)[:1500])
+                              'Choose "Render the supported part" to render everything else (the listed items are recorded as not done), '
+                              'or revise the direction. Nothing was rendered or substituted automatically.',422,
+                              unfulfilled_count=len(proposal.unfulfilled_requests),unfulfilled_instructions='; '.join(proposal.unfulfilled_requests)[:1500],
+                              candidate_id=candidate.id,supported_plan_available=True)
             if proposal.mode=='localized' and not evidence:
                 raise Problem('LOCAL_GRADE_UNAVAILABLE','The requested localized plan has no supported frame mapping.',
                               'Use upright SDR footage with valid, frame-preserving source/proxy mapping. No global fallback was made.',422,limitation=local_limitation)
@@ -1343,7 +1506,7 @@ class Service:
             if evidence is None or recipe.timeline['key']!=evidence['key']:
                 raise Problem('LOCAL_TIMELINE_CHANGED','The cached recipe has a different local source mapping.','Create a new candidate.',409)
             self.mutate(project_id,lambda s:setattr(s,'stage','verify_segmentation_input'))
-            records,ranges=self.local_masks(project_id,candidate.id,evidence,recipe.proposal.local,cancel)
+            records,ranges,subject_concept,subject_selection=self.local_masks(project_id,candidate.id,evidence,recipe.proposal.local,cancel)
             # Frame-derived interval boundaries, never guessed request timestamps.
             step=float(1/Fraction(evidence['frame_map']['proxy']['rate']))
             recipe.timeline['active_ranges']=[[evidence['frame_map']['frames'][a]['time'],
@@ -1354,9 +1517,26 @@ class Service:
             self.mutate(project_id,validating)
             mask_qa=local_grading.prepare_matte(directory/evidence['frame_map'].get('proxy_filename','analysis.mp4'),output,state.source,evidence,records,
                                                recipe.proposal.local,self.settings,cancel,adaptive=recipe.tone_operator=='luminance_ocio_v3')
-            mask_qa['selection_policy']=recipe.proposal.local.selection
+            mask_qa['selection_policy']=subject_selection
+            mask_qa['subject_concept_used']=subject_concept
             mask_qa['selected_objects_by_interval']=[{'first_frame':a,'last_frame':b,
                 'object_ids':sorted({r['object_id'] for i in range(a,b+1) for r in records[i]})} for a,b in ranges]
+            # Additional regions (sky, water...): the same SAM cache/recovery/QA path as the subject,
+            # one validated matte each, sharing the plan's intervals and feather.
+            mask_qa['regions']=[]
+            for k,region in enumerate(recipe.proposal.local.regions):
+                self.check_cancel(cancel)
+                region_plan=recipe.proposal.local.model_copy(update={'concept':region.concept,'selection':region.selection,'regions':[],
+                    'concept_alternatives':region.concept_alternatives})
+                region_records,region_ranges,region_concept,region_selection=self.local_masks(project_id,candidate.id,evidence,region_plan,cancel)
+                if region_ranges!=ranges:
+                    raise Problem('LOCAL_REGION_RANGES','A region does not cover the same frame ranges as the subject.',
+                                  'Inspect the region masks; no partial regional grade was rendered.',422,concept=region.concept)
+                region_qa=local_grading.prepare_matte(directory/evidence['frame_map'].get('proxy_filename','analysis.mp4'),output,state.source,evidence,
+                    region_records,region_plan,self.settings,cancel,adaptive=recipe.tone_operator=='luminance_ocio_v3',name=f'matte-region-{k}')
+                mask_qa['regions'].append({'concept':region.concept,'concept_used':region_concept,'selection':region_selection,'active_frames':region_qa['active_frames'],
+                                           'unstable_frames':len(region_qa['unstable_frames']),'warnings':region_qa['warnings']})
+                mask_qa['warnings']=mask_qa['warnings']+[f'{region.concept}: {w}' for w in region_qa['warnings']]
             self.store.candidate_artifact(project_id,candidate.id,'recipe.json',recipe.model_dump(mode='json'))
             def compositing(s):
                 s.stage='render_local_grade';self.event(s,'Rendering localized foreground/background grade',candidate=candidate.name)
@@ -1432,6 +1612,22 @@ class Service:
             state.render_target_id=target.id;state.receipts[command_id]=fingerprint
             self.submit(state,'review');return state
 
+    @staticmethod
+    def reviewed_ancestor(state,candidate):
+        """Nearest ready ancestor whose critic review asked for this line of revisions (skips preflight-corrected parents)."""
+        by_id={c.id:c for c in state.candidates};current=by_id.get(candidate.parent_id)
+        while current is not None and not (current.status=='ready' and current.creative_review):
+            current=by_id.get(current.parent_id)
+        return current
+
+    @staticmethod
+    def metric_choice(state,brief_hash,issues):
+        """(candidate_id, score) of the ready candidate that best fits the targeted issues, latest first on ties."""
+        pool=[(c.id,c.validation.get('output_samples',[]),c.validation.get('source_samples',[])) for c in reversed(state.candidates)
+              if c.status=='ready' and c.brief_sha256==brief_hash and c.validation]
+        ranked=convergence.rank_candidates(pool,issues)
+        return ranked[0] if ranked else None
+
     def revision_highlight_block(self,project_id,state,candidate,proposal,cancel):
         """Preflight report if a critic revision would lift highlights while darkening, else None. Fails open:
         a revision that cannot be assessed here is still checked by guard_grade before it is rendered."""
@@ -1466,6 +1662,26 @@ class Service:
                 if candidate.creative_review.decision=='revise' and not candidate.revision_stop_reason:
                     self.mutate(project_id,lambda s:setattr(next(c for c in s.candidates if c.id==candidate.id),'revision_stop_reason','cached_review_retained_after_interruption'))
                 finish(candidate.creative_review.preferred_candidate_id or candidate.id);return
+            ancestor=self.reviewed_ancestor(state,candidate)
+            if (ancestor and ancestor.creative_review.decision=='revise' and ancestor.review_brief_sha256==brief_hash
+                    and candidate.brief_sha256==brief_hash and candidate.validation and ancestor.validation
+                    and candidate.revision_stop_reason!='revision_ineffective'):
+                # Measured before paying for another critic call: did this revision visibly move what was asked?
+                progress=convergence.revision_progress(candidate.validation.get('output_samples',[]),
+                    ancestor.validation.get('output_samples',[]),ancestor.creative_review.issues)
+                if progress['ineffective']:
+                    choice=self.metric_choice(state,brief_hash,ancestor.creative_review.issues)
+                    selected=choice[0] if choice else candidate.id
+                    def ineffective(s):
+                        c=next(c for c in s.candidates if c.id==candidate.id)
+                        c.revision_stop_reason='revision_ineffective';c.revision_progress=progress
+                        self.event(s,'Revision did not move the requested issues',
+                            'The targeted metrics did not change visibly in the asked-for direction, so the chosen operation is not '
+                            'fixing them; no further critic call or revision was made.',candidate=c.name,
+                            measured='; '.join(f"{r['target']} {r['progress']:+.3f}" for r in progress['rows']),
+                            selected=next(x.name for x in s.candidates if x.id==selected))
+                    self.mutate(project_id,ineffective);finish(selected);return
+                self.mutate(project_id,lambda s:setattr(next(c for c in s.candidates if c.id==candidate.id),'revision_progress',progress))
             request_id=None
             try:
                 if candidate.review_brief_sha256==brief_hash and candidate.review_attempts>=2:
@@ -1506,7 +1722,9 @@ class Service:
                 allowed={'source:'+str(f['frame_index']) for f in data['source_images']}|{'candidate:'+str(f['frame_index']) for f in data['candidate_images']}
                 allowed|={'source_region:'+str(f['frame_index']) for f in data.get('source_region_images',[])}|{'candidate_region:'+str(f['frame_index']) for f in data.get('candidate_region_images',[])}
                 if previous:allowed|={'previous:'+str(f['frame_index']) for f in previous['images']}
-                if any(set(i.evidence_ids)-allowed for i in review.issues) or review.preferred_candidate_id not in {None,candidate.id,previous['id'] if previous else candidate.id}:
+                allowed|={f"mask_overlay_{f['overlay']}:{f['frame_index']}" for f in data.get('mask_overlay_images',[])}
+                if (any(set(i.evidence_ids)-allowed for i in review.issues) or any(set(m.evidence_ids)-allowed for m in review.mask_assessments)
+                    or review.preferred_candidate_id not in {None,candidate.id,previous['id'] if previous else candidate.id}):
                     raise Problem('MUSE_INVALID_REVIEW','The review referenced unseen evidence or an unavailable candidate.','Review manually or retry explicitly.',502)
                 def reviewed(s):
                     c=next(c for c in s.candidates if c.id==candidate.id)
@@ -1536,7 +1754,9 @@ class Service:
                     old=getattr(prior,field);new=getattr(proposal.execution_limits,field)
                     if old is not None and (new is None or (new<old if field=='subject_min_luma_ratio' else new>old)):
                         setattr(proposal.execution_limits,field,old)
-            if review.decision!='revise':stop=review.decision
+            doubtful=[m for m in review.mask_assessments if m.verdict in {'partial','wrong_object'}]
+            if doubtful:stop='mask_needs_user_review' # Re-grading a wrong mask cannot fix it; a person must look.
+            elif review.decision!='revise':stop=review.decision
             elif preferred!=candidate.id:stop='previous_candidate_preferred'
             elif not proposal or not any(i.correctable for i in review.issues):stop='no_supported_targeted_revision'
             elif proposal.unfulfilled_requests:stop='revision_requires_unavailable_operation'
@@ -1549,8 +1769,21 @@ class Service:
             elif candidate.recipe.proposal.local and candidate.recipe.proposal.local.preserve_subject_color and (not proposal.local or not proposal.local.preserve_subject_color):
                 stop='revision_would_weaken_subject_protection'
             if stop:
+                choice=None
+                if review.decision=='revise' and review.preferred_candidate_id is None and stop!='previous_candidate_preferred':
+                    # Unresolved issues and no stated preference: pick by measured fit, not by recency.
+                    choice=self.metric_choice(self.store.get(project_id),brief_hash,review.issues)
+                    if choice:preferred=choice[0]
                 def stopped(s):
                     setattr(next(c for c in s.candidates if c.id==candidate.id),'revision_stop_reason',stop)
+                    if doubtful:
+                        self.event(s,'Mask may not match its concept','; '.join(f'{m.concept}: {m.verdict} - {m.description}' for m in doubtful)[:1500],
+                                   actor='muse',kind='decision',candidate=candidate.name,stop_reason=stop)
+                    if choice:
+                        self.event(s,'Candidate selected by measured fit',
+                            'The critic named no preferred candidate; the one with the fewest and smallest wrong-way moves on the targeted issues was selected.',
+                            candidate=next(x.name for x in s.candidates if x.id==choice[0]),regressions=choice[1]['regressions'],
+                            worst_regression=round(choice[1]['worst_regression'],4),progress=round(choice[1]['progress'],4))
                     if blocked is not None:
                         self.event(s,'Revision not rendered',blocked['reason'],actor='app',candidate=candidate.name,stop_reason=stop,
                                    blocked_by=blocked.get('blocked_by'),violating_layers=', '.join(blocked['highlights']['violations']))

@@ -11,7 +11,8 @@ import cv2
 import numpy as np
 
 from .errors import Problem
-from .media import command
+from . import tonal
+from .media import command, display_size
 
 
 def decoded_manifest(path,settings,cancel,metadata):
@@ -38,7 +39,8 @@ def _decode_manifest(raw,metadata):
             if len(fields)>=6 and fields[0].strip()=='0':
                 pts.append(int(fields[2]));durations.append(int(fields[3]))
         if seen_tick!=tick or not pts or len(pts)>15000 or any(b<=a for a,b in zip(pts,pts[1:])):raise ValueError()
-        return {'times':[float((p-pts[0])*tick) for p in pts],'width':video['width'],'height':video['height'],
+        width,height=display_size(video)
+        return {'times':[float((p-pts[0])*tick) for p in pts],'width':width,'height':height,
             'start':float(pts[0]*tick),'pts':pts,'time_base':str(tick),'nominal_rate':video.get('r_frame_rate','0/1'),
             'durations':durations,'fully_decoded':True,'audio_decoded':any(s['codec_type']=='audio' for s in metadata['streams'])}
     except (ValueError,KeyError,IndexError,ZeroDivisionError):
@@ -53,8 +55,9 @@ def decoded_evidence(path,settings,cancel,metadata,selection):
     audio packets still traverse the independent full-resolution integrity path.
     """
     video=next(s for s in metadata['streams'] if s['codec_type']=='video')
-    indices=sorted(set(selection['selected_indices']));scale=min(256/video['width'],256/video['height'],1)
-    width=max(2,int(video['width']*scale)//2*2);height=max(2,int(video['height']*scale)//2*2)
+    shown_width,shown_height=display_size(video) # FFmpeg auto-rotates before the scaled evidence branch
+    indices=sorted(set(selection['selected_indices']));scale=min(256/shown_width,256/shown_height,1)
+    width=max(2,int(shown_width*scale)//2*2);height=max(2,int(shown_height*scale)//2*2)
     expected=len(indices)*width*height*3
     if not indices or len(indices)>12 or indices[0]<0 or indices[-1]>=len(selection['manifest']['times']):
         raise Problem('EVIDENCE_TIMING_INVALID','The output evidence selection is invalid.',
@@ -84,15 +87,16 @@ def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separato
 
 
 def frame_manifest(path,settings,cancel):
-    raw=json.loads(command([settings.ffprobe,'-v','error','-select_streams','v:0','-show_frames',
-        '-show_entries','frame=best_effort_timestamp,best_effort_timestamp_time,duration,pkt_duration:stream=width,height,time_base,r_frame_rate','-of','json',str(path)],cancel,90))
+    from .frames import probe_frames
+    raw=probe_frames(path,settings,cancel) # one exact all-core decode, shared with sam.frame_info
     try:
         times=[float(f['best_effort_timestamp_time']) for f in raw['frames']]
         if not times or len(times)>15000 or not all(np.isfinite(times)) or any(b<=a for a,b in zip(times,times[1:])):raise ValueError()
         stream=raw['streams'][0];tick=Fraction(stream['time_base'])
         pts=[int(f['best_effort_timestamp']) for f in raw['frames']]
         if tick<=0 or any(b<=a for a,b in zip(pts,pts[1:])):raise ValueError()
-        return {'times':[float((p-pts[0])*tick) for p in pts],'width':stream['width'],'height':stream['height'],
+        width,height=display_size(stream) # decoded (auto-rotated) geometry, which extract() scales from
+        return {'times':[float((p-pts[0])*tick) for p in pts],'width':width,'height':height,
                 'start':float(pts[0]*tick),'pts':pts,'time_base':str(tick),'nominal_rate':stream.get('r_frame_rate','0/1'),
                 'durations':[f.get('duration',f.get('pkt_duration')) for f in raw['frames']]}
     except (KeyError,ValueError,IndexError,ZeroDivisionError):
@@ -108,7 +112,7 @@ def source_manifest(path,settings,cancel,existing,metadata,identity,cache=None):
     full inspection on ambiguity. Nothing is resampled to nominal frame rate.
     """
     if existing and 'pts' in existing:return existing
-    key=digest({'source':identity,'existing':existing,'version':1})
+    key=digest({'source':identity,'existing':existing,'version':2})
     if cache and Path(cache).is_file():
         try:
             saved=json.loads(Path(cache).read_text())
@@ -149,12 +153,31 @@ def extract(path,manifest,indices,settings,cancel,width=256):
     if expected>settings.sample_memory_bytes:
         raise Problem('EVIDENCE_MEMORY_BUDGET','Requested visual evidence exceeds the configured memory budget.',
                       'Reduce sample count or dimensions.',422)
+    # The same frames of the same file are requested by planning, preflight and review: decode once.
+    from .frames import identity
+    try:file_identity=identity(path)
+    except OSError:file_identity=None # the decode below reports the problem as before
+    key=digest({'file':file_identity,'indices':indices,'width':w,'height':h,'version':1})
+    cache=Path(path).with_name(Path(path).name+f'.samples-{key[:20]}.npz')
+    try:
+        if file_identity is None:raise OSError()
+        with np.load(cache,allow_pickle=False) as saved:
+            if str(saved['key'])==key and saved['pixels'].shape==(len(indices),h,w,3) and saved['pixels'].dtype==np.uint8:
+                return {i:frame for i,frame in zip(indices,saved['pixels'].copy())}
+    except (OSError,ValueError,KeyError):pass
     selection='+'.join(fr'eq(n\,{i})' for i in indices)
-    raw=command([settings.ffmpeg,'-v','error','-nostdin','-threads','4','-i',str(path),'-an','-vf',f'select={selection},scale={w}:{h}',
+    # -threads 0: all-core decode, byte-identical pixels to the previous fixed 4 threads, ~2.5x faster.
+    raw=command([settings.ffmpeg,'-v','error','-nostdin','-threads','0','-i',str(path),'-an','-vf',f'select={selection},scale={w}:{h}',
         '-frames:v',str(len(indices)),'-fps_mode','passthrough','-pix_fmt','rgb24','-f','rawvideo','-'],cancel,60,binary=True)
     if len(raw)!=expected:raise Problem('EVIDENCE_DECODE_FAILED','Decoded evidence does not match the selected frame identities.',
                                        'Inspect frame timing/decoder diagnostics; no model input was accepted.',422)
     pixels=np.frombuffer(raw,np.uint8).reshape(len(indices),h,w,3)
+    temporary=cache.with_name('.'+cache.name+'.'+str(time.monotonic_ns())+'.npz')
+    try:
+        if file_identity is None:raise OSError()
+        with temporary.open('wb') as stream:np.savez(stream,key=np.array(key),pixels=pixels)
+        temporary.replace(cache)
+    except OSError:temporary.unlink(missing_ok=True)
     return {i:frame for i,frame in zip(indices,pixels)}
 
 
@@ -162,7 +185,13 @@ def measure(pixels):
     rgb=pixels.astype(np.float32)/255;y=rgb@np.array([.2126,.7152,.0722],np.float32)
     hist=np.histogram(y,bins=16,range=(0,1))[0]/y.size
     grey=cv2.cvtColor(pixels,cv2.COLOR_RGB2GRAY)
-    return {'median_encoded_luma':float(np.median(y)),'p05_encoded_luma':float(np.quantile(y,.05)),
+    high=tonal.highlight_mask(y)
+    # Brightest region (shared tonal definition): what a "sky too bright" or "glare" issue is about.
+    brightest={'highlight_fraction':float(high.mean()),'highlight_luma':float(y[high].mean()),
+               'highlight_rgb':[float(v) for v in rgb[high].mean(axis=0)]} if high is not None else {
+               'highlight_fraction':0.,'highlight_luma':None,'highlight_rgb':None}
+    return {**brightest,'mean_chroma':float((rgb.max(axis=-1)-rgb.min(axis=-1)).mean()),
+            'median_encoded_luma':float(np.median(y)),'p05_encoded_luma':float(np.quantile(y,.05)),
             'p95_encoded_luma':float(np.quantile(y,.95)),'black_fraction':float(np.mean(y<=1/255)),
             'white_fraction':float(np.mean(y>=254/255)),
             'near_black_fraction':float(np.mean(y<=.02)),'near_white_fraction':float(np.mean(y>=.98)),
@@ -201,7 +230,7 @@ def plan(path,source,settings,cancel,*,proxy=None,shots=None,focus=(),cache=None
     with scan_path.open('rb') as stream:file_hash=hashlib.file_digest(stream,'sha256').hexdigest()
     budget={'scan':settings.sample_scan_frames,'count':settings.sample_count,'width':settings.sample_width,
             'memory':settings.sample_memory_bytes,'image_bytes':settings.sample_image_bytes}
-    key=digest({'file':file_hash,'source':source.sha256,'budget':budget,'shots':shots,'focus':focus,'version':2})
+    key=digest({'file':file_hash,'source':source.sha256,'budget':budget,'shots':shots,'focus':focus,'version':3})
     if cache and Path(cache).is_file():
         cached=json.loads(Path(cache).read_text())
         if cached.get('key')==key:return dict(cached,cache_hit=True,lookup_elapsed_seconds=time.monotonic()-started)
@@ -283,7 +312,7 @@ def paired(original,rendered,source,settings,cancel,selection,cache=None):
     def file_hash(path):
         with Path(path).open('rb') as stream:return hashlib.file_digest(stream,'sha256').hexdigest()
     key=digest({'source':file_hash(original),'rendered':file_hash(rendered),'indices':selection['selected_indices'],
-                'image_budget':settings.sample_image_bytes,'version':1})
+                'image_budget':settings.sample_image_bytes,'version':2})
     if cache and Path(cache).exists():
         value=json.loads(Path(cache).read_text())
         if value.get('key')==key:return value
@@ -302,10 +331,19 @@ def paired(original,rendered,source,settings,cancel,selection,cache=None):
         y=b[i].astype(np.float32)@np.array([.2126,.7152,.0722],np.float32)/255
         shadow=x<=np.quantile(x,.25);high=x>=np.quantile(x,.95)
         spread=lambda v:float(np.quantile(v,.9)-np.quantile(v,.1))
-        details.append({'frame_index':i,'source_shadow_spread':spread(x[shadow]),'render_shadow_spread':spread(y[shadow]),
+        detail={'frame_index':i,'source_shadow_spread':spread(x[shadow]),'render_shadow_spread':spread(y[shadow]),
             'source_shadow_clipped_fraction':float(np.mean(x[shadow]<=1/255)),
             'render_shadow_clipped_fraction':float(np.mean(y[shadow]<=1/255)),
-            'source_highlight_spread':spread(x[high]),'render_highlight_spread':spread(y[high])})
+            'source_highlight_spread':spread(x[high]),'render_highlight_spread':spread(y[high])}
+        # Pixel-paired brightest region: the SAME source pixels before and after, so the critic can see
+        # whether a bright sky/sand/window area actually got darker or brighter, and its colour.
+        bright=tonal.highlight_mask(x)
+        if bright is not None:
+            rgb_a=a[i].astype(np.float32)/255;rgb_b=b[i].astype(np.float32)/255
+            detail.update(brightest_region_fraction=float(bright.mean()),source_brightest_luma=float(x[bright].mean()),
+                render_brightest_luma=float(y[bright].mean()),source_brightest_rgb=[float(v) for v in rgb_a[bright].mean(axis=0)],
+                render_brightest_rgb=[float(v) for v in rgb_b[bright].mean(axis=0)])
+        details.append(detail)
     common={i['frame_index'] for i in source_images}&{i['frame_index'] for i in output_images}
     if not common:raise Problem('REVIEW_IMAGE_BUDGET','No aligned source/rendered images fit the budget.','Increase the review image budget.',422)
     result={'key':key,'source_images':[i for i in source_images if i['frame_index'] in common],

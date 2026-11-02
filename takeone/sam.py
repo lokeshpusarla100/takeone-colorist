@@ -20,7 +20,7 @@ from openai import AsyncOpenAI, APIError
 from meta_sam_parser import parse_responses_stream, video_segmentation_format, decode_mask_to_raster
 
 from .errors import Problem
-from .media import command, probe
+from .media import command, display_size, probe, rotation_supported
 from .provider import MuseProvider
 
 
@@ -54,9 +54,8 @@ def check(cancel):
 
 
 def frame_info(path,settings,cancel,*,interval_tolerance=.00002,require_cfr=True):
-    raw=json.loads(command([settings.ffprobe,'-v','error','-select_streams','v:0','-show_frames',
-        '-show_entries','frame=best_effort_timestamp,best_effort_timestamp_time:stream=width,height,avg_frame_rate,r_frame_rate,time_base:format=start_time',
-        '-of','json',str(path)],cancel,90))
+    from .frames import probe_frames
+    raw=probe_frames(path,settings,cancel) # one exact all-core decode, shared with evidence.frame_manifest
     try:
         pts=[float(f['best_effort_timestamp_time']) for f in raw['frames']]
         stream=raw['streams'][0]
@@ -73,7 +72,8 @@ def frame_info(path,settings,cancel,*,interval_tolerance=.00002,require_cfr=True
     except (KeyError,ValueError,ZeroDivisionError,IndexError):
         raise Problem('SAM_TIMING_UNSUPPORTED','SAM preview currently requires a constant-frame-rate clip with valid frame timestamps.',
                       'Use a CFR source. No segmentation request was made.',422)
-    return {'width':stream['width'],'height':stream['height'],'rate':str(rate),'pts':pts,'normalized':normalized,
+    width,height=display_size(stream) # decoded (auto-rotated) geometry, the space masks and mattes live in
+    return {'width':width,'height':height,'rate':str(rate),'pts':pts,'normalized':normalized,
             'cfr':cfr,'time_base':stream.get('time_base','1/1000000'),
             'ticks':[f.get('best_effort_timestamp') for f in raw['frames']],
             'nominal_rate':stream.get('r_frame_rate',str(rate)),
@@ -84,17 +84,17 @@ def mapping(directory,source,settings,cancel):
     original=directory/'source.bin'; proxy=directory/'analysis.mp4'
     if checksum(original)!=source.sha256:
         raise Problem('SOURCE_CHANGED','The original no longer matches the prepared source.','Re-import the source.',409)
-    if source.rotation!=0:
-        raise Problem('SAM_GEOMETRY_UNSUPPORTED','Rotated source metadata is not verified for SAM mapping yet.',
-                      'Use an upright source with zero rotation metadata.',422)
+    if not rotation_supported(source.rotation):
+        raise Problem('SAM_GEOMETRY_UNSUPPORTED','Only quarter-turn rotation metadata is supported for SAM mapping.',
+                      'Use footage rotated in 90-degree steps, or an upright export.',422,rotation=source.rotation)
     info_path=directory/'source-frame-info.json'
     try:saved=json.loads(info_path.read_text()) if info_path.exists() else {}
     except (ValueError,OSError):saved={}
-    a=saved.get('info') if saved.get('source')==source.sha256 and saved.get('version')==1 else None
+    a=saved.get('info') if saved.get('source')==source.sha256 and saved.get('version')==2 else None
     required={'width','height','rate','pts','normalized','cfr','time_base','ticks','nominal_rate','format_start'}
     if not isinstance(a,dict) or not required<=a.keys():
         a=frame_info(original,settings,cancel,require_cfr=False)
-        atomic(info_path,{'source':source.sha256,'version':1,'info':a})
+        atomic(info_path,{'source':source.sha256,'version':2,'info':a})
     if not a['cfr'] and any(y-x<2 for x,y in zip(a['ticks'],a['ticks'][1:])):
         raise Problem('SAM_TIMING_RESOLUTION','Source frames are too close in their time base for unambiguous mask scheduling.',
                       'No segmentation was requested. Use a higher-resolution source time base.',422)

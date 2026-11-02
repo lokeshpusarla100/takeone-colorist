@@ -352,3 +352,32 @@ def test_critic_revision_that_would_lift_highlights_stops_cleanly_and_keeps_the_
         assert result['selected_candidate_id']==first['id']
         event=next(e for e in result['events'] if e['title']=='Revision not rendered')
         assert 'white_point' in event['reason'] and event['details']['violating_layers']=='parameters'
+
+
+def test_highlight_ceiling_darkens_the_rendered_sky_through_the_real_lut(settings,hazy_sky_clip):
+    import cv2
+    class SkyDown(Planner):
+        def grade(self,*args,**kwargs):
+            proposal,usage=super().grade(*args,**kwargs)
+            set_controls(proposal,dict(GENTLE,contrast=1.15,highlight_ceiling=.62))
+            return proposal,usage
+    with TestClient(create_app(settings,SkyDown(),Masks()),base_url='http://127.0.0.1') as client:
+        result=generate(client,start(client,upload(client,hazy_sky_clip),'explicit dark subdued sky'))
+        assert result['status']=='render_ready',result.get('error')
+        candidate=result['candidates'][0]
+        assert candidate['recipe']['proposal']['parameters']['highlight_ceiling']==.62
+        def frame(path):
+            video=cv2.VideoCapture(str(path));ok,image=video.read();video.release();assert ok
+            return image.astype(np.float32)[...,::-1]/255
+        from takeone.color_processing import apply_rgb
+        from takeone.contracts import GradeParameters
+        weights=np.array([.2126,.7152,.0722],np.float32)
+        source=frame(hazy_sky_clip);rendered=frame(settings.workspace/result['id']/'candidates'/candidate['id']/'grade.mp4')
+        predicted=apply_rgb(source,GradeParameters(**candidate['recipe']['proposal']['parameters']))
+        sky,ground=(slice(4,40),slice(None)),(slice(60,104),slice(None))
+        before,after,model=source@weights,rendered@weights,predicted@weights
+        for region in [sky,ground]: # the encoded LUT render matches the operator, within 8-bit/yuv420 encoding error
+            assert abs(np.median(after[region])-np.median(model[region]))<.02
+        sky_drop=np.median(before[sky])-np.median(after[sky]);ground_drop=np.median(before[ground])-np.median(after[ground])
+        assert np.median(before[sky])>.8 and sky_drop>.25 and sky_drop>ground_drop+.1 # the pale sky darkens most
+        assert np.ptp(np.quantile(after[sky],[.05,.95]))>.25*np.ptp(np.quantile(before[sky],[.05,.95])) # sky gradient survives

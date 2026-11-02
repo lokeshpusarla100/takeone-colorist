@@ -15,26 +15,35 @@ from .usage import usage_details
 
 
 # What each control does in the shipped v3 operator (color_processing.apply_rgb). Pinned by tests/test_tone_semantics.py:
-# white stays white under every control, and lowering white_point or raising contrast pushes upper tones UP.
+# every control except highlight_ceiling keeps white at white; lowering white_point or raising contrast pushes upper tones UP.
 CONTROL_SEMANTICS = {
     "contrast": "0.75..1.25; neutral 1.0; bounded sigmoid x^c/(x^c+(1-x)^c), no fixed-pivot subtraction. Above 1 it deepens shadows and "
                 "LIFTS upper highlights (S-curve); it never darkens the brightest pixels.",
     "gamma": "0.8..1.2; neutral 1.0; encoded luminance power 1/gamma: above 1 lifts midtones, below 1 darkens. Pure white stays white.",
     "saturation": "0..1.5; neutral 1.0; Rec.709-weighted encoded RGB channel mixing",
     "brightness_gain": "0.65..1.35, neutral 1.0. Bounded display-domain brightness, not physical relighting. Maps black to black and white to white: "
-                       "below 1 it darkens midtones and upper midtones only and cannot darken pure highlights.",
+                       "below 1 it darkens midtones and upper midtones only and cannot darken pure highlights (use highlight_ceiling).",
     "cooling": "-0.15..0.15, neutral 0. Positive reduces red and increases blue using explicit Rec.709 RGB gains; not calibrated Kelvin. "
-               "On bright pixels the raised blue/green channel saturates, so strong cooling of a pale sky gives a flat cyan-white, not a dark blue.",
+               "On bright pixels the raised blue/green channel saturates, so strong cooling of a pale sky gives a flat cyan-white, not a dark blue, "
+               "unless highlight_ceiling first brings the sky down.",
     "black_point": "0..0.15 input luma level. Nonzero deliberately discards lower levels; use only when the intended look permits it.",
     "white_point": "0.75..1 input luma level. Source luma AT OR ABOVE this value becomes pure white BEFORE tone and colour, so LOWERING it "
-                   "BRIGHTENS and flattens highlights (bright sky, clouds, glare turn white). It can never darken, subdue or protect highlights. "
+                   "BRIGHTENS and flattens highlights (sky, clouds, sand, snow, windows, signage, glare turn white). It can never darken, subdue or protect highlights. "
                    "Keep 1.0 unless deliberate highlight clipping or lift is the intent.",
+    "highlight_ceiling": "0.6..1, neutral 1.0. The ONLY control that darkens highlights: a smooth output shoulder t-(1-c)*t^2 applied after "
+                         "tone, so pure white becomes c, a 0.80 tone drops by about 0.64*(1-c), a 0.50 tone by 0.25*(1-c) and shadows barely move. "
+                         "Use it to subdue or darken bright areas such as sky, clouds, sand, snow, windows or glare (in a localized layer when the subject must stay bright). "
+                         "Bright texture is compressed (slope 2c-1 at white), never clipped; 0.6 is the strongest supported value.",
 }
 HIGHLIGHT_HANDLING = (
-    "No supported control makes near-white pixels dark: even with every darkening control at its limit a 0.90 luma highlight only falls to about 0.74 "
-    "(contrast 0.75) or 0.88 (contrast 1.25). If the brief requires a dark or subdued sky/clouds/water glare and the source region is near white, that is a "
-    "required instruction these controls cannot execute: list it in unfulfilled_requests instead of lowering white_point or raising contrast, which brighten it. "
-    "A layer that darkens midtones but brightens highlights is rejected before rendering unless intent.highlight_policy is intentional_lift or intentional_clipping."
+    "To darken or subdue highlights (sky, clouds, sand, snow, windows, signage, glare) use highlight_ceiling; never lower white_point or raise contrast, which brighten them. "
+    "Without highlight_ceiling a 0.90 luma highlight only falls to about 0.88 with punchy contrast (1.25); with highlight_ceiling 0.6 and the same "
+    "darkening controls it reaches about 0.57, a dark steel tone once cooled, while texture is compressed rather than clipped. A global shoulder "
+    "also lowers upper midtones and a bright subject, so put a strong ceiling on the surroundings/sky layer of a localized plan when the subject "
+    "must stay bright. If the brief needs highlights darker than highlight_ceiling 0.6 can deliver, list that in unfulfilled_requests. "
+    "Highlight policy is checked before rendering on the footage's own brightest pixels, for darkening layers only (a brightening grade is never "
+    "blocked here): subdue rejects any visible highlight brightening; preserve_detail/review reject brightening caused by a lowered white_point; "
+    "intentional_lift/intentional_clipping are never rejected."
 )
 
 
@@ -149,11 +158,13 @@ class MuseProvider:
                         "lift the output black floor or recover shadow detail. white_point is an INPUT highlight cutoff: values "
                         "below 1 can discard bright information. Prefer neutral endpoints unless this loss is explicitly intended "
                         "and compatible with the SAME execution_limits. Do not describe input cutoff clipping as lifted blacks. "
-                        "Never use white_point or higher contrast to subdue, protect or darken highlights, sky or clouds: "
+                        "Never use white_point or higher contrast to subdue, protect or darken highlights or bright areas: "
                         "source luma at or above white_point becomes pure white, so lowering it, like raising contrast, makes bright regions brighter and flatter. "
-                        "Set intent.highlight_policy to preserve_detail when bright detail must survive, intentional_lift only when brighter highlights are wanted, "
-                        "intentional_clipping only when clipping is acceptable. A layer that darkens midtones while brightening highlights is rejected "
-                        "before rendering under any other policy; follow highlight_handling and report unattainable darker-highlight requests as unfulfilled_requests. "
+                        "highlight_ceiling is the control that darkens highlights; pair it with contrast so the S-curve does not undo it. "
+                        "Set intent.highlight_policy to subdue when the brief asks for darker, subdued, controlled or less dominant highlights or bright areas, "
+                        "preserve_detail when bright detail must survive, intentional_lift only when brighter highlights are wanted (high-key, punchy pop), "
+                        "intentional_clipping only when clipping is acceptable. Choose it from the brief, not the footage; follow highlight_handling and report "
+                        "unattainable darker-highlight requests as unfulfilled_requests. "
                         "If a declared clipping bound cannot coexist with a requested look using supported controls, request a "
                         "targeted adjustment or report the limitation; never raise preservation bounds merely to pass. Review actual previous "
                         "candidate measurements and creative feedback in execution_capabilities. Current request epoch and "
@@ -164,6 +175,13 @@ class MuseProvider:
                         "Execution capabilities are current; older brief tool-limit notes may be historical, but user constraints never are. "
                         "use mode=global and local=null, with no segmentation. If subject/background need DIFFERENT "
                         "treatments or explicit subject protection, use mode=localized with a concrete SAM noun phrase, "
+                        "SAM concepts (local.concept and every region concept) must be SHORT common noun phrases SAM can see: 1-3 words naming "
+                        "an object or material class, optionally one colour/kind word (rocks, rock arch, sky, water, sea, trees, building, "
+                        "yellow boat, person). Never put clauses, relations, positions, lighting or mood in a concept (not 'dark coastal rocks "
+                        "forming natural arch', 'sky above horizon', 'water with waves'); that detail belongs in the treatment. Give "
+                        "concept_alternatives: up to 3 simpler fallbacks, most specific first (concept 'rock arch' -> ['rocks','rock']). "
+                        "Use selection=all_matches for materials or areas made of several pieces (rocks, trees, clouds, water, sky); "
+                        "single_instance only for one countable subject that must be told apart from similar ones. "
                         "one or more necessary time intervals, and absolute foreground/background controls. Example: "
                         "dark/cool surroundings while preserving a red motorcycle needs local protection, not a global substitute. "
                         "Darkening sky while preserving buildings can target sky, with other pixels unchanged. "
@@ -172,10 +190,22 @@ class MuseProvider:
                         "Reuse an available mask concept when it identifies the same intended subject; never change the target merely to hit a cache. "
                         "single_instance requires an unambiguous ID in each shot; all_matches is for an explicitly whole concept. "
                         "For a region being changed, such as sky, set preserve_subject_color=false and keep the other layer neutral as needed. "
+                        "When different areas need different treatments (for example sky, water, foliage and buildings around a subject), "
+                        "add local.regions (up to 4, only when multi_region_grade is in execution_capabilities): each is a concrete SAM noun "
+                        "phrase with its own treatment; all share the plan's intervals and feather. Precedence where masks overlap: the subject, "
+                        "then regions in list order, then background, which covers everything else. Put the most specific region first. "
+                        "Use regions instead of compromising one background treatment, and only for areas the brief treats differently; "
+                        "each region costs one SAM run and must be tracked in every required frame. "
                         "preserve_subject_color=true requires saturation=1 and cooling=0; v3 luminance-only tone/levels "
                         "and peak-limited common RGB gain can adjust detail while retaining channel proportions. "
                         "Preserve lamp/indicator appearance as required; technical measurements do not prove semantics. "
                         "Selective lighting means display-domain gain only, never new illumination, shadows or reconstruction. "
+                        "Read lighting wording by its executable part: requests such as sun lighting, sunlit glow, warmer light on the rocks "
+                        "or brighter light on a subject ARE executable as warmer/brighter display-domain treatment of that area (a localized "
+                        "region, e.g. 'sunlit rocks' or 'sun'), so plan that and put only the physical part (new light sources, cast shadows, "
+                        "light rays, changed light direction) in limitations. List lighting in unfulfilled_requests only when the user "
+                        "explicitly requires physical relighting itself. Read obvious typos by intent (\"maks\" in a lighting sentence means "
+                        "make/masks), and do not refuse a request because of spelling. "
                         "No timeline edits, object recolouring or shot matching. If unavailable, state the limitation; do not "
                         "label a global approximation as localized. Explain changed controls in ordinary "
                         "If a required user instruction cannot be executed, list it in unfulfilled_requests; this stops rendering "
@@ -213,6 +243,8 @@ class MuseProvider:
         context={'brief':brief.model_dump(mode='json'),'candidate_id':candidate.id,
             'plan':candidate.recipe.proposal.model_dump(mode='json'),'technical_result':candidate.validation,
             'paired_diagnostics':evidence_data['measurements'],'detail_retention':evidence_data['detail_retention'],
+            'tonal_levels':evidence_data.get('tonal_levels'),
+            'mask_concepts':sorted({o['concept'] for o in evidence_data.get('mask_overlay_images',[])}),
             'current_video_feedback':list(feedback),'uncertainty':evidence_data['uncertainty'],
             'execution_capabilities':candidate.validation.get('execution_capabilities',{}),'highlight_handling':HIGHLIGHT_HANDLING,'control_semantics':CONTROL_SEMANTICS,
             'allowed_candidate_ids':[candidate.id]+([previous['id']] if previous else [])}
@@ -224,6 +256,11 @@ class MuseProvider:
                 ref=f'{role}:{frame["frame_index"]}';allowed.add(ref)
                 content += [{'type':'text','text':f'{ref} at {frame["time"]:.6f}s'},
                             {'type':'image_url','image_url':{'url':frame['url'],'detail':'low'}}]
+        for frame in evidence_data.get('mask_overlay_images',[]):
+            ref=f'mask_overlay_{frame["overlay"]}:{frame["frame_index"]}';allowed.add(ref)
+            content += [{'type':'text','text':f'{ref} at {frame["time"]:.6f}s: source frame with the SAM mask for concept '
+                         f'"{frame["concept"]}" tinted and outlined ({frame["coverage"]:.1%} of the frame)'},
+                        {'type':'image_url','image_url':{'url':frame['url'],'detail':'low'}}]
         context['allowed_evidence_ids']=sorted(allowed)
         context=self.prompt_context('critic',context,brief.project_id)
         content.insert(0,{'type':'text','text':json.dumps(context)})
@@ -241,20 +278,29 @@ class MuseProvider:
                     "revision_plan using the existing typed controls/capabilities. Keep unaffected controls, subject and intervals unchanged. "
                     "Keep existing execution_limits unchanged; do not remove or raise a preservation bound to make a revision pass. "
                     "Positive black_point is an INPUT shadow cutoff, not an output black-floor lift. Lowering white_point maps "
-                    "source highlights at or above it to pure white: it BRIGHTENS and flattens highlights and can never subdue a bright sky, "
-                    "so never propose it, or higher contrast, to darken highlights, sky or clouds. If highlights are too bright and no supported control "
-                    "can lower them (see execution_capabilities and highlight_handling), mark that issue correctable=false instead of escalating the same controls. "
+                    "source highlights at or above it to pure white: it BRIGHTENS and flattens highlights and can never subdue a bright area, "
+                    "so never propose it, or higher contrast, to darken highlights or bright areas; lower highlight_ceiling instead. If highlights are still too "
+                    "bright with highlight_ceiling already at 0.6 (see highlight_handling), mark that issue correctable=false instead of escalating the same controls. "
                     "Both input cutoffs can discard source information; use only when compatible with the same bounds. "
                     "Use execution_capabilities as the authoritative tool envelope. Region views are crops of the same "
                     "paired real frames, not independent observations or ground-truth masks. "
                     "A revise decision needs correctable evidence-supported issues. Avoid repeating "
                     "unchanged plans. Prefer the supplied previous candidate ID if the current result worsens it; do not "
                     "automatically approve anything. Sufficient means ready for human review, never professionally verified. "
-                    "Return no commands, filters, new content, physical relighting or unsupported transforms."},
+                    "Return no commands, filters, new content, physical relighting or unsupported transforms. "
+                    "For every issue set target to the whole-frame direction it needs (darker_highlights, cooler, deeper_shadows, "
+                    "more_contrast, ...) or null when it is not a whole-frame tonal/colour direction (subject separation, edges, a single "
+                    "object). tonal_levels gives source, candidate and previous p05/median/p95, median RGB, chroma and the brightest "
+                    "region's luma/RGB; check them before claiming a direction improved, and do not keep requesting a direction the "
+                    "previous revision failed to move. The system measures each targeted issue on the next render and stops "
+                    "revisions that do not visibly move it. For each mask concept, inspect its mask_overlay images and add one "
+                    "mask_assessments entry: matches only if the tint covers the intended object and little else; partial if it "
+                    "misses parts or spills onto other things; wrong_object if it marks something else; not_evaluable if unclear."},
                     {'role':'user','content':content}],response_format=CreativeReview,reasoning_effort='low',max_tokens=4096))
             review=result.choices[0].message.parsed
             if review is None:raise Problem('MUSE_INVALID_REVIEW','Muse returned no usable creative review.','The rendered candidate remains available for manual review.',502)
-            if any(set(i.evidence_ids)-allowed for i in review.issues) or review.preferred_candidate_id not in {None,*context['allowed_candidate_ids']}:
+            if (any(set(i.evidence_ids)-allowed for i in review.issues) or any(set(m.evidence_ids)-allowed for m in review.mask_assessments)
+                or review.preferred_candidate_id not in {None,*context['allowed_candidate_ids']}):
                 raise Problem('MUSE_INVALID_REVIEW','The review cited evidence or a candidate it was not shown.','Rendered evidence is retained; review manually or retry explicitly.',502)
             return review,result.usage.model_dump() if result.usage else {}
 

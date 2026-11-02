@@ -146,7 +146,7 @@ def test_darkening_layer_that_lifts_highlights_is_blocked_and_the_cause_is_measu
     report=result['report']
     assert result['proposal'] is None and report['status']=='blocked' and report['blocked_by']=='highlight_lift'
     layer=report['highlights']['layers']['parameters']
-    assert layer['darkening'] and layer['median_change']<-.03 and layer['highlight_change']>.03
+    assert layer['darkening'] and layer['mid_grey_change']<-.02 and layer['highlight_change']>.02 and layer['rule']=='white_point_cutoff'
     assert list(layer['drivers'])[0]=='white_point' # largest single cause comes first
     assert layer['drivers']['white_point']['lift_removed_if_neutral']>.05
     assert 'white_point' in report['reason'] and 'unfulfilled' in report['reason']
@@ -209,3 +209,111 @@ def test_new_channel_clipping_is_reported_but_does_not_block_by_itself():
     layer=result['report']['highlights']['layers']['parameters']
     assert result['proposal'] is not None and layer['darkening'] is False
     assert layer['new_channel_clip_fraction']>.05 # luma-based white_fraction misses this cyan-white clip
+
+
+def test_block_suggests_a_highlight_ceiling_that_actually_passes_without_applying_it():
+    plan=highlight_recipe(**SUBDUE_THE_SKY)
+    blocked=prepare(plan,{70:hazy_sky_frame()})
+    suggestion=blocked['report']['highlights']['layers']['parameters']['suggested_highlight_ceiling']
+    assert suggestion is not None and .6<=suggestion<1 and 'highlight_ceiling' in blocked['report']['reason']
+    assert plan.proposal.parameters.highlight_ceiling==1 # suggestion only; creative controls are never changed silently
+    repaired=highlight_recipe(**SUBDUE_THE_SKY,highlight_ceiling=suggestion)
+    assert prepare(repaired,{70:hazy_sky_frame()})['proposal'] is not None
+
+
+def test_a_darkening_plan_that_uses_the_ceiling_subdues_highlights_and_passes():
+    plan=highlight_recipe(contrast=1.15,gamma=.9,brightness_gain=.85,cooling=.15,highlight_ceiling=.62)
+    result=prepare(plan,{70:hazy_sky_frame()})
+    layer=result['report']['highlights']['layers']['parameters']
+    assert result['proposal'] is not None and layer['darkening'] and layer['highlight_change']<-.15
+    assert layer['new_channel_clip_fraction']==0 # the cooled sky no longer clips to cyan-white
+
+
+# ---- Generic scene classes: nothing above is specific to one video --------------------------
+
+def _ramp(h,w,a,b,rng):return (np.linspace(a,b,w)[None,:]+rng.normal(0,4,(h,w))).clip(0,255)
+
+
+def beach(rng):   # bright sky and sand fill most of the frame; p95 is already near white
+    f=np.zeros((144,256,3));f[:50]=_ramp(50,256,215,240,rng)[...,None]*[.95,1,1.05]
+    f[50:93]=_ramp(43,256,90,140,rng)[...,None]*[.7,1,1.1];f[93:]=_ramp(51,256,190,225,rng)[...,None]*[1.05,1,.85]
+    return f.clip(0,255).astype(np.uint8)
+
+
+def city_day(rng):
+    f=np.zeros((144,256,3));f[:30]=_ramp(30,256,200,230,rng)[...,None];f[30:110]=_ramp(80,256,70,150,rng)[...,None]
+    f[110:]=_ramp(34,256,25,60,rng)[...,None];f[40:100:12,10:250:16]=245
+    return f.clip(0,255).astype(np.uint8)
+
+
+def city_night(rng,lights=(245,245,240)):  # dark frame; bright lights cover only a few percent
+    f=np.zeros((144,256,3));f[:]=_ramp(144,256,15,70,rng)[...,None]*[.9,.95,1.15]
+    ys,xs=rng.integers(0,144,1200),rng.integers(0,256,1200);f[ys,xs]=lights
+    return f.clip(0,255).astype(np.uint8)
+
+
+SCENES={'beach':beach,'city_day':city_day,'city_night':city_night,'hazy_sky':lambda rng:hazy_sky_frame()}
+WHITE_POINT_BUG=dict(contrast=1.2,gamma=.85,brightness_gain=.85,white_point=.9,black_point=.03)
+BRIGHTEN=dict(contrast=1.05,gamma=1.12,brightness_gain=1.2,cooling=-.03)
+PUNCHY=dict(contrast=1.2,gamma=.95,brightness_gain=.95)
+SUBDUED=dict(contrast=1.15,gamma=.9,brightness_gain=.85,cooling=.1,highlight_ceiling=.65)
+
+
+def scene(kind):
+    rng=np.random.default_rng(3);return {i:SCENES[kind](rng) for i in range(4)}
+
+
+def verdict(controls,kind,policy='review'):
+    result=prepare(highlight_recipe(policy=policy,limits=False,**controls),scene(kind))
+    return 'block' if result['proposal'] is None else 'pass'
+
+
+@pytest.mark.parametrize('kind',list(SCENES))
+@pytest.mark.parametrize('policy',['review','preserve_detail','subdue','intentional_lift','intentional_clipping'])
+def test_a_brighten_request_is_never_blocked_by_the_highlight_gate_on_any_footage(kind,policy):
+    assert verdict(BRIGHTEN,kind,policy)=='pass'
+
+
+@pytest.mark.parametrize('kind',['beach','city_day','city_night','hazy_sky'])
+def test_lowering_white_point_on_a_darkening_grade_is_caught_on_every_footage_class(kind):
+    assert verdict(WHITE_POINT_BUG,kind)=='block'
+
+
+@pytest.mark.parametrize('kind',list(SCENES))
+def test_a_contrast_only_punchy_look_passes_unless_the_plan_declares_subdue(kind):
+    assert verdict(PUNCHY,kind,'review')=='pass' and verdict(PUNCHY,kind,'intentional_lift')=='pass'
+
+
+def test_subdue_policy_rejects_contrast_lift_where_it_is_visible():
+    assert verdict(PUNCHY,'city_day','subdue')=='block' and verdict(PUNCHY,'hazy_sky','subdue')=='block'
+
+
+@pytest.mark.parametrize('kind',list(SCENES))
+@pytest.mark.parametrize('policy',['review','subdue'])
+def test_subduing_with_the_highlight_ceiling_passes_on_every_footage(kind,policy):
+    assert verdict(SUBDUED,kind,policy)=='pass'
+
+
+def test_darkening_is_judged_from_the_plan_not_from_bright_footage():
+    """On a beach, a lowered white_point lifts the sand that fills the 'midtones'; the plan still darkens 18% grey."""
+    result=prepare(highlight_recipe(limits=False,**WHITE_POINT_BUG),scene('beach'))
+    layer=result['report']['highlights']['layers']['parameters']
+    assert layer['midtone_change']>0 and layer['mid_grey_change']<-.02 and layer['darkening']
+
+
+def test_small_bright_areas_are_measured_from_their_own_pixels():
+    layer=prepare(highlight_recipe(limits=False,**WHITE_POINT_BUG),scene('city_night'))['report']['highlights']['layers']['parameters']
+    assert layer['assessable_frames']==4 and layer['highlight_fraction']<.05 and layer['highlight_change']>.02
+
+
+def test_amber_lights_a_lowered_white_point_barely_changes_are_not_flagged():
+    rng=np.random.default_rng(3);frames={i:city_night(rng,lights=(250,200,120)) for i in range(4)}
+    layer=prepare(highlight_recipe(limits=False,**WHITE_POINT_BUG),frames)['report']['highlights']['layers']['parameters']
+    assert layer['highlight_change']<=.02 and not layer['highlights_lifted']
+
+
+def test_frames_without_real_highlights_are_not_assessed():
+    dark={0:np.full((64,64,3),40,np.uint8),1:np.full((64,64,3),60,np.uint8)}
+    result=prepare(highlight_recipe(limits=False,**WHITE_POINT_BUG),dark)
+    layer=result['report']['highlights']['layers']['parameters']
+    assert result['proposal'] is not None and layer['assessable_frames']==0 and layer['highlight_change'] is None

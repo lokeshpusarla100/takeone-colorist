@@ -82,7 +82,8 @@ def prepare_execution(source,output,recipe,original,settings,cancel,cache_dir=No
         for layer,before_params,after_params in [
             ('parameters',recipe.proposal.parameters,proposal.parameters),
             ('foreground',recipe.proposal.local.foreground,proposal.local.foreground),
-            ('background',recipe.proposal.local.background,proposal.local.background)]:
+            ('background',recipe.proposal.local.background,proposal.local.background),
+            *((f'region:{a.concept}',a.treatment,b.treatment) for a,b in zip(recipe.proposal.local.regions,proposal.local.regions))]:
             for field in ['black_point','white_point']:
                 if getattr(before_params,field)!=getattr(after_params,field):
                     changed[f'{layer}.{field}']={'from':getattr(before_params,field),'to':getattr(after_params,field)}

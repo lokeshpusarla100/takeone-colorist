@@ -94,7 +94,7 @@ def inspect_source(path: Path, name: str, digest: str, settings: Settings, cance
         raise Problem("SOURCE_LIMIT", "This video exceeds the initial processing limits.",
                       "Use a clip up to " + str(settings.max_duration) + " seconds and up to 4K.", 422,
                       duration=duration, width=width, height=height)
-    rotation = next((float(s["rotation"]) for s in video.get("side_data_list", []) if "rotation" in s), 0.0)
+    rotation = display_rotation(video)
     notes = []
     transfer = video.get("color_transfer")
     if transfer in {"smpte2084", "arib-std-b67"}:
@@ -169,13 +169,34 @@ def global_grade(directory: Path, settings: Settings, cancel: threading.Event, *
     return output
 
 
+def display_rotation(stream) -> float:
+    """Display-matrix rotation of an ffprobe video stream (side data, or the legacy rotate tag)."""
+    for item in stream.get("side_data_list") or []:
+        if "rotation" in item:
+            return float(item["rotation"])
+    tag = (stream.get("tags") or {}).get("rotate")
+    return float(tag) if tag not in (None, "") else 0.0
+
+
+def display_size(stream) -> tuple[int, int]:
+    """Width/height as decoded by FFmpeg/OpenCV, which both auto-rotate: a portrait phone clip
+    stored as 3840x2160 with rotation -90 is decoded, analysed, masked and rendered as 2160x3840."""
+    width, height = int(stream["width"]), int(stream["height"])
+    return (height, width) if abs(display_rotation(stream)) % 180 == 90 else (width, height)
+
+
+def rotation_supported(rotation: float) -> bool:
+    """Quarter-turn rotations are applied identically by every decoder in the pipeline."""
+    return abs(rotation) % 90 == 0
+
+
 def capabilities(source: Source):
     supported = source.pixel_format == "yuv420p" and source.color_transfer == "bt709" and source.color_primaries == "bt709"
     return {
-        "operations": (["global_grade","regional_grade"] if source.rotation==0 else ["global_grade"]) if supported else [],
+        "operations": (["global_grade","regional_grade"] if rotation_supported(source.rotation) else ["global_grade"]) if supported else [],
         "limitations": [
             "SDR Rec.709 luminance tone, black/white points, bounded brightness and OCIO CDL saturation/RGB balance are supported. These are not calibrated scene-exposure or Kelvin estimates.",
-            "Localized grading requires upright footage, a verified frame-index/native-PTS mapping and complete unambiguous SAM masks. Irregular source timing uses a separate tracking proxy; source timing is preserved. No physical relighting, reconstruction or shot matching.",
+            "Rotation metadata in quarter turns (portrait phone video) is applied before analysis, masks and rendering. Localized grading requires a verified frame-index/native-PTS mapping and complete unambiguous SAM masks. Irregular source timing uses a separate tracking proxy; source timing is preserved. No physical relighting, reconstruction or shot matching.",
             *source.technical_notes,
         ],
         "supports_look_previews": False,

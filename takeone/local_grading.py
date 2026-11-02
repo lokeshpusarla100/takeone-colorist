@@ -110,15 +110,16 @@ def raster(records,width,height):
     return result,ids
 
 
-def prepare_matte(proxy,output,source,evidence,records,plan,settings,cancel,*,adaptive=False):
+def prepare_matte(proxy,output,source,evidence,records,plan,settings,cancel,*,adaptive=False,name='matte'):
+    """Encode and validate one lossless matte; name separates the subject matte from region mattes."""
     mapping=evidence['frame_map'];w,h=mapping['proxy']['width'],mapping['proxy']['height']
     capture=cv2.VideoCapture(str(proxy));last_gray=last_mask=last_ids=None
     cuts=set(evidence['cut_frames']);unstable=[];warnings=[];active=0;uncertain_flow=[]
     flow_scale=min(160/w,160/h,1);fw,fh=max(8,int(w*flow_scale)),max(8,int(h*flow_scale))
     args=[settings.ffmpeg,'-v','error','-y','-f','rawvideo','-pixel_format','gray16le','-video_size',f'{source.width}x{source.height}',
-          '-framerate',mapping['proxy']['rate'],'-i','-','-an','-c:v','ffv1','-threads','2','-pix_fmt','gray16le',str(output/'matte.partial.mkv')]
+          '-framerate',mapping['proxy']['rate'],'-i','-','-an','-c:v','ffv1','-threads','2','-pix_fmt','gray16le',str(output/f'{name}.partial.mkv')]
     output.mkdir(parents=True,exist_ok=True)
-    with (output/'matte-encode.log').open('wb') as log:
+    with (output/f'{name}-encode.log').open('wb') as log:
         process=subprocess.Popen(args,stdin=subprocess.PIPE,stderr=log)
         try:
             for index in range(mapping['frame_count']):
@@ -161,12 +162,12 @@ def prepare_matte(proxy,output,source,evidence,records,plan,settings,cancel,*,ad
                 process.stdin.write(alpha.tobytes())
             if capture.read()[0]:raise Problem('LOCAL_PROXY_DECODE','Proxy has extra unmapped frames.','Prepare the source again.',422)
             process.stdin.close()
-            if process.wait(timeout=90):raise Problem('LOCAL_MATTE_ENCODE','FFmpeg could not encode the lossless matte.','Inspect matte-encode.log and retry local processing.',422)
+            if process.wait(timeout=90):raise Problem('LOCAL_MATTE_ENCODE','FFmpeg could not encode the lossless matte.',f'Inspect {name}-encode.log and retry local processing.',422)
         except Exception as error:
             process.kill();process.wait()
             if isinstance(error,Problem):raise
             raise Problem('LOCAL_MATTE_ENCODE','FFmpeg failed while preparing the localized matte.',
-                          'Inspect matte-encode.log and codec support, then retry the saved local step. Source and masks are retained.',422,
+                          f'Inspect {name}-encode.log and codec support, then retry the saved local step. Source and masks are retained.',422,
                           exception_type=type(error).__name__)
         finally:
             capture.release()
@@ -179,13 +180,13 @@ def prepare_matte(proxy,output,source,evidence,records,plan,settings,cancel,*,ad
     qa={'active_frames':active,'frame_count':mapping['frame_count'],'cut_frames':evidence['cut_frames'],
         'uncertain_registration_frames':uncertain_flow,'stability_policy':'content_scaled_boundary_and_registration' if adaptive else 'legacy_iou',
         'unstable_frames':unstable,'warnings':warnings,'refinement':'current-supported spatial feather + 20% motion-compensated boundary smoothing; reset at cuts/gaps'}
-    sam.atomic(output/'mask-validation.json',qa)
+    sam.atomic(output/('mask-validation.json' if name=='matte' else f'{name}-validation.json'),qa)
     if consecutive or len(unstable)>max(2,active*.1):
         raise Problem('LOCAL_MASK_UNSTABLE','Required masks are temporally unstable within a shot.',
                       'Inspect mask-validation.json and the diagnostic overlay; narrow/rebuild the affected interval.',422,
                       flagged_frames=len(unstable))
-    (output/'matte.partial.mkv').replace(output/'matte.mkv')
-    matte=sam.frame_info(output/'matte.mkv',settings,cancel,interval_tolerance=.002)
+    (output/f'{name}.partial.mkv').replace(output/f'{name}.mkv')
+    matte=sam.frame_info(output/f'{name}.mkv',settings,cancel,interval_tolerance=.002)
     expected=[i/float(Fraction(mapping['proxy']['rate'])) for i in range(mapping['frame_count'])] if mapping.get('schema_version')==3 else [f['time'] for f in mapping['frames']]
     if len(matte['pts'])!=mapping['frame_count'] or any(abs(t-e)>.002 for t,e in zip(matte['normalized'],expected)):
         raise Problem('LOCAL_MATTE_TIMING','The matte does not align frame-for-frame with the source.','Rebuild the matte.',422)
@@ -199,7 +200,7 @@ def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,
     a,b=cv2.VideoCapture(str(original)),cv2.VideoCapture(str(graded))
     w,h=mapping['proxy']['width'],mapping['proxy']['height']
     neutral=all(abs(getattr(plan.background,k)-v)<1e-8 for k,v in
-                [('contrast',1),('gamma',1),('saturation',1),('brightness_gain',1),('cooling',0)])
+                [('contrast',1),('gamma',1),('saturation',1),('brightness_gain',1),('cooling',0),('highlight_ceiling',1)])
     def empty():return {'shadow_increase':0.,'subject_luma_ratio':1.,'chroma_change':0.,'highlight_chroma_change':0.}
     worst={'subject':empty(),'background':empty()};counts={'subject':0,'background':0};background_black=0.;pixel_change={'subject':0.,'background':0.};worst_frames={}
     try:

@@ -1,10 +1,10 @@
 import type { BackendState, GradeValues, Health } from '../lib/api';
 import { activeJob, stageLabel } from '../lib/api';
 
-export default function RenderPanel({state,health,sending,online,direction,onGenerate,onRetry,onCancel,onReview,viewCandidateId}:{
+export default function RenderPanel({state,health,sending,online,direction,onGenerate,onRetry,onCancel,onReview,onRenderSupported,onUseAllMatches,viewCandidateId}:{
   state?:BackendState;health:Health|null;sending:boolean;online:boolean;direction:string;
   onGenerate:()=>void;onRetry:()=>void;onCancel:()=>void;
-  onReview:(id:string)=>void;viewCandidateId?:string;
+  onReview:(id:string)=>void;onRenderSupported?:(id:string)=>void;onUseAllMatches?:(id:string)=>void;viewCandidateId?:string;
 }) {
   if(!state?.brief)return null;
   const running=state.status==='rendering'||state.status==='reviewing';
@@ -27,9 +27,23 @@ export default function RenderPanel({state,health,sending,online,direction,onGen
     {running&&latest?.recipe?.proposal.mode==='localized'&&<p className="inline-help">
       Localized plan: {latest.recipe.proposal.local?.concept}. Required mask failures stop this candidate; there is no silent global fallback.
     </p>}
-    {latest&&(latest.status==='failed'||latest.status==='cancelled')&&state.status!=='render_ready'&&
+    {latest?.status==='failed'&&latest.error?.code==='GRADE_REQUEST_UNFULFILLED'&&latest.error.details?.supported_plan_available?
+      <div className="error-notice" role="alert">
+        <strong>Muse can grade everything except:</strong>
+        <ul>{String(latest.error.details.unfulfilled_instructions??'').split('; ').filter(Boolean).map((item,i)=><li key={i}>{item}</li>)}</ul>
+        <p className="inline-help">Render the supported part now (the items above are recorded on the version as not done), or revise the direction to rephrase them.</p>
+        <div className="actions"><button disabled={busy||!online||!onRenderSupported} onClick={()=>onRenderSupported?.(latest.id)}>Render the supported part</button></div>
+      </div>
+    :latest?.status==='failed'&&latest.error?.code==='LOCAL_SUBJECT_AMBIGUOUS'&&latest.error.details?.all_matches_available?
+      <div className="error-notice" role="alert">
+        <strong>SAM found {String(latest.error.details.object_count??'several')} separate “{String(latest.error.details.concept??'')}” objects.</strong>
+        <p className="inline-help">Grade all of them as this area, or revise the direction to name the single one you mean. No object was guessed.</p>
+        <div className="actions"><button disabled={busy||!online||!onUseAllMatches} onClick={()=>onUseAllMatches?.(latest.id)}>Grade all matches</button></div>
+      </div>
+    :latest&&(latest.status==='failed'||latest.status==='cancelled')&&state.status!=='render_ready'&&
       <div className="consultation-actions"><span>{latest.name}: {latest.error?.message??latest.status}</span>
         <button disabled={busy||!online} onClick={onRetry}>Retry render</button></div>}
+    {selected?.approved_omissions?.length?<p className="inline-help">{selected.name} was rendered without: {selected.approved_omissions.join('; ')}.</p>:null}
     {latest&&selected&&latest.id!==selected.id&&['failed','cancelled'].includes(latest.status)&&
       <p className="inline-help">The latest attempt did not produce an accepted candidate. The displayed render is an earlier version.</p>}
     {latest&&latest.id!==selected?.id&&latest.review_error&&<p className="inline-help">
@@ -59,6 +73,7 @@ export default function RenderPanel({state,health,sending,online,direction,onGen
         <p>Treatment: {selected.recipe.proposal.mode??'global'}</p>
         {selected.recipe.proposal.local?<>
           <h3>Subject</h3>{values(selected.recipe.proposal.local.foreground)}
+          {selected.recipe.proposal.local.regions?.map((region,i)=><div key={i}><h3>Region: {region.concept}</h3>{values(region.treatment)}</div>)}
           <h3>Background</h3>{values(selected.recipe.proposal.local.background)}
           <p className="inline-help">{selected.recipe.proposal.local.concept} · {selected.recipe.proposal.local.intervals.map(i=>`${i.start.toFixed(2)}–${i.end.toFixed(2)}s`).join(', ')} · {selected.mask_run_ids?.length??0} mask run(s)</p>
         </>:values(selected.recipe.proposal.parameters)}

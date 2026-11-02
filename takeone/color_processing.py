@@ -1,4 +1,11 @@
-"""Versioned display-Rec.709 luminance tone and OCIO ASC-CDL colour operations."""
+"""Versioned display-Rec.709 luminance tone and OCIO ASC-CDL colour operations.
+
+Tone order: input levels -> gamma -> bounded sigmoid contrast -> brightness gain ->
+highlight shoulder -> common-gain peak limiting -> OCIO CDL colour. Every stage but
+the shoulder keeps white at white; the shoulder t-(1-c)*t^2 is the only way to darken
+near-white pixels (sky, cloud, glare). It is monotone with slope 2c-1 >= 0.2 at white,
+so bright texture is compressed, never inverted, and shadows are nearly untouched.
+"""
 import hashlib
 import json
 import os
@@ -18,6 +25,8 @@ def apply_rgb(values,parameters,protected=False):
     tone=a/np.maximum(a+b,np.finfo(np.float32).tiny)
     gain=parameters.brightness_gain
     tone=gain*tone/(1+(gain-1)*tone)
+    ceiling=parameters.highlight_ceiling
+    tone=tone-(1-ceiling)*tone*tone # Exact no-op at 1.0, so pre-shoulder v3 recipes render identically.
     ratio=np.divide(tone,luma,out=np.ones_like(tone),where=luma>0)
     ratio=np.minimum(ratio,1/np.maximum(rgb.max(axis=-1),np.finfo(np.float32).tiny))
     rgb*=ratio[...,None] # Same channel gain preserves RGB ratios, including peak limiting.
@@ -32,8 +41,8 @@ def apply_rgb(values,parameters,protected=False):
 
 def lut(directory,parameters,protected=False):
     if all(abs(getattr(parameters,k)-v)<1e-10 for k,v in [('contrast',1),('gamma',1),('saturation',1),
-        ('brightness_gain',1),('cooling',0),('black_point',0),('white_point',1)]):return 'null'
-    identity={'parameters':parameters.model_dump(),'protected':protected,'ocio':ocio.__version__,'numpy':np.__version__,'version':3,'grid':65}
+        ('brightness_gain',1),('cooling',0),('black_point',0),('white_point',1),('highlight_ceiling',1)]):return 'null'
+    identity={'parameters':parameters.model_dump(),'protected':protected,'ocio':ocio.__version__,'numpy':np.__version__,'version':4,'grid':65}
     name='grade-'+hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:24]+'.cube'
     path=Path(directory)/name
     receipt=path.with_suffix('.sha256')
@@ -47,7 +56,7 @@ def lut(directory,parameters,protected=False):
         result=apply_rgb(values,parameters,protected)
         temporary=path.with_suffix('.tmp')
         with temporary.open('w') as stream:
-            stream.write('TITLE "Take One display Rec709 luminance/CDL v3"\nLUT_3D_SIZE 65\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n')
+            stream.write('TITLE "Take One display Rec709 luminance/CDL v4 highlight shoulder"\nLUT_3D_SIZE 65\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n')
             np.savetxt(stream,result,fmt='%.8f')
             stream.flush();os.fsync(stream.fileno())
         temporary.replace(path)

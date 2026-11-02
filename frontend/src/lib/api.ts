@@ -14,7 +14,7 @@ export type Brief = {
   answers:{question_id:string;response_type:string;response:string}[];
   unresolved:string[];
 };
-export type GradeValues={contrast:number;saturation:number;gamma:number;brightness_gain?:number;cooling?:number;black_point?:number;white_point?:number};
+export type GradeValues={contrast:number;saturation:number;gamma:number;brightness_gain?:number;cooling?:number;black_point?:number;white_point?:number;highlight_ceiling?:number};
 export type RenderCandidate = {
   id:string;name:string;created_at:string;brief_sha256:string;source_sha256:string;
   status:'planning'|'rendering'|'ready'|'failed'|'cancelled';
@@ -25,17 +25,18 @@ export type RenderCandidate = {
   review_error?:null|{message:string;action:string};
   review_evidence?:{frame_index:number;time:number;roles:string[]}[];
   recipe:null|{tone_operator?:string;execution_adjustment?:null|{reason:string;changes:Record<string,{from:number;to:number}>};proposal:{parameters:GradeValues;mode?:'global'|'localized';
-    local?:null|{concept:string;foreground:GradeValues;background:GradeValues;intervals:{start:number;end:number}[];preserve_subject_color:boolean};
+    local?:null|{concept:string;foreground:GradeValues;background:GradeValues;intervals:{start:number;end:number}[];preserve_subject_color:boolean;regions?:{concept:string;treatment:GradeValues}[]};
     summary:string;decisions:{parameter:string;reason:string;source_ids:string[]}[];limitations:string[]}};
   preview_url:string|null;download_url:string|null;width:number|null;height:number|null;duration:number|null;
   validation:null|{warnings:string[];limitations:string[];review_status:string;bytes:number;audio_mode:string};
-  error:null|{code:string;message:string;action:string};
+  error:null|{code:string;message:string;action:string;details?:ErrorDetails};
+  approved_omissions?:string[];
 };
 export type LookPreview = {
   id:string;name:string;description:string;created_at:string;schema_version?:number;
   brief_sha256:string;frame_index:number;frame_time:number;image_url:string;uses_local:boolean;preview_only?:boolean;
   proposal:{parameters:GradeValues;mode?:'global'|'localized';
-    local?:null|{concept:string;foreground:GradeValues;background:GradeValues;intervals:{start:number;end:number}[];preserve_subject_color:boolean};
+    local?:null|{concept:string;foreground:GradeValues;background:GradeValues;intervals:{start:number;end:number}[];preserve_subject_color:boolean;regions?:{concept:string;treatment:GradeValues}[]};
     summary:string;decisions:{parameter:string;reason:string;source_ids:string[]}[];limitations:string[]};
 };
 export type BackendState = {
@@ -271,7 +272,7 @@ export async function upload(file:File,signal:AbortSignal) {
   form.append('profile_id',nextProfile());form.append('preference_context',JSON.stringify(nextContext()));
   return parseBackend(await request<unknown>('/api/projects',{method:'POST',body:form,signal},120000));
 }
-export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select',body:Record<string,unknown>) {
+export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select'|'render-supported'|'use-all-matches',body:Record<string,unknown>) {
   try{return parseBackend(await request<unknown>('/api/projects/'+id+'/'+kind,{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({...body,command_id:crypto.randomUUID()}),

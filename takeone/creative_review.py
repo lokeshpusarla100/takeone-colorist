@@ -5,10 +5,61 @@ import base64
 import cv2
 import numpy as np
 
-from . import evidence,sam
+from . import evidence,local_grading,sam
 from .errors import Problem
 
 TECHNICAL_ERRORS={'REVIEW_OUTPUT_CHANGED','REVIEW_TIMING_INVALID','EVIDENCE_TIMING_INVALID','EVIDENCE_DECODE_FAILED','MEDIA_TOOL_FAILED'}
+# Semantic mask check: overlay frames per SAM concept, so the critic can say whether a mask covers
+# the intended object at all (technical QA checks geometry and timing, never meaning).
+OVERLAY_FRAMES_PER_CONCEPT=3
+OVERLAY_CONCEPTS=5
+OVERLAY_COLOURS=[(255,64,64),(64,200,255),(255,220,0),(120,255,120),(255,120,255)]
+LEVEL_KEYS=['p05_encoded_luma','median_encoded_luma','p95_encoded_luma','median_rgb','mean_chroma',
+            'highlight_fraction','highlight_luma','highlight_rgb']
+
+
+def levels(records):
+    return [{'frame_index':r['frame_index'],**{k:r.get(k) for k in LEVEL_KEYS}} for r in records]
+
+
+def _overlay(image,binary,colour):
+    pixels=cv2.imdecode(np.frombuffer(base64.b64decode(image['url'].split(',')[1]),np.uint8),cv2.IMREAD_COLOR)
+    h,w=pixels.shape[:2];mask=cv2.resize(binary,(w,h),interpolation=cv2.INTER_NEAREST)>0
+    tint=np.array(colour[::-1],np.float32)
+    out=pixels.astype(np.float32);out[mask]=out[mask]*.55+tint*.45
+    contours,_=cv2.findContours(mask.astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    out=out.clip(0,255).astype(np.uint8);cv2.drawContours(out,contours,-1,tuple(int(c) for c in colour[::-1]),1)
+    ok,jpeg=cv2.imencode('.jpg',out,[cv2.IMWRITE_JPEG_QUALITY,75])
+    return 'data:image/jpeg;base64,'+base64.b64encode(jpeg).decode() if ok else None
+
+
+def mask_overlays(state,candidate,directory,images,budget):
+    """Up to OVERLAY_FRAMES_PER_CONCEPT overlay frames for each SAM concept used by the candidate."""
+    runs={r.id:r for r in state.segmentations};by_concept={}
+    for run_id in candidate.mask_run_ids:
+        path=directory/'segmentations'/run_id/'manifest.json'
+        if not path.is_file() or run_id not in runs:continue
+        manifest=json.loads(path.read_text());mapping=manifest['frame_map'];concept=runs[run_id].concept
+        for record in manifest['records']:
+            index=mapping['frames'][record['frame_index']]['index']
+            by_concept.setdefault(concept,{}).setdefault(index,[]).append(dict(record,directory=str(path.parent),proxy=mapping['proxy']))
+    by_frame={i['frame_index']:i for i in images};result=[];used=0
+    for number,(concept,frames) in enumerate(list(by_concept.items())[:OVERLAY_CONCEPTS]):
+        available=sorted(set(frames)&set(by_frame))
+        if not available:continue
+        picks=sorted({available[round(k*(len(available)-1)/max(1,OVERLAY_FRAMES_PER_CONCEPT-1))] for k in range(OVERLAY_FRAMES_PER_CONCEPT)})
+        for index in picks:
+            records=frames[index];proxy=records[0]['proxy']
+            try:binary,_=local_grading.raster(records,proxy['width'],proxy['height'])
+            except Problem:continue
+            url=_overlay(by_frame[index],binary,OVERLAY_COLOURS[number%len(OVERLAY_COLOURS)])
+            if not url:continue
+            size=len(url)
+            if used+size>budget:continue
+            used+=size
+            result.append({'frame_index':index,'time':by_frame[index]['time'],'url':url,'concept':concept,'overlay':number,
+                           'coverage':float(binary.mean())})
+    return result
 
 
 def execution_identity(plan,operator='luminance_ocio_v3',duration=None):
@@ -68,18 +119,24 @@ def collect(service,state,candidate,cancel):
                     sam.command([service.settings.ffmpeg,'-v','error','-xerror','-i',str(path),'-f','null','-'],cancel,120)
                 previous_manifest=evidence.frame_manifest(path,service.settings,cancel)
                 if len(previous_manifest['times'])!=len(selection['manifest']['times']) or any(abs(a-b)>.002 for a,b in zip(previous_manifest['times'],selection['manifest']['times'])):raise ValueError('timing')
-                _,images=evidence.collect(path,state.source,replace(service.settings,sample_image_bytes=budget//roles),cancel,selection=selection)
+                previous_records,images=evidence.collect(path,state.source,replace(service.settings,sample_image_bytes=budget//roles),cancel,selection=selection)
                 common={i['frame_index'] for i in images}&{i['frame_index'] for i in data['source_images']}&{i['frame_index'] for i in data['candidate_images']}
                 if common:
                     data=dict(data,source_images=[i for i in data['source_images'] if i['frame_index'] in common],
                               candidate_images=[i for i in data['candidate_images'] if i['frame_index'] in common])
-                    comparison={'id':previous.id,'images':[i for i in images if i['frame_index'] in common],'output_sha256':sam.checksum(path)}
+                    comparison={'id':previous.id,'images':[i for i in images if i['frame_index'] in common],'output_sha256':sam.checksum(path),
+                                'records':previous_records}
             except (Problem,ValueError):
                 data['uncertainty']=data['uncertainty']+['Previous candidate could not be aligned for comparison; it was not shown.']
     regions={}
+    # Subject crops come from the subject concept's masks only; additional region masks (sky,
+    # water...) would otherwise widen the crop to most of the frame.
+    used=((candidate.validation or {}).get('mask_validation') or {}).get('subject_concept_used')
+    subject=(used or candidate.recipe.proposal.local.concept).strip().casefold() if candidate.recipe.proposal.local else None
+    concepts={r.id:r.concept.strip().casefold() for r in state.segmentations}
     for run_id in candidate.mask_run_ids:
         path=directory/'segmentations'/run_id/'manifest.json'
-        if not path.is_file():continue
+        if not path.is_file() or concepts.get(run_id,subject)!=subject:continue
         manifest=json.loads(path.read_text());mapping=manifest['frame_map']
         for record in manifest['records']:
             index=mapping['frames'][record['frame_index']]['index']
@@ -111,10 +168,14 @@ def collect(service,state,candidate,cancel):
     crop_indices={i['frame_index'] for i in source_crops}&{i['frame_index'] for i in candidate_crops}
     data=dict(data,source_region_images=[i for i in source_crops if i['frame_index'] in crop_indices],
               candidate_region_images=[i for i in candidate_crops if i['frame_index'] in crop_indices])
+    data['mask_overlay_images']=mask_overlays(state,candidate,directory,data['source_images'],budget//4)
+    data['tonal_levels']={'source':levels(data['source_records']),'candidate':levels(data['candidate_records']),
+                          'previous':levels(comparison['records']) if comparison else None}
     if sam.checksum(rendered)!=initial_hash:
         raise Problem('REVIEW_OUTPUT_CHANGED','The candidate changed while evidence was collected.','Re-render or restore the frozen candidate.',409)
     data['rendered_sha256']=initial_hash
     summary=[{'frame_index':f['frame_index'],'time':f['time'],'roles':['source','candidate']+(['previous'] if comparison else [])
-              +(['source_region','candidate_region'] if any(i['frame_index']==f['frame_index'] for i in data['candidate_region_images']) else [])}
+              +(['source_region','candidate_region'] if any(i['frame_index']==f['frame_index'] for i in data['candidate_region_images']) else [])
+              +[f"mask_overlay_{o['overlay']}" for o in data['mask_overlay_images'] if o['frame_index']==f['frame_index']]}
              for f in data['source_images']]
     return data,comparison,summary

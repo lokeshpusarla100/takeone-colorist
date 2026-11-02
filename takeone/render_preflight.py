@@ -7,11 +7,15 @@ Clipping fit: input black/white cutoffs are minimally restored against the plan'
 own declared clipping fractions.
 
 Highlight gate: a layer that darkens the typical pixel but lifts the brightest
-ones contradicts a brief that asks for subdued or controlled highlights. The
-supported operator keeps white at white, and lowering ``white_point`` or raising
-``contrast`` pushes upper tones UP, so such a plan can never deliver a darker sky.
-The gate blocks it before any SAM request or encode and reports the measured
-cause, so a replan (or an honest unfulfilled request) replaces a wasted render.
+ones contradicts a brief that asks for subdued or controlled highlights. It is
+measured on each frame's own bright pixels, with perceptual (not footage-fitted)
+thresholds; see the constants below. The
+operator keeps white at white everywhere except ``highlight_ceiling``, and lowering
+``white_point`` or raising ``contrast`` pushes upper tones UP, so such a plan can
+never deliver a darker sky. The gate blocks it before any SAM request or encode and
+reports the measured cause plus the ``highlight_ceiling`` that would remove the
+lift, so a replan (or an honest unfulfilled request) replaces a wasted render. The
+suggestion is never applied silently: it is a creative control.
 """
 import numpy as np
 
@@ -20,10 +24,18 @@ from .errors import Problem
 
 WEIGHTS=np.array([.2126,.7152,.0722],np.float32)
 MAX_SEARCH_STEPS=12
-# A layer "darkens" when its sampled median luma falls by at least this much.
-DARKENING_MEDIAN_DROP=.03
-# Such a layer must not raise the sampled 95th-percentile luma by more than this.
-HIGHLIGHT_LIFT_LIMIT=.03
+# Highlight gate constants live in tonal.py (shared with review evidence and the revision
+# convergence rule). None is fitted to a particular video; every measurement is made on the
+# footage's own pixels, so bright beaches, night cities and hazy skies are judged alike.
+# Whether a layer darkens is a property of the plan, not the footage: it is the layer's change
+#   at photographic 18% grey (MID_GREY). Measuring it on the frame instead would mislabel a
+#   darkening plan on bright footage, whose "midtones" are sand or sky a lowered white_point lifts.
+from .tonal import (VISIBLE_CHANGE,MID_GREY,HIGHLIGHT_QUANTILE,HIGHLIGHT_FLOOR,  # noqa: E402
+                    MIN_HIGHLIGHT_FRACTION,highlight_mask)
+# Without an explicit subdue policy, a lift is blocked only when the input white cutoff
+#   causes at least this share of it: lowering white_point while darkening flattens and
+#   brightens highlights on any footage. A contrast-only S-curve lift is a legitimate look.
+WHITE_POINT_SHARE=.5
 # Policies under which brighter highlights are an explicit, declared intent.
 LIFT_ALLOWED_POLICIES={'intentional_lift','intentional_clipping'}
 
@@ -135,7 +147,8 @@ def _prepare_clipping(recipe,source_pixels):
         # exceed it. This is a planning check only; it runs before any SAM
         # request or encode, and final dense QC remains authoritative.
         report['limitations'].append('Localized preflight evaluates each layer over the full bounded samples as a conservative envelope; masked/feathered pixels are a subset or blend of those layers. No encoded localized probe was run, and final dense QC remains authoritative.')
-        layers=[('parameters',proposal.parameters),('foreground',proposal.local.foreground),('background',proposal.local.background)]
+        layers=[('parameters',proposal.parameters),('foreground',proposal.local.foreground),('background',proposal.local.background),
+                *((f'region:{r.concept}',r.treatment) for r in proposal.local.regions)]
         fitted={};report['layers']={}
         for name,params in layers:
             current,before,after=_fit(params,frames,limits,counter)
@@ -155,6 +168,7 @@ def _prepare_clipping(recipe,source_pixels):
         proposal.parameters=fitted['parameters']
         proposal.local.foreground=fitted['foreground']
         proposal.local.background=fitted['background']
+        for region in proposal.local.regions:region.treatment=fitted[f'region:{region.concept}']
         if changed:
             proposal.summary=(proposal.summary+' Input level cutoffs adjusted per layer to honor unchanged clipping bounds; encoded review still required.')[:1000]
         proposal=type(proposal).model_validate(proposal.model_dump())
@@ -188,45 +202,94 @@ def _prepare_clipping(recipe,source_pixels):
 
 
 def _layer_response(parameters,frames):
-    """Mean sampled change in median/p95 luma, and worst new any-channel clipping, for one layer."""
-    rows=[]
+    """Paired change of each frame's own highlight pixels and of everything below them.
+
+    Pixel-paired (the same source pixels before and after), not a distribution quantile, so a
+    frame already near white (beach, snow) or with tiny bright areas (night city lights) is
+    measured as faithfully as a pale sky. Frames without real highlights are not assessable.
+    """
+    rows=[];clip=[]
     for rgb,_,_ in frames.values():
         before=rgb@WEIGHTS;result=color_processing.apply_rgb(rgb,parameters);after=result@WEIGHTS
-        rows.append((float(np.median(after)-np.median(before)),float(np.quantile(after,.95)-np.quantile(before,.95)),
-                     float(np.mean((result>=254/255).any(axis=-1))-np.mean((rgb>=254/255).any(axis=-1)))))
+        # Informational: luma-based clipping bounds miss a cooled sky whose blue/green channel
+        # saturates while luma stays below 254/255. Not a block on its own.
+        clip.append(float(np.mean((result>=254/255).any(axis=-1))-np.mean((rgb>=254/255).any(axis=-1))))
+        high=highlight_mask(before)
+        if high is None:continue
+        change=after-before
+        rows.append((float(change[~high].mean()),float(change[high].mean()),float(high.mean())))
+    response={'assessable_frames':len(rows),'frame_count':len(frames),'new_channel_clip_fraction':float(max(0.,max(clip,default=0.)))}
+    if not rows:
+        return {**response,'midtone_change':None,'highlight_change':None,'highlight_fraction':0.}
     table=np.array(rows)
-    return {'median_change':float(table[:,0].mean()),'highlight_change':float(table[:,1].mean()),
-            # Informational: luma-based clipping bounds miss a cooled sky whose blue/green channel
-            # saturates while luma stays below 254/255. Not a block on its own.
-            'new_channel_clip_fraction':float(max(0.,table[:,2].max()))}
+    return {**response,'midtone_change':float(table[:,0].mean()),'highlight_change':float(table[:,1].mean()),
+            'highlight_fraction':float(table[:,2].mean())}
 
 
-def _lift_drivers(parameters,frames,current,minimum=.005):
-    """Controls whose neutral value would lower the highlight (p95) change, with the size of that effect."""
+def _mid_grey_change(parameters):
+    grey=np.full((1,3),MID_GREY,np.float32)
+    return float((color_processing.apply_rgb(grey,parameters)@WEIGHTS)[0]-MID_GREY)
+
+
+def _lift_drivers(parameters,frames,current,minimum=VISIBLE_CHANGE/4):
+    """Controls whose neutral value would lower the highlight change, with the size of that effect."""
     drivers={}
     for name,neutral in [('white_point',1.),('contrast',1.),('black_point',0.)]:
         value=getattr(parameters,name)
         if abs(value-neutral)<=1e-12:continue
-        trial=parameters.model_copy(update={name:neutral})
-        neutral_change=_layer_response(trial,frames)['highlight_change']
+        neutral_change=_layer_response(parameters.model_copy(update={name:neutral}),frames)['highlight_change']
         if current-neutral_change>=minimum:
             drivers[name]={'value':value,'highlight_change_if_neutral':neutral_change,'lift_removed_if_neutral':current-neutral_change}
     return dict(sorted(drivers.items(),key=lambda item:-item[1]['lift_removed_if_neutral']))
 
 
+def _ceiling_to_pass(parameters,frames,minimum=.6,steps=10):
+    """Smallest darkening of highlight_ceiling (others unchanged) that keeps the lift below visibility, or None."""
+    def ok(value):
+        return _layer_response(parameters.model_copy(update={'highlight_ceiling':value}),frames)['highlight_change']<=VISIBLE_CHANGE
+    high=parameters.highlight_ceiling
+    if not ok(minimum):return None
+    low=minimum
+    for _ in range(steps):
+        middle=(low+high)/2
+        if ok(middle):low=middle
+        else:high=middle
+    return round(low,4)
+
+
 def assess_highlights(proposal,frames):
-    """Per-layer highlight response on bounded source samples; violations are darkening layers that lift highlights."""
+    """Per-layer highlight response; a violation is a darkening layer whose highlights visibly brighten
+    against the declared policy. Brightening layers (a "make it brighter" grade, a lifted subject) are
+    never violations: brighter highlights are what they ask for, and clipping has its own bound.
+
+    * intentional_lift / intentional_clipping: never blocked.
+    * subdue: blocked whenever the darkening layer visibly brightens highlights, by any control.
+    * preserve_detail / review: blocked when the lift comes mainly from the input white cutoff, which
+      flattens and brightens highlights on any footage; a contrast-only S-curve lift passes.
+    """
     policy=proposal.intent.highlight_policy
     layers=[('parameters',proposal.parameters)]
-    if proposal.local:layers+=[('foreground',proposal.local.foreground),('background',proposal.local.background)]
-    report={'policy':policy,'enforced':policy not in LIFT_ALLOWED_POLICIES,'darkening_median_drop':DARKENING_MEDIAN_DROP,
-            'highlight_lift_limit':HIGHLIGHT_LIFT_LIMIT,'layers':{},'violations':[]}
+    if proposal.local:
+        layers+=[('foreground',proposal.local.foreground),('background',proposal.local.background),
+                 *((f'region:{r.concept}',r.treatment) for r in proposal.local.regions)]
+    report={'policy':policy,'enforced':policy not in LIFT_ALLOWED_POLICIES,'visible_change':VISIBLE_CHANGE,'mid_grey':MID_GREY,
+            'highlight_quantile':HIGHLIGHT_QUANTILE,'highlight_floor':HIGHLIGHT_FLOOR,'white_point_share':WHITE_POINT_SHARE,
+            'layers':{},'violations':[]}
     for name,parameters in layers:
         response=_layer_response(parameters,frames)
-        darkening=response['median_change']<=-DARKENING_MEDIAN_DROP
-        entry={**response,'darkening':darkening}
-        if report['enforced'] and darkening and response['highlight_change']>HIGHLIGHT_LIFT_LIMIT:
-            entry['drivers']=_lift_drivers(parameters,frames,response['highlight_change']);report['violations'].append(name)
+        grey=_mid_grey_change(parameters)
+        darkening=grey<=-VISIBLE_CHANGE
+        lifted=darkening and response['assessable_frames']>0 and response['highlight_change']>VISIBLE_CHANGE
+        entry={**response,'mid_grey_change':grey,'darkening':darkening,'highlights_lifted':lifted}
+        if lifted and report['enforced']:
+            drivers=_lift_drivers(parameters,frames,response['highlight_change'])
+            share=drivers.get('white_point',{}).get('lift_removed_if_neutral',0.)/response['highlight_change']
+            entry.update(drivers=drivers,white_point_share=share)
+            rule=('subdue_policy' if policy=='subdue' else 'white_point_cutoff' if share>=WHITE_POINT_SHARE else None)
+            if rule:
+                entry.update(rule=rule,suggested_highlight_ceiling=_ceiling_to_pass(parameters,frames))
+                report['violations'].append(name)
+            else:entry['allowed_because']='Contrast-shaped lift without a subdue policy is a legitimate look.'
         report['layers'][name]=entry
     return report
 
@@ -237,11 +300,15 @@ def highlight_reason(report):
         entry=report['layers'][name]
         causes=', '.join(f"{control} {info['value']:g} (neutral removes {info['lift_removed_if_neutral']:.3f} of the lift)"
                          for control,info in entry.get('drivers',{}).items())
-        parts.append(f"{name}: median luma {entry['median_change']:+.3f} but highlight (p95) luma {entry['highlight_change']:+.3f}"
-                     +(f"; main drivers {causes}" if causes else '; no single input-level control explains it, so gamma/brightness_gain or the layer treatment must change'))
-    return ('A darkening layer also brightens highlights, so bright sky/cloud/water cannot become darker or more subdued. '
-            +' | '.join(parts)+'. Lowering white_point or raising contrast brightens highlights; gamma/brightness_gain below 1 '
-            'darken only upper midtones. Revise the controls, or report the darker-highlight request as unfulfilled.')
+        why=('the plan declares highlight_policy=subdue' if entry['rule']=='subdue_policy'
+             else f"the input white cutoff causes {entry['white_point_share']:.0%} of it")
+        parts.append(f"{name}: 18% grey {entry['mid_grey_change']:+.3f} but the brightest source pixels {entry['highlight_change']:+.3f}, and {why}"
+                     +(f"; main drivers {causes}" if causes else '')
+                     +(f"; with the other controls unchanged, highlight_ceiling {entry['suggested_highlight_ceiling']:g} only just keeps the lift below visibility (lower values darken highlights further)"
+                       if entry.get('suggested_highlight_ceiling') is not None else '; even highlight_ceiling 0.6 does not offset it, so tone controls must change'))
+    return ('A darkening layer also brightens highlights, so bright areas cannot become darker or more subdued. '
+            +' | '.join(parts)+'. Lowering white_point or raising contrast brightens highlights; highlight_ceiling is the control that '
+            'darkens them. Revise the controls, or report the darker-highlight request as unfulfilled.')
 
 
 def prepare(recipe,source_pixels,*,highlight_gate=True):

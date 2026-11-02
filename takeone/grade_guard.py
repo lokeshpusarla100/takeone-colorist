@@ -43,13 +43,28 @@ def source_pixels(source,recipe,original,settings,cancel,cache_dir):
 def prepare_execution(source,output,recipe,original,settings,cancel,cache_dir=None,*,force_neutral_levels=False):
     """Return a new effective recipe/report; caller owns candidate lineage/persistence."""
     started=time.monotonic();limits=recipe.proposal.execution_limits
-    if recipe.tone_operator!='luminance_ocio_v3' or (
-        limits.max_new_black_fraction is None and limits.max_new_white_fraction is None):
-        return recipe,{'status':'not_applicable','reason':'Only bounded v3 clipping with declared limits is preflighted; other execution checks remain authoritative.'}
+    if recipe.tone_operator!='luminance_ocio_v3':
+        return recipe,{'status':'not_applicable','reason':'Only v3 execution is preflighted; other execution checks remain authoritative.'}
+    bounded=limits.max_new_black_fraction is not None or limits.max_new_white_fraction is not None
     source=Path(source);output=Path(output);output.mkdir(parents=True,exist_ok=True)
     rendering.verify_source(source,original,settings,cancel)
     selection,pixels,hit=source_pixels(source,recipe,original,settings,cancel,cache_dir or output)
-    decision=prepare(recipe,pixels);proposal=decision['proposal']
+    # The neutral-level recovery after a dense clipping failure must stay possible, so it skips the highlight gate.
+    decision=prepare(recipe,pixels,highlight_gate=not force_neutral_levels);proposal=decision['proposal']
+    if proposal is None and decision['report'].get('blocked_by')=='highlight_lift':
+        report={'version':'grade-guard-v1','status':'blocked','blocked_by':'highlight_lift','math':decision['report'],'encoded_checks':[],
+                'source_sample_cache_hit':hit,'elapsed_seconds':time.monotonic()-started,'limits':limits.model_dump(),
+                'uncertainty':['Highlight response is measured on bounded source samples with the shipped tone operator; it is a feasibility check, not a render.']}
+        sam.atomic(output/'preflight.json',report)
+        raise Problem('GRADE_PREFLIGHT_FAILED','The planned grade brightens highlights while darkening, so it cannot deliver darker or more subdued highlights.',
+                      decision['report']['reason']+' No SAM request, full render or critic call was made.',422,preflight=report)
+    if not bounded:
+        # No clipping fraction was declared, so nothing is fitted or adjusted: only the highlight gate ran.
+        report={'version':'grade-guard-v1','status':'passed','math':decision['report'],'encoded_checks':[],'source_sample_cache_hit':hit,
+                'elapsed_seconds':time.monotonic()-started,'limits':limits.model_dump(),'highlight_gate_only':True,
+                'uncertainty':['No clipping fraction bound was declared; only the highlight feasibility gate ran.']}
+        sam.atomic(output/'preflight.json',report)
+        return recipe,report
     if recipe.proposal.mode=='localized':
         # Mathematical layer-envelope preflight only, before any SAM request
         # or full encode. There is no encoded localized sparse probe, so a

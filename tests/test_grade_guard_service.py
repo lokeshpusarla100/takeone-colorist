@@ -233,3 +233,122 @@ def test_retry_of_known_neutral_dense_failure_fails_before_another_encode(settin
         assert result['status']=='failed' and result['error']['code']=='GRADE_PREFLIGHT_FAILED',result.get('error')
         assert len(calls)==1 and len(result['candidates'])==1 and planner.grade_calls==1
         assert result['candidates'][0]['recipe']['proposal']['execution_limits']['max_new_black_fraction']==.03
+
+
+# ---- Highlight feasibility gate, end to end -------------------------------------------------
+
+@pytest.fixture(scope='module')
+def hazy_sky_clip(tmp_path_factory):
+    path=tmp_path_factory.mktemp('hazy-sky')/'hazy.mp4'
+    frame=np.full((108,192,3),120,np.uint8);frame[:44]=np.linspace(205,235,192,dtype=np.uint8)[None,:,None]
+    subprocess.run(['ffmpeg','-v','error','-y','-f','rawvideo','-pixel_format','rgb24','-video_size','192x108',
+        '-framerate','12','-i','-','-vf','scale=in_range=pc:out_range=tv,setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709',
+        '-c:v','libx264','-crf','14','-pix_fmt','yuv420p',str(path)],input=frame.tobytes()*12,check=True)
+    return path
+
+
+SUBDUE=dict(contrast=1.25,saturation=1.,gamma=.8,brightness_gain=.78,cooling=.15,black_point=.05,white_point=.88)
+GENTLE=dict(contrast=1.,saturation=1.,gamma=.85,brightness_gain=.85,cooling=.05,black_point=0.,white_point=1.)
+
+
+def set_controls(proposal,values):
+    for key,value in values.items():setattr(proposal.parameters,key,value)
+    proposal.intent.highlight_policy='preserve_detail'
+    return proposal
+
+
+class SkyPlanner(Planner):
+    """First plan tries to subdue a pale sky through white_point/contrast; later plans follow `second`."""
+    def __init__(self,second=None,unfulfilled=()):super().__init__();self.second=second or GENTLE;self.unfulfilled=list(unfulfilled)
+    def grade(self,*args,**kwargs):
+        proposal,usage=super().grade(*args,**kwargs)
+        if self.grade_calls==1:set_controls(proposal,SUBDUE)
+        else:
+            set_controls(proposal,self.second);proposal.unfulfilled_requests=self.unfulfilled
+        return proposal,usage
+
+
+def test_highlight_lifting_plan_is_replanned_once_with_measured_cause_before_any_encode(settings,hazy_sky_clip,monkeypatch):
+    calls=[];actual=rendering.render
+    def counted(*args,**kwargs):calls.append(args[2].model_copy(deep=True));return actual(*args,**kwargs)
+    monkeypatch.setattr(rendering,'render',counted)
+    planner=SkyPlanner();masks=Masks()
+    with TestClient(create_app(settings,planner,masks),base_url='http://127.0.0.1') as client:
+        result=generate(client,start(client,upload(client,hazy_sky_clip),'explicit dark moody sky, controlled highlights'))
+        assert result['status']=='render_ready',result.get('error')
+        parent,child=result['candidates']
+        assert parent['status']=='failed' and parent['error']['code']=='GRADE_PREFLIGHT_FAILED'
+        assert parent['recipe']['proposal']['parameters']['white_point']==.88 # the original plan is preserved, not edited
+        assert child['parent_id']==parent['id'] and child['recipe']['proposal']['parameters']['white_point']==1
+        assert len(calls)==1 and calls[0].proposal.parameters.white_point==1 # only the repaired plan was encoded
+        failure=planner.contexts[1]['preflight_failure']
+        assert 'BRIGHTEN' in failure['instruction'] and 'unfulfilled_requests' in failure['instruction']
+        measured=failure['evidence']['preflight']['math']['highlights']
+        assert measured['violations']==['parameters'] and 'white_point' in measured['layers']['parameters']['drivers']
+        assert planner.grade_calls==2 and masks.calls==0
+
+
+def test_unattainable_darker_highlights_are_reported_as_unfulfilled_without_rendering(settings,hazy_sky_clip,monkeypatch):
+    def forbidden(*args,**kwargs):raise AssertionError('Full encode must not start')
+    monkeypatch.setattr(rendering,'render',forbidden)
+    planner=SkyPlanner(unfulfilled=['Dark steel-blue sky from a near-white sky cannot be produced by the supported controls.'])
+    with TestClient(create_app(settings,planner,Masks()),base_url='http://127.0.0.1') as client:
+        result=generate(client,start(client,upload(client,hazy_sky_clip),'explicit dark moody sky'))
+        assert result['status']=='failed' and result['error']['code']=='GRADE_PREFLIGHT_FAILED',result.get('error')
+        details=result['error']['details']
+        assert 'Dark steel-blue sky' in details['unfulfilled_instructions'] and 'Dark steel-blue sky' in result['error']['action']
+        assert planner.grade_calls==2 and len(result['candidates'])==1
+        again=client.post('/api/projects/'+result['id']+'/retry',json={'revision':result['revision'],'command_id':str(uuid4())})
+        assert again.status_code==202 and done(client,result['id'])['status']=='failed'
+        assert planner.grade_calls==2 # a repeated retry makes no new paid planning call
+
+
+def test_a_replan_that_still_lifts_highlights_fails_instead_of_looping(settings,hazy_sky_clip,monkeypatch):
+    def forbidden(*args,**kwargs):raise AssertionError('Full encode must not start')
+    monkeypatch.setattr(rendering,'render',forbidden)
+    planner=SkyPlanner(second=dict(SUBDUE,white_point=.85))
+    with TestClient(create_app(settings,planner,Masks()),base_url='http://127.0.0.1') as client:
+        result=generate(client,start(client,upload(client,hazy_sky_clip),'explicit dark moody sky'))
+        assert result['status']=='failed' and result['error']['code']=='GRADE_PREFLIGHT_FAILED'
+        assert planner.grade_calls==2 and len(result['candidates'])==2 # one replan, never a third attempt
+
+
+def test_highlight_intent_declared_as_lift_is_rendered_not_blocked(settings,hazy_sky_clip):
+    class HighKey(SkyPlanner):
+        def grade(self,*args,**kwargs):
+            proposal,usage=Planner.grade(self,*args,**kwargs)
+            set_controls(proposal,SUBDUE);proposal.intent.highlight_policy='intentional_lift'
+            return proposal,usage
+    planner=HighKey()
+    with TestClient(create_app(settings,planner,Masks()),base_url='http://127.0.0.1') as client:
+        result=generate(client,start(client,upload(client,hazy_sky_clip),'explicit high contrast bright sky is fine'))
+        assert result['status']=='render_ready',result.get('error')
+        assert len(result['candidates'])==1 and planner.grade_calls==1
+
+
+def test_critic_revision_that_would_lift_highlights_stops_cleanly_and_keeps_the_candidate(settings,hazy_sky_clip,monkeypatch):
+    calls=[];actual=rendering.render
+    def counted(*args,**kwargs):calls.append(True);return actual(*args,**kwargs)
+    monkeypatch.setattr(rendering,'render',counted)
+    class Critic(SkyPlanner):
+        def __init__(self):super().__init__();self.review_calls=0
+        def grade(self,*args,**kwargs):
+            proposal,usage=Planner.grade(self,*args,**kwargs)
+            set_controls(proposal,GENTLE);proposal.review_required=True
+            return proposal,usage
+        def review(self,brief,candidate,data,previous=None,feedback=()):
+            self.review_calls+=1
+            revision=candidate.recipe.proposal.model_copy(deep=True);set_controls(revision,SUBDUE)
+            return CreativeReview(decision='revise',summary='Sky still looks bright; lower the white point.',
+                issues=[{'id':'sky','description':'Sky is not subdued.','evidence_ids':['candidate:'+str(data['candidate_images'][0]['frame_index'])],
+                         'correctable':True}],revision_plan=revision),{}
+    planner=Critic()
+    with TestClient(create_app(settings,planner,Masks()),base_url='http://127.0.0.1') as client:
+        result=generate(client,start(client,upload(client,hazy_sky_clip),'explicit dark moody sky'))
+        assert result['status']=='render_ready',result.get('error')
+        assert len(result['candidates'])==1 and len(calls)==1 and planner.review_calls==1 and planner.grade_calls==1
+        first=result['candidates'][0]
+        assert first['status']=='ready' and first['revision_stop_reason']=='revision_would_lift_highlights'
+        assert result['selected_candidate_id']==first['id']
+        event=next(e for e in result['events'] if e['title']=='Revision not rendered')
+        assert 'white_point' in event['reason'] and event['details']['violating_layers']=='parameters'

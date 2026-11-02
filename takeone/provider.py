@@ -14,6 +14,30 @@ from .preferences import PromptMemoryGate
 from .usage import usage_details
 
 
+# What each control does in the shipped v3 operator (color_processing.apply_rgb). Pinned by tests/test_tone_semantics.py:
+# white stays white under every control, and lowering white_point or raising contrast pushes upper tones UP.
+CONTROL_SEMANTICS = {
+    "contrast": "0.75..1.25; neutral 1.0; bounded sigmoid x^c/(x^c+(1-x)^c), no fixed-pivot subtraction. Above 1 it deepens shadows and "
+                "LIFTS upper highlights (S-curve); it never darkens the brightest pixels.",
+    "gamma": "0.8..1.2; neutral 1.0; encoded luminance power 1/gamma: above 1 lifts midtones, below 1 darkens. Pure white stays white.",
+    "saturation": "0..1.5; neutral 1.0; Rec.709-weighted encoded RGB channel mixing",
+    "brightness_gain": "0.65..1.35, neutral 1.0. Bounded display-domain brightness, not physical relighting. Maps black to black and white to white: "
+                       "below 1 it darkens midtones and upper midtones only and cannot darken pure highlights.",
+    "cooling": "-0.15..0.15, neutral 0. Positive reduces red and increases blue using explicit Rec.709 RGB gains; not calibrated Kelvin. "
+               "On bright pixels the raised blue/green channel saturates, so strong cooling of a pale sky gives a flat cyan-white, not a dark blue.",
+    "black_point": "0..0.15 input luma level. Nonzero deliberately discards lower levels; use only when the intended look permits it.",
+    "white_point": "0.75..1 input luma level. Source luma AT OR ABOVE this value becomes pure white BEFORE tone and colour, so LOWERING it "
+                   "BRIGHTENS and flattens highlights (bright sky, clouds, glare turn white). It can never darken, subdue or protect highlights. "
+                   "Keep 1.0 unless deliberate highlight clipping or lift is the intent.",
+}
+HIGHLIGHT_HANDLING = (
+    "No supported control makes near-white pixels dark: even with every darkening control at its limit a 0.90 luma highlight only falls to about 0.74 "
+    "(contrast 0.75) or 0.88 (contrast 1.25). If the brief requires a dark or subdued sky/clouds/water glare and the source region is near white, that is a "
+    "required instruction these controls cannot execute: list it in unfulfilled_requests instead of lowering white_point or raising contrast, which brighten it. "
+    "A layer that darkens midtones but brightens highlights is rejected before rendering unless intent.highlight_policy is intentional_lift or intentional_clipping."
+)
+
+
 class MuseProvider:
     def __init__(self, settings: Settings, prompt_gate=None):
         self.settings = settings
@@ -95,15 +119,8 @@ class MuseProvider:
             "source": source.model_dump(mode="json"),
             "sample_statistics": sample_stats,
             "allowed_source_ids": references,
-            "controls": {
-                "contrast": "0.75..1.25; neutral 1.0; bounded sigmoid x^c/(x^c+(1-x)^c), no fixed-pivot subtraction",
-                "gamma": "0.8..1.2; neutral 1.0; encoded luminance power 1/gamma: above 1 lifts midtones, below 1 darkens",
-                "saturation": "0..1.5; neutral 1.0; Rec.709-weighted encoded RGB channel mixing",
-                "brightness_gain":"0.65..1.35, neutral 1.0. Bounded display-domain brightness, not physical relighting.",
-                "cooling":"-0.15..0.15, neutral 0. Positive reduces red and increases blue using explicit Rec.709 RGB gains; not calibrated Kelvin.",
-                "black_point":"0..0.15 input luma level. Nonzero deliberately discards lower levels; use only when the intended look permits it.",
-                "white_point":"0.75..1 input luma level. Values above this deliberately map to the top; protect highlight information as instructed.",
-            },
+            "controls": CONTROL_SEMANTICS,
+            "highlight_handling": HIGHLIGHT_HANDLING,
             "operation_order": ["luminance_levels","bounded_luminance_tone","peak_protection","OCIO_ASC_CDL_colour"],
         }
         context['execution_capabilities']=technical_context or {'operations':['global_grade'],
@@ -132,6 +149,11 @@ class MuseProvider:
                         "lift the output black floor or recover shadow detail. white_point is an INPUT highlight cutoff: values "
                         "below 1 can discard bright information. Prefer neutral endpoints unless this loss is explicitly intended "
                         "and compatible with the SAME execution_limits. Do not describe input cutoff clipping as lifted blacks. "
+                        "Never use white_point or higher contrast to subdue, protect or darken highlights, sky or clouds: "
+                        "source luma at or above white_point becomes pure white, so lowering it, like raising contrast, makes bright regions brighter and flatter. "
+                        "Set intent.highlight_policy to preserve_detail when bright detail must survive, intentional_lift only when brighter highlights are wanted, "
+                        "intentional_clipping only when clipping is acceptable. A layer that darkens midtones while brightening highlights is rejected "
+                        "before rendering under any other policy; follow highlight_handling and report unattainable darker-highlight requests as unfulfilled_requests. "
                         "If a declared clipping bound cannot coexist with a requested look using supported controls, request a "
                         "targeted adjustment or report the limitation; never raise preservation bounds merely to pass. Review actual previous "
                         "candidate measurements and creative feedback in execution_capabilities. Current request epoch and "
@@ -192,7 +214,7 @@ class MuseProvider:
             'plan':candidate.recipe.proposal.model_dump(mode='json'),'technical_result':candidate.validation,
             'paired_diagnostics':evidence_data['measurements'],'detail_retention':evidence_data['detail_retention'],
             'current_video_feedback':list(feedback),'uncertainty':evidence_data['uncertainty'],
-            'execution_capabilities':candidate.validation.get('execution_capabilities',{}),
+            'execution_capabilities':candidate.validation.get('execution_capabilities',{}),'highlight_handling':HIGHLIGHT_HANDLING,'control_semantics':CONTROL_SEMANTICS,
             'allowed_candidate_ids':[candidate.id]+([previous['id']] if previous else [])}
         content=[];allowed=set()
         for role,images in [('source',evidence_data['source_images']),('candidate',evidence_data['candidate_images']),
@@ -218,8 +240,11 @@ class MuseProvider:
                     "Identify specific mismatches, whether supported tools can correct them, and an optional targeted "
                     "revision_plan using the existing typed controls/capabilities. Keep unaffected controls, subject and intervals unchanged. "
                     "Keep existing execution_limits unchanged; do not remove or raise a preservation bound to make a revision pass. "
-                    "Positive black_point is an INPUT shadow cutoff, not an output black-floor lift. Lowering white_point "
-                    "is an INPUT highlight cutoff. Both can discard source information; use only when compatible with the same bounds. "
+                    "Positive black_point is an INPUT shadow cutoff, not an output black-floor lift. Lowering white_point maps "
+                    "source highlights at or above it to pure white: it BRIGHTENS and flattens highlights and can never subdue a bright sky, "
+                    "so never propose it, or higher contrast, to darken highlights, sky or clouds. If highlights are too bright and no supported control "
+                    "can lower them (see execution_capabilities and highlight_handling), mark that issue correctable=false instead of escalating the same controls. "
+                    "Both input cutoffs can discard source information; use only when compatible with the same bounds. "
                     "Use execution_capabilities as the authoritative tool envelope. Region views are crops of the same "
                     "paired real frames, not independent observations or ground-truth masks. "
                     "A revise decision needs correctable evidence-supported issues. Avoid repeating "

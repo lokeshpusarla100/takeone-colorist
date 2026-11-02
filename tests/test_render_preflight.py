@@ -114,3 +114,98 @@ def test_localized_preflight_blocks_an_unrepairable_layer_before_encoding():
     result=prepare(plan,{0:np.full((10,10,3),2,np.uint8)})
     assert result['report']['status']=='blocked' and result['proposal'] is None
     assert 'background' in result['report']['reason']
+
+
+# ---- Highlight feasibility gate -------------------------------------------------------------
+
+def hazy_sky_frame():
+    """A pale sky over mid-tone ground: the footage class where lowering white_point brightens the sky."""
+    frame=np.full((144,256,3),120,np.uint8)
+    frame[:58]=np.linspace(205,235,256,dtype=np.uint8)[None,:,None]
+    frame[58:]=np.linspace(95,150,256,dtype=np.uint8)[None,:,None]
+    return frame
+
+
+def highlight_recipe(policy='preserve_detail',limits=True,**controls):
+    base=dict(contrast=1.,saturation=1.,gamma=1.)
+    proposal=GradeProposal(parameters=GradeParameters(**{**base,**controls}),summary='Fixture darkening grade.',limitations=[],
+        decisions=[{'parameter':'gamma','reason':'Fixture','source_ids':['user_request']}],
+        intent={'shadow_policy':'intentional_darkness','highlight_policy':policy},
+        execution_limits={'max_new_black_fraction':.03,'max_new_white_fraction':.01} if limits else {})
+    return GradeRecipe(source_sha256='source',brief_sha256='brief',model='mock',schema_version='takeone-grade-v3',
+        prompt_version='colorist-v3',tone_operator='luminance_ocio_v3',proposal=proposal,source_samples=[])
+
+
+# The V3 background grade from the monsoon run: median down, pale sky up and cyan-white.
+SUBDUE_THE_SKY=dict(contrast=1.25,gamma=.8,brightness_gain=.78,cooling=.15,black_point=.05,white_point=.88)
+
+
+def test_darkening_layer_that_lifts_highlights_is_blocked_and_the_cause_is_measured():
+    plan=highlight_recipe(**SUBDUE_THE_SKY);original=plan.model_dump()
+    result=prepare(plan,{70:hazy_sky_frame()})
+    report=result['report']
+    assert result['proposal'] is None and report['status']=='blocked' and report['blocked_by']=='highlight_lift'
+    layer=report['highlights']['layers']['parameters']
+    assert layer['darkening'] and layer['median_change']<-.03 and layer['highlight_change']>.03
+    assert list(layer['drivers'])[0]=='white_point' # largest single cause comes first
+    assert layer['drivers']['white_point']['lift_removed_if_neutral']>.05
+    assert 'white_point' in report['reason'] and 'unfulfilled' in report['reason']
+    assert plan.model_dump()==original # nothing was silently adjusted
+
+
+def test_neutral_endpoint_and_gentler_tone_pass_the_gate():
+    plan=highlight_recipe(contrast=1.,gamma=.85,brightness_gain=.85)
+    result=prepare(plan,{70:hazy_sky_frame()})
+    layer=result['report']['highlights']['layers']['parameters']
+    assert result['proposal'] is not None and layer['darkening'] and layer['highlight_change']<=0
+    assert result['report']['highlights']['violations']==[]
+
+
+def test_only_the_lowered_white_point_is_removed_when_everything_else_is_kept():
+    kept=dict(SUBDUE_THE_SKY,white_point=1.,black_point=0.,contrast=1.)
+    assert prepare(highlight_recipe(**kept),{70:hazy_sky_frame()})['proposal'] is not None
+
+
+def test_gate_runs_without_any_declared_clipping_bound():
+    blocked=prepare(highlight_recipe(limits=False,**SUBDUE_THE_SKY),{70:hazy_sky_frame()})
+    assert blocked['proposal'] is None and blocked['report']['blocked_by']=='highlight_lift'
+    passed=prepare(highlight_recipe(limits=False,gamma=.85,brightness_gain=.85),{70:hazy_sky_frame()})
+    assert passed['proposal'] is not None and passed['report']['status']=='passed'
+    assert passed['proposal'].parameters==highlight_recipe(limits=False,gamma=.85,brightness_gain=.85).proposal.parameters # nothing adjusted
+
+
+@pytest.mark.parametrize('policy',['intentional_lift','intentional_clipping'])
+def test_declared_highlight_lift_is_respected(policy):
+    result=prepare(highlight_recipe(policy=policy,**SUBDUE_THE_SKY),{70:hazy_sky_frame()})
+    assert result['proposal'] is not None and result['report']['highlights']['enforced'] is False
+    assert result['report']['highlights']['violations']==[] and result['report']['highlights']['layers']['parameters']['highlight_change']>.03
+
+
+def test_undeclared_and_preserve_detail_policies_are_both_enforced():
+    for policy in ['review','preserve_detail']:
+        assert prepare(highlight_recipe(policy=policy,**SUBDUE_THE_SKY),{70:hazy_sky_frame()})['proposal'] is None
+
+
+def test_gate_is_skipped_only_when_explicitly_disabled_for_neutral_recovery():
+    plan=highlight_recipe(**SUBDUE_THE_SKY)
+    assert prepare(plan,{70:hazy_sky_frame()},highlight_gate=False)['proposal'] is not None
+
+
+def test_a_brightening_subject_layer_is_exempt_but_the_surroundings_are_checked():
+    plan=localized_recipe(gamma=.85,brightness_gain=.85)
+    plan.proposal.local.foreground=GradeParameters(contrast=1.25,saturation=1.,gamma=1.,brightness_gain=1.3)
+    plan.proposal.execution_limits.max_new_white_fraction=None;plan.proposal.execution_limits.max_new_black_fraction=None
+    ok=prepare(plan,{70:hazy_sky_frame()})
+    layers=ok['report']['highlights']['layers']
+    assert ok['proposal'] is not None and layers['foreground']['darkening'] is False and layers['foreground']['highlight_change']>.03
+    plan.proposal.local.background=GradeParameters(saturation=1.,**SUBDUE_THE_SKY)
+    blocked=prepare(plan,{70:hazy_sky_frame()})
+    assert blocked['proposal'] is None and blocked['report']['highlights']['violations']==['background']
+
+
+def test_new_channel_clipping_is_reported_but_does_not_block_by_itself():
+    plan=highlight_recipe(cooling=.15)
+    result=prepare(plan,{70:hazy_sky_frame()})
+    layer=result['report']['highlights']['layers']['parameters']
+    assert result['proposal'] is not None and layer['darkening'] is False
+    assert layer['new_channel_clip_fraction']>.05 # luma-based white_fraction misses this cyan-white clip

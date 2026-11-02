@@ -25,6 +25,14 @@ from .contracts import LookPreview
 from . import evidence as visual_evidence
 from . import creative_review
 from . import grade_guard
+from . import render_preflight
+
+
+HIGHLIGHT_REPLAN_INSTRUCTION=('Revise the executable plan using the actual images and the measured highlight failure. Keep the same creative brief and execution limits. '
+    'Do not just resubmit the failed controls. The failed plan darkens midtones but BRIGHTENS highlights: lowering white_point (an input cutoff that maps bright pixels to pure white) '
+    'and raising contrast both lift highlights and cannot subdue a bright sky, cloud or water glare. gamma/brightness_gain below 1 darken only upper midtones; no supported control '
+    'makes near-white pixels dark. If the brief requires darker or subdued highlights that the supported controls cannot deliver, list that in unfulfilled_requests instead of approximating it. '
+    'Set intent.highlight_policy to intentional_lift only if brighter highlights are genuinely wanted. Do not call this a review of a completed candidate.')
 
 
 class Service:
@@ -1100,9 +1108,8 @@ class Service:
 
     def guard_grade(self,project_id,candidate,recipe,original,output,source,cancel,technical=None):
         """Resolve input-cutoff mistakes before encoding, retaining the original plan/version."""
-        limits=recipe.proposal.execution_limits
-        if recipe.tone_operator!='luminance_ocio_v3' or (
-            limits.max_new_black_fraction is None and limits.max_new_white_fraction is None):return candidate,recipe,output
+        # Runs for every v3 plan: clipping fit when bounds are declared, and always the highlight feasibility gate.
+        if recipe.tone_operator!='luminance_ocio_v3':return candidate,recipe,output
         self.mutate(project_id,lambda s:setattr(s,'stage','preflight_grade'))
         known_failure=bool(candidate.error and candidate.error.get('code')=='GRADE_EXECUTION_LIMIT' and recipe.execution_preflight)
         all_layers=[recipe.proposal.parameters]+([recipe.proposal.local.foreground,recipe.proposal.local.background] if recipe.proposal.local else [])
@@ -1128,10 +1135,12 @@ class Service:
             self.mutate(project_id,attempted);self.check_cancel(cancel)
             selection,_,_=grade_guard.source_pixels(original,recipe,source,self.settings,cancel,self.store.directory(project_id))
             stats,images=rendering.samples(original,source,self.settings,cancel,selection=selection)
+            highlight_block=failure.details.get('preflight',{}).get('blocked_by')=='highlight_lift'
+            instruction=(HIGHLIGHT_REPLAN_INSTRUCTION if highlight_block else
+                'Revise the executable plan using the actual images and failure measurements. Keep the same creative brief and execution limits. Do not just resubmit the failed controls. Input-cutoff removal was insufficient; supported tonal controls or local treatment may need revision. Do not call this a review of a completed candidate.')
             context={**(technical or {}),'current_video_feedback':current_feedback(state),
-                'preflight_failure':{'failed_plan':recipe.proposal.model_dump(mode='json'),'evidence':failure.details,
-                    'instruction':'Revise the executable plan using the actual images and failure measurements. Keep the same creative brief and execution limits. Do not just resubmit the failed controls. Input-cutoff removal was insufficient; supported tonal controls or local treatment may need revision. Do not call this a review of a completed candidate.'}}
-            request_id=self.count_call(project_id,'Muse is revising a clipping-incompatible plan')
+                'preflight_failure':{'failed_plan':recipe.proposal.model_dump(mode='json'),'evidence':failure.details,'instruction':instruction}}
+            request_id=self.count_call(project_id,'Muse is revising a highlight-incompatible plan' if highlight_block else 'Muse is revising a clipping-incompatible plan')
             call=self.store.get(project_id).model_calls
             try:proposal,usage=self.provider.grade(state.brief,state.analysis,source,stats,images,technical_context=context)
             except Problem as error:
@@ -1148,6 +1157,10 @@ class Service:
                 creative_review.execution_identity(proposal,duration=source.duration)==creative_review.execution_identity(recipe.proposal,duration=source.duration)):
                 failure.details['replan_outcome']='No different supported plan with the same protections was returned.'
                 failure.action='Muse could not repair this plan within the saved constraints. Refine the creative brief; repeated retry will not make another planning call.'
+                if proposal.unfulfilled_requests:
+                    failure.details['unfulfilled_instructions']='; '.join(proposal.unfulfilled_requests)[:1500]
+                    failure.action=('Muse reports that the supported controls cannot execute: '+failure.details['unfulfilled_instructions']
+                                    +'. Refine the brief or accept a limited result; repeated retry will not make another planning call.')[:1500]
                 raise
             revised=recipe.model_copy(deep=True);revised.proposal=proposal;revised.execution_preflight=None;revised.execution_adjustment=None
             revised.timeline=(recipe.timeline or local_grading.timeline(self.store.directory(project_id),source,self.settings,cancel)) if proposal.local else None
@@ -1163,6 +1176,11 @@ class Service:
             self.store.candidate_artifact(project_id,child.id,'recipe.json',revised.model_dump(mode='json'))
             return self.guard_grade(project_id,child,revised,original,self.store.directory(project_id)/'candidates'/child.id,source,cancel,technical)
         self.check_cancel(cancel)
+        if report.get('highlight_gate_only'):
+            self.mutate(project_id,lambda s:self.event(s,'Highlight feasibility check passed',
+                'No layer darkens midtones while lifting highlights beyond the allowed margin; no clipping bound was declared, so nothing else was checked or adjusted.',
+                candidate=candidate.name,elapsed_seconds=report['elapsed_seconds']))
+            return candidate,recipe,output
         if report.get('changes'):
             state=self.store.get(project_id)
             if sum(c.brief_sha256==candidate.brief_sha256 for c in state.candidates)>=self.settings.max_render_iterations:
@@ -1414,6 +1432,21 @@ class Service:
             state.render_target_id=target.id;state.receipts[command_id]=fingerprint
             self.submit(state,'review');return state
 
+    def revision_highlight_block(self,project_id,state,candidate,proposal,cancel):
+        """Preflight report if a critic revision would lift highlights while darkening, else None. Fails open:
+        a revision that cannot be assessed here is still checked by guard_grade before it is rendered."""
+        recipe=candidate.recipe
+        if recipe is None or recipe.tone_operator!='luminance_ocio_v3':return None
+        try:
+            directory=self.store.directory(project_id)
+            _,pixels,_=grade_guard.source_pixels(directory/'source.bin',recipe,state.source,self.settings,cancel,directory)
+            trial=recipe.model_copy(deep=True);trial.proposal=proposal
+            report=render_preflight.prepare(trial,pixels)['report']
+        except Problem as error:
+            if error.code in {'JOB_CANCELLED','SOURCE_CHANGED'}:raise
+            return None
+        return report if report.get('blocked_by')=='highlight_lift' else None
+
     def review_and_revise(self,project_id,cancel,force=False):
         def finish(selected,stage='render_ready'):
             def done(s):s.selected_candidate_id=selected;s.status='render_ready';s.stage=stage;s.active_job=None
@@ -1494,7 +1527,7 @@ class Service:
                 self.mutate(project_id,failed);self.check_cancel(cancel)
                 finish(state.selected_candidate_id or candidate.id,'creative_review_failed');return
             preferred=review.preferred_candidate_id or candidate.id
-            state=self.store.get(project_id);proposal=review.revision_plan;stop=None
+            state=self.store.get(project_id);proposal=review.revision_plan;stop=None;blocked=None
             if proposal and candidate.brief_sha256==brief_hash:
                 # A model revision cannot erase an execution bound on this same
                 # frozen brief. New explicit user feedback creates a new brief.
@@ -1511,10 +1544,17 @@ class Service:
                 stop='render_iteration_limit'
             elif any(c.recipe and c.brief_sha256==brief_hash and creative_review.execution_identity(c.recipe.proposal,c.recipe.tone_operator,state.source.duration)==creative_review.execution_identity(proposal,duration=state.source.duration) for c in state.candidates):
                 stop='unchanged_or_repeated_execution_plan'
+            elif (blocked:=self.revision_highlight_block(project_id,state,candidate,proposal,cancel)) is not None:
+                stop='revision_would_lift_highlights'
             elif candidate.recipe.proposal.local and candidate.recipe.proposal.local.preserve_subject_color and (not proposal.local or not proposal.local.preserve_subject_color):
                 stop='revision_would_weaken_subject_protection'
             if stop:
-                self.mutate(project_id,lambda s:setattr(next(c for c in s.candidates if c.id==candidate.id),'revision_stop_reason',stop))
+                def stopped(s):
+                    setattr(next(c for c in s.candidates if c.id==candidate.id),'revision_stop_reason',stop)
+                    if blocked is not None:
+                        self.event(s,'Revision not rendered',blocked['reason'],actor='app',candidate=candidate.name,stop_reason=stop,
+                                   blocked_by=blocked.get('blocked_by'),violating_layers=', '.join(blocked['highlights']['violations']))
+                self.mutate(project_id,stopped)
                 finish(preferred);return
             next_candidate=RenderCandidate(id=str(uuid4()),name='V'+str(len(state.candidates)+1),source_sha256=state.source.sha256,
                 brief_sha256=brief_hash,generation_id=candidate.generation_id or str(uuid4()),parent_id=candidate.id,iteration=candidate.iteration+1)

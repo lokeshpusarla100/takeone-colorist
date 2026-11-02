@@ -1,7 +1,17 @@
-"""Bounded level fitting against a plan's own clipping limits, before encoding.
+"""Bounded level fitting and highlight feasibility, checked before encoding.
 
-This is a planning check on actual sampled pixels, not final encoded QC. It never
+Both are planning checks on actual sampled pixels, not final encoded QC. Neither
 raises a limit, picks a look, changes colour/gamma/gain or mutates a saved recipe.
+
+Clipping fit: input black/white cutoffs are minimally restored against the plan's
+own declared clipping fractions.
+
+Highlight gate: a layer that darkens the typical pixel but lifts the brightest
+ones contradicts a brief that asks for subdued or controlled highlights. The
+supported operator keeps white at white, and lowering ``white_point`` or raising
+``contrast`` pushes upper tones UP, so such a plan can never deliver a darker sky.
+The gate blocks it before any SAM request or encode and reports the measured
+cause, so a replan (or an honest unfulfilled request) replaces a wasted render.
 """
 import numpy as np
 
@@ -10,6 +20,12 @@ from .errors import Problem
 
 WEIGHTS=np.array([.2126,.7152,.0722],np.float32)
 MAX_SEARCH_STEPS=12
+# A layer "darkens" when its sampled median luma falls by at least this much.
+DARKENING_MEDIAN_DROP=.03
+# Such a layer must not raise the sampled 95th-percentile luma by more than this.
+HIGHLIGHT_LIFT_LIMIT=.03
+# Policies under which brighter highlights are an explicit, declared intent.
+LIFT_ALLOWED_POLICIES={'intentional_lift','intentional_clipping'}
 
 
 def _frames(source_pixels):
@@ -91,7 +107,7 @@ def _fit(parameters,frames,limits,counter):
     return current,before,after
 
 
-def prepare(recipe,source_pixels):
+def _prepare_clipping(recipe,source_pixels):
     """Return a typed proposal and measured report; callers must run encoded QC.
 
     proposal is None for blocked/not_applicable. A needs_encoded_check proposal
@@ -169,3 +185,78 @@ def prepare(recipe,source_pixels):
     report.update(status=('corrected' if changed else 'passed') if after['envelope_passed'] else 'needs_encoded_check',
                   changed=bool(changed),changes=changed,after=after,evaluations=counter[0])
     return {'proposal':proposal,'report':report}
+
+
+def _layer_response(parameters,frames):
+    """Mean sampled change in median/p95 luma, and worst new any-channel clipping, for one layer."""
+    rows=[]
+    for rgb,_,_ in frames.values():
+        before=rgb@WEIGHTS;result=color_processing.apply_rgb(rgb,parameters);after=result@WEIGHTS
+        rows.append((float(np.median(after)-np.median(before)),float(np.quantile(after,.95)-np.quantile(before,.95)),
+                     float(np.mean((result>=254/255).any(axis=-1))-np.mean((rgb>=254/255).any(axis=-1)))))
+    table=np.array(rows)
+    return {'median_change':float(table[:,0].mean()),'highlight_change':float(table[:,1].mean()),
+            # Informational: luma-based clipping bounds miss a cooled sky whose blue/green channel
+            # saturates while luma stays below 254/255. Not a block on its own.
+            'new_channel_clip_fraction':float(max(0.,table[:,2].max()))}
+
+
+def _lift_drivers(parameters,frames,current,minimum=.005):
+    """Controls whose neutral value would lower the highlight (p95) change, with the size of that effect."""
+    drivers={}
+    for name,neutral in [('white_point',1.),('contrast',1.),('black_point',0.)]:
+        value=getattr(parameters,name)
+        if abs(value-neutral)<=1e-12:continue
+        trial=parameters.model_copy(update={name:neutral})
+        neutral_change=_layer_response(trial,frames)['highlight_change']
+        if current-neutral_change>=minimum:
+            drivers[name]={'value':value,'highlight_change_if_neutral':neutral_change,'lift_removed_if_neutral':current-neutral_change}
+    return dict(sorted(drivers.items(),key=lambda item:-item[1]['lift_removed_if_neutral']))
+
+
+def assess_highlights(proposal,frames):
+    """Per-layer highlight response on bounded source samples; violations are darkening layers that lift highlights."""
+    policy=proposal.intent.highlight_policy
+    layers=[('parameters',proposal.parameters)]
+    if proposal.local:layers+=[('foreground',proposal.local.foreground),('background',proposal.local.background)]
+    report={'policy':policy,'enforced':policy not in LIFT_ALLOWED_POLICIES,'darkening_median_drop':DARKENING_MEDIAN_DROP,
+            'highlight_lift_limit':HIGHLIGHT_LIFT_LIMIT,'layers':{},'violations':[]}
+    for name,parameters in layers:
+        response=_layer_response(parameters,frames)
+        darkening=response['median_change']<=-DARKENING_MEDIAN_DROP
+        entry={**response,'darkening':darkening}
+        if report['enforced'] and darkening and response['highlight_change']>HIGHLIGHT_LIFT_LIMIT:
+            entry['drivers']=_lift_drivers(parameters,frames,response['highlight_change']);report['violations'].append(name)
+        report['layers'][name]=entry
+    return report
+
+
+def highlight_reason(report):
+    parts=[]
+    for name in report['violations']:
+        entry=report['layers'][name]
+        causes=', '.join(f"{control} {info['value']:g} (neutral removes {info['lift_removed_if_neutral']:.3f} of the lift)"
+                         for control,info in entry.get('drivers',{}).items())
+        parts.append(f"{name}: median luma {entry['median_change']:+.3f} but highlight (p95) luma {entry['highlight_change']:+.3f}"
+                     +(f"; main drivers {causes}" if causes else '; no single input-level control explains it, so gamma/brightness_gain or the layer treatment must change'))
+    return ('A darkening layer also brightens highlights, so bright sky/cloud/water cannot become darker or more subdued. '
+            +' | '.join(parts)+'. Lowering white_point or raising contrast brightens highlights; gamma/brightness_gain below 1 '
+            'darken only upper midtones. Revise the controls, or report the darker-highlight request as unfulfilled.')
+
+
+def prepare(recipe,source_pixels,*,highlight_gate=True):
+    """Clipping fit, then the highlight gate on the resulting proposal.
+
+    A highlight block returns proposal=None with report.blocked_by='highlight_lift';
+    nothing is silently adjusted. The gate runs even when no clipping fraction was
+    declared. ``highlight_gate=False`` is only for the neutral-level recovery path.
+    """
+    result=_prepare_clipping(recipe,source_pixels)
+    proposal=result['proposal']
+    if recipe.tone_operator!='luminance_ocio_v3' or proposal is None or not highlight_gate:return result
+    assessment=assess_highlights(proposal,_frames(source_pixels))
+    result['report']['highlights']=assessment
+    if assessment['violations']:
+        result['report'].update(status='blocked',blocked_by='highlight_lift',reason=highlight_reason(assessment))
+        return {'proposal':None,'report':result['report']}
+    return result

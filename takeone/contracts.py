@@ -91,7 +91,9 @@ class GradeParameters(StrictModel):
 class CreativeIntent(StrictModel):
     description: str = Field(default='',max_length=1600)
     shadow_policy: Literal['preserve_detail','intentional_darkness','intentional_black','review'] = 'review'
-    highlight_policy: Literal['preserve_detail','intentional_clipping','review'] = 'review'
+    # intentional_lift / intentional_clipping are the only policies under which a
+    # layer that darkens midtones may also brighten highlights (see render_preflight).
+    highlight_policy: Literal['preserve_detail','intentional_lift','intentional_clipping','review'] = 'review'
 
 
 class ExecutionLimits(StrictModel):

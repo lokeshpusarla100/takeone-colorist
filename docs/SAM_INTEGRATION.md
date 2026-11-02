@@ -10,7 +10,7 @@ Manual results are diagnostic masks and a colour-coded proxy overlay. Automatic 
 
 ## Mapping and artifacts
 
-Before a remote call, verify the original checksum, upright geometry, constant frame rate, source/proxy frame counts and relative timestamps. Reject unsupported mapping rather than guessing frame positions. Excerpts preserve the first source frame indices and are verified after encoding. This version rejects VFR, rotation metadata and non-matching source/proxy timing.
+Before a remote call, verify the original checksum, upright geometry, constant frame rate, source/proxy frame counts and relative timestamps. A nonzero container start is supported only through that verified first-decoded-frame PTS normalization: absolute source/proxy PTS are retained for every frame and relative instants must agree, so timestamps are never blindly reset. Reject unsupported mapping rather than guessing frame positions. Excerpts preserve the first source frame indices and are verified after encoding. This version rejects VFR, rotation metadata and non-matching source/proxy timing.
 
 Each project stores segmentations/<run-id>/ with:
 

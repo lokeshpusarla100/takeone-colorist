@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MediaAsset, Version } from '../lib/types';
 import { useAssetUrl } from '../lib/useWorkspace';
 import { AppError, asAppError, mediaFailure } from '../lib/errors';
+import { createComparisonSync, isPlaybackAbort } from '../lib/playbackSync';
 
 export default function Viewer({source,selectedVersion,selectedAsset,busy,onChooseVideo,onDropVideo,onError,onPreviewReady}:{
   source:MediaAsset|null; selectedVersion?:Version; selectedAsset?:MediaAsset; busy:boolean;
@@ -14,12 +15,30 @@ export default function Viewer({source,selectedVersion,selectedAsset,busy,onChoo
   const main = useRef<HTMLVideoElement>(null);
   const before = useRef<HTMLVideoElement>(null);
   const position = useRef(0);
+  const seeking = useRef(false);
   const rendered = selectedVersion?.kind === 'rendered' && selectedAsset;
   const asset = rendered && !original ? selectedAsset : source;
   const {url,error} = useAssetUrl(asset??undefined);
   const {url:sourceUrl,error:sourceError} = useAssetUrl(compare ? source??undefined : undefined);
-  useEffect(()=>{setOriginal(false);setCompare(false);},[selectedVersion?.id]);
-  useEffect(()=>{position.current=0;},[source?.id]);
+
+  // One coordinator owns every play/pause/seek interaction between the two
+  // players. Expected AbortError cancellations (a play interrupted by a
+  // pause, seek or source change) are swallowed inside it; a genuine failure
+  // is reported once and only then is comparison turned off.
+  const comparison = useMemo(() => createComparisonSync(
+    () => main.current,
+    () => before.current,
+    (cause) => {
+      if (isPlaybackAbort(cause)) return;
+      setCompare(false);
+      onError(asAppError(cause, 'media.compare'));
+    },
+  ), [onError]);
+
+  useEffect(()=>{setOriginal(false);setCompare(false);comparison.invalidate();},[selectedVersion?.id,comparison]);
+  useEffect(()=>{position.current=0;comparison.invalidate();},[source?.id,comparison]);
+  useEffect(()=>{if(!compare) comparison.pause();},[compare,comparison]);
+  useEffect(()=>()=>comparison.invalidate(),[comparison]);
   useEffect(()=>{
     setFailed(false);
     if(!url)return;
@@ -36,22 +55,15 @@ export default function Viewer({source,selectedVersion,selectedAsset,busy,onChoo
   },[url,attempt,onError,asset?.name]);
   useEffect(()=>{if(error) onError(error);},[error,onError]);
   useEffect(()=>{if(sourceError) onError(sourceError);},[sourceError,onError]);
-  const sync = () => {
-    if(main.current && before.current) {
-      if(Math.abs(main.current.currentTime-before.current.currentTime)>.1) before.current.currentTime=main.current.currentTime;
-      before.current.playbackRate=main.current.playbackRate;
-    }
-  };
-  const playBefore = () => {
-    sync();
-    void before.current?.play().catch(cause=>{setCompare(false);onError(asAppError(cause,'media.compare'));});
-  };
+
+  const resumeComparison = () => { if (compare && main.current && !main.current.paused) void comparison.play(); };
+
   return <section className="viewer" aria-label="Video viewer"
     onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();if(!busy&&e.dataTransfer.files[0])onDropVideo(e.dataTransfer.files[0]);}}>
     {rendered && <div className="viewer-options">
-      <button aria-pressed={original} onClick={()=>{setOriginal(true);setCompare(false);}}>Original</button>
-      <button aria-pressed={!original} onClick={()=>setOriginal(false)}>Render</button>
-      <label><input type="checkbox" checked={compare} onChange={e=>{setOriginal(false);setCompare(e.target.checked);}}/>Compare</label>
+      <button aria-pressed={original} onClick={()=>{comparison.pause();setOriginal(true);setCompare(false);}}>Original</button>
+      <button aria-pressed={!original} onClick={()=>{comparison.invalidate();setOriginal(false);}}>Render</button>
+      <label><input type="checkbox" checked={compare} onChange={e=>{setOriginal(false);setCompare(e.target.checked);if(!e.target.checked)comparison.pause();}}/>Compare</label>
     </div>}
     {!source ? <div className="empty-viewer"><p>No video loaded.</p><button onClick={onChooseVideo} disabled={busy}>Import video</button><span>Or drop a file here.</span></div>
     : error || failed ? <div className="empty-viewer">
@@ -61,16 +73,19 @@ export default function Viewer({source,selectedVersion,selectedAsset,busy,onChoo
     </div>
     : !url ? <div className="empty-viewer" role="status">Loading saved video…</div>
     : <div className={'video-container '+(compare?'comparison':'')}>
-      {compare && sourceUrl && <div><span className="video-label">Original</span><video ref={before} src={sourceUrl} muted playsInline preload="metadata"
-        aria-label="Original comparison video" onLoadedData={()=>{sync();if(main.current&&!main.current.paused)playBefore();}}
+      {compare && sourceUrl && <div><span className="video-label">Original</span><video ref={before} src={sourceUrl} muted playsInline preload="auto"
+        aria-label="Original comparison video"
+        onLoadedData={()=>{comparison.sync(true);resumeComparison();}}
         onError={e=>{setCompare(false);onError(mediaFailure(e.currentTarget.error,source.name,'media.compare'));}}/></div>}
       <div>{compare && <span className="video-label">Render</span>}<video ref={main} src={url} controls playsInline preload="metadata"
         aria-label={rendered&&!original?'Selected rendered video':'Original video'}
-        onLoadedMetadata={e=>{e.currentTarget.currentTime=Math.min(position.current,e.currentTarget.duration);}}
+        onLoadedMetadata={e=>{e.currentTarget.currentTime=Math.min(position.current,e.currentTarget.duration||position.current);}}
         onCanPlay={onPreviewReady}
-        onTimeUpdate={e=>{position.current=e.currentTarget.currentTime;if(compare)sync();}}
-        onSeeking={()=>{if(compare)sync();}} onRateChange={()=>{if(compare)sync();}}
-        onPlay={()=>{if(compare)playBefore();}} onPause={()=>before.current?.pause()} onEnded={()=>before.current?.pause()}
+        onTimeUpdate={e=>{position.current=e.currentTarget.currentTime;if(compare&&!seeking.current&&comparison.sync())resumeComparison();}}
+        onSeeking={()=>{if(compare){seeking.current=true;comparison.pause();}}}
+        onSeeked={()=>{seeking.current=false;if(compare){comparison.sync(true);resumeComparison();}}}
+        onRateChange={()=>{if(compare)comparison.sync();}}
+        onPlay={resumeComparison} onPause={()=>comparison.pause()} onEnded={()=>comparison.pause()}
         onError={e=>{setFailed(true);onError(mediaFailure(e.currentTarget.error,asset?.name??'unknown','media.playback'));}}/></div>
     </div>}
     {selectedVersion?.kind==='draft' && <p className="inline-note">Unrendered recipe. Showing original footage.</p>}

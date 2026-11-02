@@ -131,7 +131,7 @@ def treatment_filter(parameters: GradeParameters, *, operator='bounded_sigmoid_v
     return "lutrgb=r='"+tone+"':g='"+tone+"':b='"+tone+"',colorchannelmixer="+matrix+','+balance+',format=gbrp16le'
 
 
-def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None) -> str:
+def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,first_frame_offset=0.) -> str:
     operator=recipe.tone_operator if recipe else 'bounded_sigmoid_v2'
     def treatment(p,protected=False):
         return color_processing.lut(directory,p,protected) if operator=='luminance_ocio_v3' else treatment_filter(p,operator=operator,protected=protected)
@@ -143,19 +143,34 @@ def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None) -> 
         mapping=recipe.timeline['frame_map'];rate=Fraction(mapping['proxy']['rate']);dt=float(1/rate)
         weights=[];cuts=set(recipe.timeline['cut_frames'])
         for a,b in ranges:
-            begin=mapping['frames'][a]['time'];end=mapping['frames'][b]['time']+dt
-            ramp=min(.15,(b-a+1)*dt/2)
-            incoming='1' if a in cuts else f'clip((T-{begin:.9f})/{ramp:.9f},0,1)'
-            outgoing='1' if b+1==mapping['frame_count'] or b+1 in cuts else f'clip(({end:.9f}-T)/{ramp:.9f},0,1)'
-            weights.append(f'(gte(T,{begin-dt*.25:.9f})*lt(T,{end-dt*.75:.9f})*min({incoming},{outgoing}))')
+            # Frame-index weight, not presentation time. The render preserves
+            # source PTS (-copyts -start_at_zero), so a video stream whose
+            # first PTS sits after the audio/container origin would shift
+            # every T-based gate and silently ungrade the final frame(s).
+            # The localized timeline is verified CFR, so frame index is the
+            # exact identity; the 0.15 s ramp is expressed in frames.
+            ramp_frames=max(1.,min(.15/dt,(b-a+1)/2))
+            # blend's all_expr N is 1-based (verified against the FFmpeg in
+            # use: the last of 12 frames evaluates N=12), unlike the 0-based
+            # n in the enable expression. Convert once: index = N-1.
+            incoming='1' if a in cuts else f'clip((N-1-{a})/{ramp_frames:.9f},0,1)'
+            outgoing='1' if b+1==mapping['frame_count'] or b+1 in cuts else f'clip(({b}-N+2)/{ramp_frames:.9f},0,1)'
+            weights.append(f'(gte(N,{a+1})*lte(N,{b+1})*min({incoming},{outgoing}))')
         weight='+'.join(weights)
         # On disabled frames maskedmerge passes its first input (the base treatment).
         start+=',split=3[basein][fgin][bgin];'
         start+='[basein]'+treatment(parameters)+'[base];'
         start+='[fgin]'+treatment(local.foreground,local.preserve_subject_color)+'[fg];'
         start+='[bgin]'+treatment(local.background)+'[bg];'
-        # Matroska stores milliseconds; rebase the verified CFR mask by frame index.
-        start+=f'[1:v]settb=expr={rate.denominator}/{rate.numerator},setpts=N,format=gbrp16le,setparams=range=full[mask];'
+        # Matroska stores milliseconds; rebase the verified CFR mask by frame
+        # index and place each mask half a frame before its video frame.
+        # The video keeps its preserved PTS (which may start after the audio/
+        # container origin); framesync pairs a video frame with the latest
+        # mask at or before it, so an exactly coincident or late mask lags
+        # one frame, while a zero-based mask misaligns when the video origin
+        # is offset by a frame or more.
+        offset_ticks=round((float(first_frame_offset)-float(1/rate)/2)*90000)
+        start+=f'[1:v]settb=expr=1/90000,setpts=(N*{90000*rate.denominator})/{rate.numerator}+{offset_ticks},format=gbrp16le,setparams=range=full[mask];'
         start+='[bg][fg][mask]maskedmerge=planes=7[local];'
         # The base is selected outside requested intervals, not a repeated stale mask.
         start+=f"[base][local]blend=all_expr='A+(B-A)*({weight})':enable='{condition}':eof_action=endall:repeatlast=0,"
@@ -172,10 +187,19 @@ def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Se
     source=source.resolve();directory=directory.resolve()
     audio = "copy" if audio_codec in {"aac", "mp3", "alac"} else "aac"
     inputs=['-i',str(source)]
-    if recipe.proposal.mode=='localized':inputs+=['-i',str(directory/'matte.mkv')]
+    offset=0.
+    if recipe.proposal.mode=='localized':
+        inputs+=['-i',str(directory/'matte.mkv')]
+        # In-filter first video PTS = absolute first-frame PTS minus the
+        # container origin that -start_at_zero shifts by.
+        try:
+            offset=float(recipe.timeline['frame_map']['frames'][0]['source_pts'])-float(timing_policy['source_origin_seconds'])
+        except (KeyError,TypeError,ValueError):
+            offset=0.
+        if not (offset==offset and abs(offset)!=float('inf')):offset=0.
     return [settings.ffmpeg, "-hide_banner", "-v", "error", "-nostdin", "-y",
             "-filter_complex_threads", str(filter_threads or min(4,max(1,(os.cpu_count() or 2)//3))), "-copyts", "-start_at_zero", *inputs,
-            "-filter_complex", filter_graph(recipe.proposal.parameters,recipe=recipe,directory=directory),
+            "-filter_complex", filter_graph(recipe.proposal.parameters,recipe=recipe,directory=directory,first_frame_offset=offset),
             "-map", "[master]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "17",
             "-threads", "4", "-pix_fmt", "yuv420p", "-fps_mode", "passthrough",
             "-enc_time_base:v",timing_policy['encoder_time_base'],
@@ -184,6 +208,7 @@ def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Se
             "-movflags", "+faststart", str(directory / "grade.partial.mp4"),
             "-map", "[preview]", "-map", "0:a:0?", "-c:v", "libvpx-vp9", "-deadline", "realtime",
             "-cpu-used", "6", "-crf", "32", "-b:v", "0", "-threads", "4", "-pix_fmt", "yuv420p",
+            "-g", "48", "-keyint_min", "48",
             "-fps_mode", "passthrough", "-enc_time_base:v",timing_policy['encoder_time_base'],
             "-c:a", "libopus", "-b:a", "96k", str(directory / "preview.partial.webm")]
 

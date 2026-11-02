@@ -43,13 +43,42 @@ def source_pixels(source,recipe,original,settings,cancel,cache_dir):
 def prepare_execution(source,output,recipe,original,settings,cancel,cache_dir=None,*,force_neutral_levels=False):
     """Return a new effective recipe/report; caller owns candidate lineage/persistence."""
     started=time.monotonic();limits=recipe.proposal.execution_limits
-    if recipe.tone_operator!='luminance_ocio_v3' or recipe.proposal.mode!='global' or (
+    if recipe.tone_operator!='luminance_ocio_v3' or (
         limits.max_new_black_fraction is None and limits.max_new_white_fraction is None):
-        return recipe,{'status':'not_applicable','reason':'Only bounded v3 global clipping is preflighted; other execution checks remain authoritative.'}
+        return recipe,{'status':'not_applicable','reason':'Only bounded v3 clipping with declared limits is preflighted; other execution checks remain authoritative.'}
     source=Path(source);output=Path(output);output.mkdir(parents=True,exist_ok=True)
     rendering.verify_source(source,original,settings,cancel)
     selection,pixels,hit=source_pixels(source,recipe,original,settings,cancel,cache_dir or output)
     decision=prepare(recipe,pixels);proposal=decision['proposal']
+    if recipe.proposal.mode=='localized':
+        # Mathematical layer-envelope preflight only, before any SAM request
+        # or full encode. There is no encoded localized sparse probe, so a
+        # pass here never replaces matte/output QC.
+        report={'version':'grade-guard-v1','math':decision['report'],'encoded_checks':[],
+                'source_sample_cache_hit':hit,'elapsed_seconds':time.monotonic()-started,'limits':limits.model_dump(),
+                'uncertainty':['Localized preflight is a per-layer mathematical envelope on bounded samples, not an encoded or masked certification. Final dense QC remains authoritative.']}
+        if proposal is None:
+            report['status']='blocked';sam.atomic(output/'preflight.json',report)
+            raise Problem('GRADE_PREFLIGHT_FAILED','The planned localized grade cannot meet its clipping limits without changing creative controls.',
+                          'Revise the grade to preserve more shadow/highlight detail. No SAM request, full render or critic call was made.',422,preflight=report)
+        effective=recipe.model_copy(deep=True);effective.proposal=proposal;effective.evidence_selection=selection
+        effective.source_samples=[{**evidence.measure(p),'frame_index':i,'requested_time':selection['manifest']['times'][i]} for i,p in pixels.items()]
+        changed={}
+        for layer,before_params,after_params in [
+            ('parameters',recipe.proposal.parameters,proposal.parameters),
+            ('foreground',recipe.proposal.local.foreground,proposal.local.foreground),
+            ('background',recipe.proposal.local.background,proposal.local.background)]:
+            for field in ['black_point','white_point']:
+                if getattr(before_params,field)!=getattr(after_params,field):
+                    changed[f'{layer}.{field}']={'from':getattr(before_params,field),'to':getattr(after_params,field)}
+        report['status']='corrected' if changed else decision['report']['status'];report['changes']=changed
+        effective.execution_preflight=report
+        if changed:
+            effective.execution_adjustment={'kind':'input_level_clipping_recovery','changes':changed,
+                'source_recipe_sha256':rendering.fingerprint(recipe.model_dump(mode='json')),
+                'reason':'Localized input level cutoffs were reduced per layer to satisfy the existing clipping bounds. Creative tone, palette and limits are unchanged.'}
+        sam.atomic(output/'preflight.json',report)
+        return effective,report
     base=recipe.model_copy(deep=True);base.evidence_selection=selection
     source_records=[]
     for i,p in pixels.items():

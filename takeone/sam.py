@@ -78,14 +78,24 @@ def mapping(directory,source,settings,cancel):
         raise Problem('SAM_GEOMETRY_UNSUPPORTED','Rotated source metadata is not verified for SAM mapping yet.',
                       'Use an upright source with zero rotation metadata.',422)
     a,b=frame_info(original,settings,cancel),frame_info(proxy,settings,cancel)
+    # Strict frame identity with a nonzero start: neither file's timestamps
+    # are reset or snapped to a nominal rate. Each frame keeps its absolute
+    # source/proxy PTS; only the *comparison* is made on each file's own
+    # first-frame-relative timeline, and every relative instant must agree.
+    # A shifted container start is therefore supported exactly when the two
+    # decoded frame sequences still correspond one to one, and rejected when
+    # their relative timing drifts, however small the absolute offset is.
     if len(a['pts'])!=len(b['pts']) or a['rate']!=b['rate'] or any(abs(x-y)>0.002 for x,y in zip(a['normalized'],b['normalized'])):
         raise Problem('SAM_FRAME_MAPPING_FAILED','Source and proxy frames do not align one to one.',
                       'Prepare a frame-preserving proxy before segmentation. No SAM request was made.',422)
     if (a['width'],a['height'])!=(source.width,source.height) or abs(a['width']/a['height']-b['width']/b['height'])>0.005:
         raise Problem('SAM_GEOMETRY_UNSUPPORTED','Source/proxy geometry is not a verified scale-only mapping.',
                       'Use upright square-pixel footage.',422)
-    return {'schema_version':1,'source_sha256':source.sha256,'proxy_sha256':checksum(proxy),
+    return {'schema_version':2,'source_sha256':source.sha256,'proxy_sha256':checksum(proxy),
         'source':{k:a[k] for k in ['width','height','rate']},'proxy':{k:b[k] for k in ['width','height','rate']},
+        'normalization':{'method':'first_decoded_frame_pts','source_offset_seconds':a['pts'][0],
+                          'proxy_offset_seconds':b['pts'][0],
+                          'max_relative_error_seconds':max((abs(x-y) for x,y in zip(a['normalized'],b['normalized'])),default=0.)},
         'frame_count':len(a['pts']),'frames':[{'index':i,'source_pts':x,'proxy_pts':y,'time':a['normalized'][i]}
                                              for i,(x,y) in enumerate(zip(a['pts'],b['pts']))]}
 
@@ -262,7 +272,7 @@ def overlay(proxy,directory,manifest,settings,cancel):
     output=directory/'overlay.partial.webm'
     encode=[settings.ffmpeg,'-v','error','-y','-f','rawvideo','-pixel_format','bgr24','-video_size',f'{w}x{h}',
             '-framerate',geometry['rate'],'-i','-','-an','-c:v','libvpx-vp9','-deadline','realtime','-cpu-used','6',
-            '-threads','2','-crf','30','-b:v','0',str(output)]
+            '-threads','2','-crf','30','-b:v','0','-g','48','-keyint_min','48',str(output)]
     with (directory/'decode.log').open('wb') as dl,(directory/'encode.log').open('wb') as el:
         a=subprocess.Popen(decode,stdout=subprocess.PIPE,stderr=dl)
         b=subprocess.Popen(encode,stdin=subprocess.PIPE,stderr=el)

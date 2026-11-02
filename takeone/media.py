@@ -102,12 +102,23 @@ def make_previews(directory: Path, source: Source, project_id: str, settings: Se
     command(base + ["-filter_complex_threads","2","-filter_complex",graph,
                     "-map", "[display]", "-map", "0:a:0?", "-c:v", "libvpx-vp9",
                     "-deadline", "realtime", "-cpu-used", "6", "-crf", "32", "-b:v", "0", "-pix_fmt", "yuv420p",
+                    # Bounded keyframe interval: comparison scrubbing must not
+                    # depend on a keyframe up to a whole GOP sequence away.
+                    "-g", "48", "-keyint_min", "48",
                     "-c:a", "libopus", "-b:a", "96k", str(preview_tmp),
                     "-map", "[analysis]", "-an",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
                     "-fps_mode", "vfr", "-movflags", "+faststart", str(analysis_tmp)], cancel)
     metadata = probe(preview_tmp, settings, cancel)
     v = next(s for s in metadata["streams"] if s["codec_type"] == "video")
+    if v.get("codec_name") != "vp9" or v.get("pix_fmt") != "yuv420p":
+        raise Problem("PREVIEW_ENCODING_UNSUPPORTED", "The browser preview was not encoded as VP9 yuv420p.",
+                      "The preview has not been accepted. Retry source preparation.", 422,
+                      codec=v.get("codec_name"), pixel_format=v.get("pix_fmt"))
+    # A preview that cannot be decoded end to end here would only fail later
+    # in the browser, where it looks like a decoder fault. Reject it now.
+    command([settings.ffmpeg, "-v", "error", "-xerror", "-nostdin", "-i", str(preview_tmp),
+             "-map", "0:v:0", "-map", "0:a:0?", "-f", "null", "-"], cancel, 120)
     if abs(float(metadata["format"]["duration"]) - source.duration) > 0.5:
         raise Problem("PREVIEW_TIMING_MISMATCH", "The preview duration does not match the source.",
                       "The preview has not been accepted. Inspect the source timing.", 422)

@@ -97,13 +97,19 @@ def test_correction_obeys_candidate_budget_before_full_encode(settings,dark_clip
         assert not calls
 
 
-def test_nonzero_local_start_rejected_before_mapping_or_source_reads(settings,monkeypatch):
-    calls=[]
-    def mapping(*args,**kwargs):calls.append(True);raise AssertionError('Mapping should not run')
-    monkeypatch.setattr(sam,'mapping',mapping)
-    with pytest.raises(Problem) as caught:
-        local_grading.timeline(Path('/nonexistent-source'),SimpleNamespace(start_time=.0768),settings,threading.Event())
-    assert caught.value.code=='LOCAL_START_TIME_UNSUPPORTED' and not calls
+def test_nonzero_local_start_is_normalized_by_mapping_not_rejected(settings,tmp_path,monkeypatch):
+    # timeline() must not reject on the container start hint; it must ask
+    # sam.mapping to verify the decoded frame sequences themselves.
+    (tmp_path/'analysis.mp4').write_bytes(b'proxy')
+    mapping={'frame_count':3,'proxy':{'rate':'12/1'},
+             'frames':[{'index':i,'source_pts':2.0+i/12,'proxy_pts':i/12,'time':i/12} for i in range(3)],
+             'normalization':{'method':'first_decoded_frame_pts','source_offset_seconds':2.0,'proxy_offset_seconds':0.0}}
+    monkeypatch.setattr(sam,'mapping',lambda *args,**kwargs:mapping)
+    monkeypatch.setattr(local_grading,'command',lambda *args,**kwargs:'')
+    result=local_grading.timeline(tmp_path,SimpleNamespace(start_time=2.0,sha256='source'),settings,threading.Event())
+    assert result['frame_map']['normalization']['source_offset_seconds']==2.0
+    assert [f['time'] for f in result['frame_map']['frames']]==[0,1/12,2/12]
+    assert result['shots'][0]['first_frame']==0
 
 
 def test_critic_cannot_remove_same_brief_execution_limits(settings,dark_clip):

@@ -184,3 +184,33 @@ def test_cancel_interrupts_a_waiting_network_request(settings,tmp_path,monkeypat
         assert error.value.code=='JOB_CANCELLED'
         assert time.monotonic()-started<2
     finally:timer.cancel()
+
+
+def test_mapping_normalizes_different_nonzero_starts_without_resetting_pts(tmp_path,settings,monkeypatch):
+    (tmp_path/'source.bin').write_bytes(b'original');(tmp_path/'analysis.mp4').write_bytes(b'proxy')
+    source=SimpleNamespace(sha256=sam.checksum(tmp_path/'source.bin'),rotation=0,width=192,height=108)
+    def info(path,*_):
+        base=10.08 if path.name=='source.bin' else .04
+        pts=[base+i/30 for i in range(3)]
+        return dict(width=192,height=108,rate='30/1',pts=pts,normalized=[t-pts[0] for t in pts])
+    monkeypatch.setattr(sam,'frame_info',info)
+    result=sam.mapping(tmp_path,source,settings,threading.Event())
+    # Absolute PTS are retained; only the relative comparison is normalized.
+    assert [f['source_pts'] for f in result['frames']]==[10.08,10.08+1/30,10.08+2/30]
+    assert [f['proxy_pts'] for f in result['frames']]==[.04,.04+1/30,.04+2/30]
+    assert [round(f['time'],6) for f in result['frames']]==[0,round(1/30,6),round(2/30,6)]
+    assert result['normalization']['source_offset_seconds']==10.08
+    assert result['normalization']['proxy_offset_seconds']==.04
+    assert result['schema_version']==2
+
+
+def test_mapping_rejects_relative_drift_despite_a_plausible_nonzero_start(tmp_path,settings,monkeypatch):
+    (tmp_path/'source.bin').write_bytes(b'original');(tmp_path/'analysis.mp4').write_bytes(b'proxy')
+    source=SimpleNamespace(sha256=sam.checksum(tmp_path/'source.bin'),rotation=0,width=192,height=108)
+    def info(path,*_):
+        if path.name=='source.bin':pts=[2.0,2.0+1/30,2.0+2/30]
+        else:pts=[0.,1/30,2/30+.01]  # third frame drifts 10 ms relative to the source
+        return dict(width=192,height=108,rate='30/1',pts=pts,normalized=[t-pts[0] for t in pts])
+    monkeypatch.setattr(sam,'frame_info',info)
+    with pytest.raises(Problem) as caught:sam.mapping(tmp_path,source,settings,threading.Event())
+    assert caught.value.code=='SAM_FRAME_MAPPING_FAILED'

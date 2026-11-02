@@ -795,11 +795,12 @@ class Service:
     def guard_grade(self,project_id,candidate,recipe,original,output,source,cancel):
         """Resolve input-cutoff mistakes before encoding, retaining the original plan/version."""
         limits=recipe.proposal.execution_limits
-        if recipe.proposal.mode!='global' or recipe.tone_operator!='luminance_ocio_v3' or (
+        if recipe.tone_operator!='luminance_ocio_v3' or (
             limits.max_new_black_fraction is None and limits.max_new_white_fraction is None):return candidate,recipe,output
         self.mutate(project_id,lambda s:setattr(s,'stage','preflight_grade'))
         known_failure=bool(candidate.error and candidate.error.get('code')=='GRADE_EXECUTION_LIMIT' and recipe.execution_preflight)
-        if known_failure and recipe.proposal.parameters.black_point==0 and recipe.proposal.parameters.white_point==1:
+        all_layers=[recipe.proposal.parameters]+([recipe.proposal.local.foreground,recipe.proposal.local.background] if recipe.proposal.local else [])
+        if known_failure and recipe.proposal.mode=='global' and all(p.black_point==0 and p.white_point==1 for p in all_layers):
             raise Problem('GRADE_PREFLIGHT_FAILED','The previous full render failed even without input clipping cutoffs.',
                           'Revise gamma, brightness or palette choices. The same failed recipe will not be encoded again.',422,
                           previous_failure=candidate.error)
@@ -831,8 +832,11 @@ class Service:
         return candidate,effective,output
 
     def event_guard_pass(self,project_id,candidate,report):
-        self.mutate(project_id,lambda s:self.event(s,'Encoded grading preflight passed',
-            'Representative original-resolution encoded frames satisfy the saved bounds; full output validation is still required.',
+        localized=bool(report.get('math',{}).get('layers')) if isinstance(report.get('math'),dict) else False
+        title='Localized grading preflight passed' if localized else 'Encoded grading preflight passed'
+        reason=('Each localized layer satisfies the saved bounds on bounded samples; SAM, matte and full output validation are still required.'
+                if localized else 'Representative original-resolution encoded frames satisfy the saved bounds; full output validation is still required.')
+        self.mutate(project_id,lambda s:self.event(s,title,reason,
             candidate=candidate.name,elapsed_seconds=report['elapsed_seconds']))
 
     def _render_one(self, project_id, cancel,keep_active=False):
@@ -874,15 +878,31 @@ class Service:
                     'duration':run.duration_seconds or state.source.duration,'object_ids':[t['object_id'] for t in run.tracks]})
         if evidence:technical['operations']+=['regional_grade','selective_gain']
         if not candidate.recipe:
-            selection=visual_evidence.plan(original,state.source,self.settings,cancel,proxy=directory/'analysis.mp4',
-                shots=evidence['shots'] if evidence else None,cache=directory/'source-evidence-v3.json')
-            measurements,images=rendering.samples(original,state.source,self.settings,cancel,selection=selection)
-            technical['sampling']={k:selection[k] for k in ['selected_indices','selection_reasons','scanned_frames','uncovered_shots','budget','uncertainty']}
-            self.check_cancel(cancel)
-            request_id = self.count_call(project_id, "Muse is planning supported adjustments")
-            call_number = self.store.get(project_id).model_calls
-            proposal, usage = self.provider.grade(state.brief, state.analysis, state.source, measurements, images,technical_context=technical)
-            self.record_usage(project_id,request_id,"colorist",usage,call_number)
+            # Unchanged brief + source with a ready candidate: reuse its saved
+            # plan instead of resending the same brief, analysis and sample
+            # images to the planner. Any feedback changes the brief hash, so
+            # a changed brief always takes the full planning path below.
+            prior=next((c for c in reversed(state.candidates) if c.id!=candidate.id and c.status=='ready'
+                        and c.brief_sha256==candidate.brief_sha256 and c.source_sha256==state.source.sha256
+                        and c.recipe and c.recipe.evidence_selection),None)
+            if prior is not None:
+                proposal=prior.recipe.proposal.model_copy(deep=True)
+                selection=prior.recipe.evidence_selection
+                measurements=prior.recipe.source_samples
+                technical['sampling']={k:selection[k] for k in ['selected_indices','selection_reasons','scanned_frames','uncovered_shots','budget','uncertainty']}
+                self.mutate(project_id,lambda s:self.event(s,'Reusing saved grading plan',
+                    'The brief and source are unchanged, so no planner call or evidence resend was made.',
+                    candidate=candidate.name,reused_from=prior.name))
+            else:
+                selection=visual_evidence.plan(original,state.source,self.settings,cancel,proxy=directory/'analysis.mp4',
+                    shots=evidence['shots'] if evidence else None,cache=directory/'source-evidence-v3.json')
+                measurements,images=rendering.samples(original,state.source,self.settings,cancel,selection=selection)
+                technical['sampling']={k:selection[k] for k in ['selected_indices','selection_reasons','scanned_frames','uncovered_shots','budget','uncertainty']}
+                self.check_cancel(cancel)
+                request_id = self.count_call(project_id, "Muse is planning supported adjustments")
+                call_number = self.store.get(project_id).model_calls
+                proposal, usage = self.provider.grade(state.brief, state.analysis, state.source, measurements, images,technical_context=technical)
+                self.record_usage(project_id,request_id,"colorist",usage,call_number)
             self.store.candidate_artifact(project_id,candidate.id,'plan.json',proposal.model_dump(mode='json'))
             if proposal.unfulfilled_requests:
                 raise Problem('GRADE_REQUEST_UNFULFILLED','The planner reported required instructions it cannot execute.',
@@ -890,7 +910,7 @@ class Service:
                               unfulfilled_count=len(proposal.unfulfilled_requests),unfulfilled_instructions='; '.join(proposal.unfulfilled_requests)[:1500])
             if proposal.mode=='localized' and not evidence:
                 raise Problem('LOCAL_GRADE_UNAVAILABLE','The requested localized plan has no supported frame mapping.',
-                              'Use upright zero-start CFR SDR footage. No global fallback was made.',422,limitation=local_limitation)
+                              'Use upright CFR SDR footage with a verified source/proxy frame mapping. No global fallback was made.',422,limitation=local_limitation)
             recipe = GradeRecipe(schema_version='takeone-grade-v3',prompt_version='colorist-v3',
                                  source_sha256=state.source.sha256, brief_sha256=candidate.brief_sha256,
                                  model=self.settings.model, proposal=proposal, source_samples=measurements,

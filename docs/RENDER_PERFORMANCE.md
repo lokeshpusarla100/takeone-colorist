@@ -27,8 +27,10 @@ SAM checks, output timing checks, clipping bounds or human creative approval wer
 - Global clipping preflight can encode at most twelve selected original-resolution frames through
   the same colour/LUT/master encoder path. Sparse temporal reference context differs from a dense
   encode, so preflight is an early rejection/repair check; final dense QC remains authoritative.
-  Sparse localized preflight is explicitly unavailable because dropping frames before the compositor
-  would break frame-index mask conditions. Dense localized validation remains intact.
+  A mathematical per-layer clipping envelope now runs for localized grades before any SAM
+  request or encode (each layer assessed over the bounded samples; see render_preflight.py),
+  but a sparse *encoded* localized probe remains unavailable because dropping frames before
+  the compositor would break frame-index mask conditions. Dense localized validation remains intact.
   Probe reuse is keyed by source identity, selected indices, executable spatial graph/LUT identity,
   colour/working/output representation, encoder controls, FFmpeg build and OCIO/NumPy versions.
   Prose, timestamps and preflight-report metadata do not invalidate unchanged executable pixels.

@@ -327,3 +327,49 @@ test('unprepared or invalid remote source metadata is rejected',()=>{
   const state=readySource();
   assert.throws(()=>preparedSource({...state,preview:{...state.preview,url:'https://untrusted.invalid/video'}}),{code:'API_RESPONSE_INVALID'});
 });
+
+const {createComparisonSync,isPlaybackAbort}=await load('playbackSync');
+function fakeVideo({time=0,paused=true,readyState=4,duration=10,playImpl}={}) {
+  const el={currentTime:time,duration,playbackRate:1,paused,readyState,playCalls:0,pauseCalls:0,
+    play(){el.playCalls++;return playImpl?playImpl(el):Promise.resolve().then(()=>{el.paused=false;});},
+    pause(){el.pauseCalls++;el.paused=true;}};
+  return el;
+}
+test('comparison play treats an AbortError from a superseded play as expected cancellation',async()=>{
+  const main=fakeVideo({paused:false});const before=fakeVideo();
+  let failures=0;
+  before.play=()=>{before.playCalls++;return Promise.reject(new DOMException('play interrupted','AbortError'));};
+  const sync=createComparisonSync(()=>main,()=>before,()=>{failures++;});
+  assert.equal(await sync.play(),'aborted');
+  assert.equal(failures,0);
+  assert.equal(isPlaybackAbort(new DOMException('x','AbortError')),true);
+  assert.equal(isPlaybackAbort(new Error('AbortError')),false);
+});
+test('comparison play is single-flight and a pause invalidates its pending request',async()=>{
+  const main=fakeVideo({paused:false});let rejectPlay;
+  const before=fakeVideo();
+  before.play=()=>{before.playCalls++;return new Promise((_resolve,reject)=>{rejectPlay=reject;});};
+  let failures=0;const sync=createComparisonSync(()=>main,()=>before,()=>{failures++;});
+  const first=sync.play();const second=sync.play();
+  assert.equal(first,second);assert.equal(before.playCalls,1);
+  sync.pause();assert.equal(before.paused,true);
+  rejectPlay(new DOMException('interrupted by pause','AbortError'));
+  assert.equal(await first,'aborted');assert.equal(failures,0);
+});
+test('comparison play reports a genuine failure exactly once',async()=>{
+  const main=fakeVideo({paused:false});const before=fakeVideo();
+  before.play=()=>Promise.reject(new DOMException('autoplay blocked','NotAllowedError'));
+  const seen=[];const sync=createComparisonSync(()=>main,()=>before,cause=>seen.push(cause));
+  assert.equal(await sync.play(),'failed');
+  assert.equal(seen.length,1);assert.equal(seen[0].name,'NotAllowedError');
+});
+test('comparison sync only seeks past the drift threshold and copies playback rate',()=>{
+  const main=fakeVideo({time:5,paused:false});main.playbackRate=1.5;
+  const before=fakeVideo({time:4.95});
+  const sync=createComparisonSync(()=>main,()=>before,()=>{throw new Error('no failure expected');});
+  assert.equal(sync.sync(),false);assert.equal(before.currentTime,4.95);assert.equal(before.playbackRate,1.5);
+  main.currentTime=6;
+  assert.equal(sync.sync(),true);assert.equal(before.currentTime,6);
+  before.readyState=0;main.currentTime=8;
+  assert.equal(sync.sync(true),false);assert.equal(before.currentTime,6);
+});

@@ -77,3 +77,40 @@ def test_legacy_recipe_is_not_reinterpreted():
 def test_incomplete_or_unbounded_evidence_is_not_silently_accepted(pixels):
     with pytest.raises(Problem) as caught:prepare(recipe(),pixels)
     assert caught.value.code=='PREFLIGHT_INPUT_INVALID'
+
+
+def localized_recipe(**background):
+    params={'contrast':1.,'saturation':1.,'gamma':1.,'brightness_gain':1.,'cooling':0.}
+    local={'concept':'subject','selection':'single_instance','intervals':[{'start':0,'end':1}],
+           'foreground':dict(params),'background':{**params,**background},'preserve_subject_color':True,'feather_px':1.}
+    proposal=GradeProposal(mode='localized',parameters=GradeParameters(**params),local=local,
+        summary='Fixture localized treatment',limitations=[],
+        decisions=[{'parameter':'local_treatment','reason':'Fixture','source_ids':['user_request']}],
+        execution_limits={'max_new_black_fraction':.03,'max_new_white_fraction':.01})
+    return GradeRecipe(source_sha256='source',brief_sha256='brief',model='mock',schema_version='takeone-grade-v3',
+        prompt_version='colorist-v3',tone_operator='luminance_ocio_v3',proposal=proposal,source_samples=[])
+
+
+def test_localized_preflight_corrects_only_the_offending_layer_levels():
+    plan=localized_recipe(black_point=.1)
+    original=plan.model_dump()
+    frame=np.full((100,100,3),120,np.uint8);frame[:4]=9
+    result=prepare(plan,{70:frame})
+    adjusted=result['proposal'];report=result['report']
+    assert report['status']=='corrected' and set(report['layers'])=={'parameters','foreground','background'}
+    assert 0<=adjusted.local.background.black_point<.1
+    assert adjusted.local.foreground.black_point==0 and adjusted.parameters.black_point==0
+    assert adjusted.local.background.brightness_gain==1 and adjusted.local.background.cooling==0
+    assert adjusted.execution_limits==plan.proposal.execution_limits
+    assert plan.model_dump()==original
+    assert {c['layer'] for c in report['changes']}=={'background'}
+
+
+def test_localized_preflight_blocks_an_unrepairable_layer_before_encoding():
+    plan=localized_recipe(black_point=.05)
+    plan.proposal.local.background.brightness_gain=.65
+    plan.proposal.local.background.gamma=.8
+    plan.proposal.execution_limits.max_new_black_fraction=0
+    result=prepare(plan,{0:np.full((10,10,3),2,np.uint8)})
+    assert result['report']['status']=='blocked' and result['proposal'] is None
+    assert 'background' in result['report']['reason']

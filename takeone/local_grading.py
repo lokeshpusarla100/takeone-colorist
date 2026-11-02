@@ -14,11 +14,16 @@ from .media import command, probe
 
 
 def timeline(directory,source,settings,cancel):
-    """Source/proxy identity and native scdet cuts, independent of creative wording."""
-    if abs(source.start_time)>0.002:
-        raise Problem('LOCAL_START_TIME_UNSUPPORTED','Localized grading currently requires a zero-start video timeline.',
-                      'Use a zero-start CFR source; no segmentation was requested.',422)
-    key={'source_sha256':source.sha256,'proxy_sha256':sam.checksum(directory/'analysis.mp4'),'version':1}
+    """Source/proxy identity and native scdet cuts, independent of creative wording.
+
+    A nonzero container start is not rejected here and is never "fixed" by
+    resetting timestamps. sam.mapping verifies, from the decoded frames
+    themselves, that source and proxy share one relative timeline; the
+    absolute first-frame PTS of each file is retained in the frame map.
+    The container's declared start_time is a hint only and is not trusted
+    as frame identity.
+    """
+    key={'source_sha256':source.sha256,'proxy_sha256':sam.checksum(directory/'analysis.mp4'),'version':2}
     path=directory/'grading-timeline.json'
     if path.is_file():
         cached=json.loads(path.read_text())

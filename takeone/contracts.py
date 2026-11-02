@@ -236,6 +236,23 @@ class RenderCandidate(StrictModel):
     review_evidence: list[dict] = Field(default_factory=list)
 
 
+class LookPreview(StrictModel):
+    """One graded single-frame preview. The stored proposal is the exact
+    recipe seed a later render must use; the record is never mutated after
+    generation (selection only moves State.selected_look_id)."""
+    id: str
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(min_length=1, max_length=300)
+    created_at: str = Field(default_factory=now)
+    schema_version: int = 1
+    brief_sha256: str
+    frame_index: int = Field(ge=0)
+    frame_time: float = Field(ge=0, allow_inf_nan=False)
+    image_url: str
+    uses_local: bool = False
+    proposal: GradeProposal
+
+
 class ConsultationSummary(StrictModel):
     reason: Literal["question_selected", "question_limit", "no_candidates", "no_valid_candidates"]
     message: str
@@ -309,12 +326,19 @@ class State(StrictModel):
     feedback: list[dict] = Field(default_factory=list)
     brief_revision: int = 0
     segmentations: list[SegmentationRun] = Field(default_factory=list)
+    looks: list[LookPreview] = Field(default_factory=list)
+    selected_look_id: str | None = None
+    looks_brief_sha256: str | None = None
+    looks_frame_index: int | None = None
+    looks_frame_time: float | None = None
+    looks_limitation: str | None = None
+    looks_return_status: Literal["brief_ready", "render_ready"] = "brief_ready"
     segmentation_target_id: str | None = None
     sam_upload: dict | None = None
     sam_calls: int = 0
 
     def public(self):
-        value=self.model_dump(mode="json", exclude={"rubric", "receipts", "remote_file_id", "active_job", "job_kind", "history", "render_target_id", "memory_binding", "memory_outbox", "sam_upload", "segmentation_target_id"})
+        value=self.model_dump(mode="json", exclude={"rubric", "receipts", "remote_file_id", "active_job", "job_kind", "history", "render_target_id", "memory_binding", "memory_outbox", "sam_upload", "segmentation_target_id", "looks_return_status"})
         questions={q['id']:q for q in (self.rubric or {}).get('questions',[])}
         value['rubric_history']=[]
         for answer in (self.rubric or {}).get('answers',[]):

@@ -11,6 +11,7 @@ import { useWorkspace } from './lib/useWorkspace';
 import { useConsultation } from './lib/useConsultation';
 import RubricPanel from './components/RubricPanel';
 import RenderPanel from './components/RenderPanel';
+import LooksPanel from './components/LooksPanel';
 import MemoryView from './components/MemoryView';
 import SamPanel from './components/SamPanel';
 import { mutationLocked } from './lib/workflow';
@@ -118,6 +119,10 @@ export default function App() {
             try{downloadBlob(new Blob([JSON.stringify(project.backend?.brief,null,2)],{type:'application/json'}),'creative-brief.json');}
             catch(cause){reportError(cause,'brief.export');}
           }}/>
+        <LooksPanel state={project.backend} health={consultation.health} online={consultation.online}
+          sending={sending} locked={locked}
+          onGenerate={()=>{w.clearError();void consultation.generateLooks();}}
+          onSelect={lookId=>{w.clearError();void consultation.selectLook(lookId);}}/>
         <RenderPanel state={project.backend} health={consultation.health} online={consultation.online}
           sending={sending||busy||!!project.pendingBackend} direction={direction}
           onGenerate={()=>{w.clearError();void consultation.generate();}}

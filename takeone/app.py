@@ -40,6 +40,9 @@ class SegmentCommand(Command):
 class ReviewCommand(Command):
     candidate_id: UUID
 
+class SelectLookCommand(Command):
+    look_id: UUID
+
 
 def create_app(settings: Settings | None = None, provider=None, sam_provider=None):
     settings = settings or Settings.from_env()
@@ -201,6 +204,23 @@ def create_app(settings: Settings | None = None, provider=None, sam_provider=Non
     @application.post("/api/projects/{project_id}/cancel", status_code=202)
     def cancel(project_id: UUID):
         return service().cancel(str(project_id)).public()
+
+    @application.post("/api/projects/{project_id}/looks", status_code=202)
+    def generate_looks(project_id: UUID, body: Command):
+        return service().request_looks(str(project_id), body.revision, str(body.command_id)).public()
+
+    @application.post("/api/projects/{project_id}/looks/select")
+    def select_look(project_id: UUID, body: SelectLookCommand):
+        return service().select_look(str(project_id), str(body.look_id), body.revision, str(body.command_id)).public()
+
+    @application.get("/api/projects/{project_id}/looks/{look_id}/image")
+    def look_image(project_id: UUID, look_id: UUID):
+        state = service().store.get(str(project_id))
+        look = next((item for item in state.looks if item.id == str(look_id)), None)
+        path = service().store.directory(str(project_id)) / "looks" / (str(look_id) + ".jpg")
+        if not look or not path.is_file():
+            raise Problem("LOOK_NOT_READY", "That look preview is not available.", "Generate look previews first.", 409)
+        return FileResponse(path, media_type="image/jpeg")
 
     @application.post("/api/projects/{project_id}/render", status_code=202)
     def generate(project_id: UUID, body: Command):

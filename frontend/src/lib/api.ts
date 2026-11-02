@@ -31,6 +31,13 @@ export type RenderCandidate = {
   validation:null|{warnings:string[];limitations:string[];review_status:string;bytes:number;audio_mode:string};
   error:null|{code:string;message:string;action:string};
 };
+export type LookPreview = {
+  id:string;name:string;description:string;created_at:string;schema_version?:number;
+  brief_sha256:string;frame_index:number;frame_time:number;image_url:string;uses_local:boolean;
+  proposal:{parameters:GradeValues;mode?:'global'|'localized';
+    local?:null|{concept:string;foreground:GradeValues;background:GradeValues;intervals:{start:number;end:number}[];preserve_subject_color:boolean};
+    summary:string;decisions:{parameter:string;reason:string;source_ids:string[]}[];limitations:string[]};
+};
 export type BackendState = {
   id:string;revision:number;
   updated_at?:string;
@@ -47,6 +54,12 @@ export type BackendState = {
     message:string;model_explanation:string;proposed_count:number;rejected_count:number};
   error:null|{code:string;message:string;action:string;details:ErrorDetails};
   candidates?:RenderCandidate[];
+  looks?:LookPreview[];
+  selected_look_id?:string|null;
+  looks_brief_sha256?:string|null;
+  looks_frame_index?:number|null;
+  looks_frame_time?:number|null;
+  looks_limitation?:string|null;
   selected_candidate_id?:string|null;
   owner_id?:string|null;profile_id?:string;preference_context?:Record<string,string>;
   memory_capture_error?:{message:string}|null;
@@ -161,6 +174,17 @@ export function parseBackend(value:unknown):BackendState {
     }
     return true;
   })))return invalidResponse();
+  if(value.looks!==undefined&&(!Array.isArray(value.looks)||!value.looks.every(l=>{
+    if(!record(l)||!uuid(l.id)||!text(l.name)||!text(l.description)||!text(l.created_at)||!text(l.brief_sha256)
+      ||!Number.isInteger(l.frame_index)||Number(l.frame_index)<0||!finite(l.frame_time)||Number(l.frame_time)<0
+      ||typeof l.uses_local!=='boolean'||!record(l.proposal)||!gradeValues(l.proposal.parameters)
+      ||!text(l.proposal.summary)||!Array.isArray(l.proposal.decisions)||!strings(l.proposal.limitations))return false;
+    return l.image_url==='/api/projects/'+value.id+'/looks/'+l.id+'/image';
+  })))return invalidResponse();
+  if(value.selected_look_id!==undefined&&value.selected_look_id!==null
+    &&(!uuid(value.selected_look_id)||!Array.isArray(value.looks)
+      ||!value.looks.some(l=>record(l)&&l.id===value.selected_look_id)))return invalidResponse();
+  if(value.looks_limitation!==undefined&&value.looks_limitation!==null&&!text(value.looks_limitation))return invalidResponse();
   if(value.selected_candidate_id!==undefined&&value.selected_candidate_id!==null
     &&(!uuid(value.selected_candidate_id)||!Array.isArray(value.candidates)
       ||!value.candidates.some(c=>record(c)&&c.id===value.selected_candidate_id&&c.status==='ready')))return invalidResponse();
@@ -182,6 +206,7 @@ export function stageLabel(stage:string) {
     validate_local_masks:'Validating alignment, mask edges and temporal stability',
     render_local_grade:'Rendering and compositing foreground/background adjustments',
     check_output_quality:'Checking frame timing, subject preservation and clipping',
+    select_looks:'Generating eight graded look previews on one frame',looks_ready:'Look previews ready',
     creative_review:'Muse is reviewing actual rendered/source evidence',
     creative_review_failed:'Render available; creative review needs attention',plan_revision:'Preparing a targeted revision from the original',
   };
@@ -233,7 +258,7 @@ export async function upload(file:File,signal:AbortSignal) {
   form.append('profile_id',nextProfile());form.append('preference_context',JSON.stringify(nextContext()));
   return parseBackend(await request<unknown>('/api/projects',{method:'POST',body:form,signal},120000));
 }
-export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review',body:Record<string,unknown>) {
+export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select',body:Record<string,unknown>) {
   return parseBackend(await request<unknown>('/api/projects/'+id+'/'+kind,{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({...body,command_id:crypto.randomUUID()}),

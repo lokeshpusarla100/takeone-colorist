@@ -51,6 +51,15 @@ dialog{width:min(480px,calc(100% - 32px));max-height:85vh;background:#202622;col
 .processing-total strong,.progress-steps time{font-variant-numeric:tabular-nums;white-space:nowrap}.processing-total strong{font-size:20px}.progress-steps time{display:block;font-size:13px;color:#e2e5e2;margin-top:3px}.progress-steps .step-timing-parts{font-variant-numeric:tabular-nums;font-size:11px}
 .rubric-dialog{width:min(600px,calc(100% - 28px));overflow:auto}.rubric-dialog .rubric-question{margin-top:12px}.rubric-dialog .consultation-status{margin:12px 0}.rubric-history{margin-top:20px;border-top:1px solid #414a3e;padding-top:14px;font-size:13px}.rubric-history ol{padding-left:20px}.rubric-history li{padding:8px 0;overflow-wrap:anywhere}.rubric-history li p+p{margin-top:5px;color:#bec9b7}
 .render-panel{margin-top:24px;padding-top:20px;border-top:1px solid #414a3e}.render-panel>.inline-help{margin-bottom:14px}
+.looks-panel{margin-top:24px;padding-top:20px;border-top:1px solid #414a3e}
+.looks-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:12px 0}
+.look-card{display:flex;flex-direction:column;align-items:stretch;gap:5px;text-align:left;padding:8px;height:auto}
+.look-card img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:3px;background:#101312}
+.look-card strong{font-size:13px}
+.look-card span{font-size:12px;color:#c3ccc0;line-height:1.45}
+.look-card small{font-size:11px;color:#aebaa7}
+.look-card[aria-pressed="true"]{border-color:#cfe0bd;background:#2b3527}
+@media(max-width:760px){.looks-grid{grid-template-columns:repeat(2,1fr)}}
 .sam-panel{margin-top:24px;padding-top:20px;border-top:1px solid #414a3e;display:flex;flex-direction:column;gap:12px;font-size:13px}.sam-panel input{flex:1;min-width:120px}.sam-result video{display:block;width:100%;max-height:55vh;background:#101314;margin:12px 0}.sam-panel a{color:#c6d5bb}.sam-panel pre{max-height:240px;overflow:auto}
 .render-result{font-size:13px;line-height:1.6}.render-result p{margin:10px 0}.recipe-values{display:flex;gap:22px;flex-wrap:wrap}
 .recipe-values div{display:flex;gap:8px}.recipe-values dt{text-transform:capitalize;color:#b1bfa8}.recipe-values dd{margin:0;font-variant-numeric:tabular-nums}

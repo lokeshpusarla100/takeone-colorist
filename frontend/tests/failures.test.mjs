@@ -373,3 +373,18 @@ test('comparison sync only seeks past the drift threshold and copies playback ra
   before.readyState=0;main.currentTime=8;
   assert.equal(sync.sync(true),false);assert.equal(before.currentTime,6);
 });
+test('look previews require a valid image reference and a selectable stored look',()=>{
+  const state=readySource();const lookId=crypto.randomUUID();
+  const params={contrast:1,saturation:1,gamma:1,brightness_gain:1,cooling:0};
+  const look={id:lookId,name:'Brief look',description:'As planned.',created_at:new Date().toISOString(),schema_version:1,
+    brief_sha256:'a'.repeat(64),frame_index:3,frame_time:.25,uses_local:false,
+    image_url:'/api/projects/'+state.id+'/looks/'+lookId+'/image',
+    proposal:{parameters:params,mode:'global',local:null,summary:'Fixture',decisions:[],limitations:[]}};
+  const withLooks={...state,status:'brief_ready',stage:'looks_ready',brief:{initial_request:'x',directives:[],explicit_constraints:[],default_protections:[],technical_envelope:[],answers:[],unresolved:[]},
+    looks:[look],selected_look_id:lookId,looks_brief_sha256:look.brief_sha256,looks_frame_index:3,looks_frame_time:.25,looks_limitation:null};
+  assert.equal(parseBackend(withLooks).selected_look_id,lookId);
+  assert.equal(parseBackend(withLooks).looks[0].name,'Brief look');
+  assert.throws(()=>parseBackend({...withLooks,looks:[{...look,image_url:'https://untrusted.invalid/look.jpg'}]}),{code:'API_RESPONSE_INVALID'});
+  assert.throws(()=>parseBackend({...withLooks,selected_look_id:crypto.randomUUID()}),{code:'API_RESPONSE_INVALID'});
+  assert.throws(()=>parseBackend({...withLooks,looks:[{...look,proposal:{...look.proposal,parameters:{contrast:'x'}}}]}),{code:'API_RESPONSE_INVALID'});
+});

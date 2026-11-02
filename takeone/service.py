@@ -20,6 +20,8 @@ from .preferences import context_values
 from .usage import usage_details
 from . import sam
 from . import local_grading
+from . import looks as look_previews_module
+from .contracts import LookPreview
 from . import evidence as visual_evidence
 from . import creative_review
 from . import grade_guard
@@ -171,9 +173,10 @@ class Service:
         state.job_kind = kind
         state.status = "ingesting" if kind == "ingest" else "rendering" if kind == "render" else "segmenting" if kind=="segment" else 'reviewing' if kind=='review' else "analyzing"
         state.stage = ("inspect_source" if kind == "ingest" else "plan_grade" if kind == "render"
-                       else 'creative_review' if kind=='review' else "verify_segmentation_input" if kind=="segment" else "analyze_scene" if not state.analysis else "select_question")
+                       else 'creative_review' if kind=='review' else "verify_segmentation_input" if kind=="segment"
+                       else "select_looks" if kind=="looks" else "analyze_scene" if not state.analysis else "select_question")
         state.error = None
-        self.event(state, "Preparing source" if kind == "ingest" else "Grade queued" if kind == "render" else "Segmentation queued" if kind=="segment" else "Analysis queued",
+        self.event(state, "Preparing source" if kind == "ingest" else "Grade queued" if kind == "render" else "Segmentation queued" if kind=="segment" else "Look previews queued" if kind=="looks" else "Analysis queued",
                    progress_job=job_id,progress_retry=retry)
         try:
             self.store.save(state)
@@ -215,6 +218,12 @@ class Service:
             state.question = None
             state.consultation = None
             state.brief = None
+            state.looks = []
+            state.selected_look_id = None
+            state.looks_brief_sha256 = None
+            state.looks_frame_index = None
+            state.looks_frame_time = None
+            state.looks_limitation = None
             state.answered_count = 0
             state.model_calls = 0
             state.critic_calls = 0
@@ -313,6 +322,9 @@ class Service:
                     strength="hard" if evidence.dimension.value=="boundaries" else "strong",source_id=evidence.event_id,
                     verification_hint="Latest current-video feedback overrides earlier conflicting direction."))
                 state.brief=updated
+                # A changed brief invalidates look previews made for the old one.
+                state.looks=[];state.selected_look_id=None;state.looks_brief_sha256=None
+                state.looks_frame_index=None;state.looks_frame_time=None;state.looks_limitation=None
                 state.brief_revision=max(1,state.brief_revision)+1
                 state.status,state.stage="brief_ready","brief_ready"
                 self.store.artifact(state.id,"brief.json",updated.model_dump(mode="json"))
@@ -333,7 +345,7 @@ class Service:
                 raise Problem("RETRY_NOT_NEEDED", "There is no failed step to retry.", "Continue with the current state.", 409)
             kind = state.job_kind or ("ingest" if not state.preview else "analysis")
             target = next((c for c in state.candidates if c.id == state.render_target_id), None)
-            if (kind == "analysis" or (kind == "render" and (not target or not target.recipe))) and not self.provider.available():
+            if (kind in {"analysis", "looks"} or (kind == "render" and (not target or not target.recipe))) and not self.provider.available():
                 raise Problem("MUSE_NOT_CONFIGURED", "The Meta API key is not configured.",
                               "Set MODEL_API_KEY in .env, then refresh the editor.", 503)
             sam_target=next((r for r in state.segmentations if r.id==state.segmentation_target_id),None)
@@ -376,6 +388,170 @@ class Service:
             self.event(state, "Grade requested", actor="user", candidate=candidate.name)
             self.submit(state, "render")
             return state
+
+    def request_looks(self, project_id, revision: int, command_id: str):
+        with self.store.lock:
+            state = self.store.get(project_id)
+            if not state.brief:
+                raise Problem("BRIEF_NOT_READY", "Complete the creative brief before generating look previews.",
+                              "Finish the pending consultation.", 409)
+            brief_hash = rendering.fingerprint(state.brief.model_dump(mode="json"))
+            fingerprint = self.fingerprint("looks", brief_hash)
+            if self.receipt(state, command_id, fingerprint):
+                return state
+            self.check_revision(state, revision)
+            if state.status not in {"brief_ready", "render_ready"}:
+                raise Problem("LOOKS_NOT_READY", "The project is not ready for look previews.",
+                              "Finish the current operation first.", 409)
+            if not state.source or not state.analysis:
+                raise Problem("SOURCE_NOT_READY", "The source analysis is not ready.", "Retry source preparation.", 409)
+            if not self.provider.available():
+                raise Problem("MUSE_NOT_CONFIGURED", "The Meta API key is not configured.", "Set MODEL_API_KEY in .env.", 503)
+            state.looks_return_status = state.status
+            state.receipts[command_id] = fingerprint
+            self.event(state, "Look previews requested", actor="user")
+            self.submit(state, "looks")
+            return state
+
+    def select_look(self, project_id, look_id: str, revision: int, command_id: str):
+        with self.store.lock:
+            state = self.store.get(project_id)
+            fingerprint = self.fingerprint("look_select", look_id)
+            if self.receipt(state, command_id, fingerprint):
+                return state
+            self.check_revision(state, revision)
+            look = next((item for item in state.looks if item.id == look_id), None)
+            if look is None:
+                raise Problem("LOOK_NOT_FOUND", "That look preview is not part of this project.",
+                              "Generate look previews and select one from the current brief.", 422)
+            brief_hash = rendering.fingerprint(state.brief.model_dump(mode="json")) if state.brief else None
+            if state.looks_brief_sha256 != brief_hash or look.brief_sha256 != brief_hash:
+                raise Problem("LOOK_STALE", "These look previews belong to an earlier brief.",
+                              "Generate look previews for the current brief before selecting.", 409)
+            state.selected_look_id = look_id
+            state.receipts[command_id] = fingerprint
+            self.event(state, "Look selected", look.name, actor="user", look_id=look_id)
+            self.store.save(state)
+            return state
+
+    def generate_looks(self, project_id, cancel):
+        state = self.store.get(project_id)
+        if not state.brief or not state.source or not state.analysis:
+            raise Problem("LOOKS_STATE_INVALID", "Look previews have no matching brief, source or analysis.",
+                          "Refresh the consultation before generating previews.", 409)
+        directory = self.store.directory(project_id)
+        original = directory / "source.bin"
+        rendering.verify_source(original, state.source, self.settings, cancel)
+        brief_hash = rendering.fingerprint(state.brief.model_dump(mode="json"))
+        evidence = None
+        try:
+            evidence = local_grading.timeline(directory, state.source, self.settings, cancel)
+        except Problem as error:
+            if error.code in {'SOURCE_CHANGED', 'JOB_CANCELLED'}:
+                raise
+        technical = {'operations': ['global_grade', 'cooling', 'brightness_gain'],
+                     'localized_available': evidence is not None,
+                     'limitations': [] if evidence else ['No verified local timeline.'],
+                     'shots': evidence['shots'] if evidence else [],
+                     'current_video_feedback': [f for f in current_feedback(state) if f.get('text')],
+                     'previous_candidates': [], 'available_masks': []}
+        for run in state.segmentations:
+            manifest_path = directory / 'segmentations' / run.id / 'manifest.json'
+            if run.status != 'ready' or not manifest_path.is_file():
+                continue
+            saved = json.loads(manifest_path.read_text())
+            if saved['frame_map']['source_sha256'] == state.source.sha256:
+                technical['available_masks'].append({'concept': run.concept, 'start': run.start_seconds,
+                    'duration': run.duration_seconds or state.source.duration,
+                    'object_ids': [t['object_id'] for t in run.tracks]})
+        if evidence:
+            technical['operations'] += ['regional_grade', 'selective_gain']
+        selection = visual_evidence.plan(original, state.source, self.settings, cancel,
+            proxy=directory / 'analysis.mp4', shots=evidence['shots'] if evidence else None,
+            cache=directory / 'source-evidence-v3.json')
+        measurements, images = rendering.samples(original, state.source, self.settings, cancel, selection=selection)
+        self.check_cancel(cancel)
+        request_id = self.count_call(project_id, "Muse is planning supported adjustments")
+        call_number = self.store.get(project_id).model_calls
+        proposal, usage = self.provider.grade(state.brief, state.analysis, state.source, measurements, images,
+                                              technical_context=technical)
+        self.record_usage(project_id, request_id, "colorist", usage, call_number)
+        if proposal.unfulfilled_requests:
+            raise Problem('GRADE_REQUEST_UNFULFILLED', 'The planner reported required instructions it cannot execute.',
+                          'Clarify these instructions or choose a supported treatment. No look was generated.', 422,
+                          unfulfilled_count=len(proposal.unfulfilled_requests))
+        times = selection['manifest']['times']
+        selected_indices = selection['selected_indices']
+        frame_index = min(selected_indices, key=lambda i: abs(times[i] - state.source.duration / 2))
+        limitation = None
+        alpha = None
+        if proposal.mode == 'localized':
+            inside = [i for i in range(len(times))
+                      if any(iv.start <= times[i] < iv.end for iv in proposal.local.intervals)]
+            if inside:
+                frame_index = inside[len(inside) // 2]
+            alpha = self._look_mask(directory, state, proposal, frame_index, cancel)
+            if alpha is None:
+                limitation = ('Localized previews need SAM masks covering the representative frame; '
+                              'these previews use the feasible global treatment only. Run subject tracking '
+                              'first, or the full render will plan localized grading separately.')
+                proposal = proposal.model_copy(deep=True)
+                proposal.mode = 'global'
+                proposal.local = None
+                proposal = type(proposal).model_validate(proposal.model_dump())
+        frame = visual_evidence.extract(original, selection['manifest'], [frame_index], self.settings, cancel, width=256)[frame_index]
+        if alpha is not None:
+            import cv2
+            alpha = cv2.resize(alpha, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
+        built = look_previews_module.build(proposal, frame, brief_sha256=brief_hash,
+                                           frame_index=frame_index, frame_time=times[frame_index],
+                                           project_id=project_id, alpha=alpha)
+        import cv2
+        looks_directory = directory / 'looks'
+        looks_directory.mkdir(parents=True, exist_ok=True)
+        records = []
+        for item in built:
+            image = item.pop('image')
+            path = looks_directory / (item['id'] + '.jpg')
+            if not cv2.imwrite(str(path), image[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 88]):
+                raise Problem('LOOK_IMAGE_FAILED', 'A look preview image could not be saved.',
+                              'Check local storage and retry look generation.', 507)
+            records.append(LookPreview(**item))
+        def ready(s):
+            s.looks = records
+            s.selected_look_id = None
+            s.looks_brief_sha256 = brief_hash
+            s.looks_frame_index = frame_index
+            s.looks_frame_time = times[frame_index]
+            s.looks_limitation = limitation
+            s.status = s.looks_return_status
+            s.stage = 'looks_ready'
+            s.active_job = None
+            self.event(s, 'Look previews ready', 'Eight graded previews on one representative frame; select one before rendering.',
+                       look_count=len(records), frame_index=frame_index, uses_local=any(r.uses_local for r in records))
+        self.mutate(project_id, ready)
+
+    def _look_mask(self, directory, state, proposal, frame_index, cancel):
+        """Soft alpha for the representative frame from a cached SAM run, or None."""
+        try:
+            for run in reversed(state.segmentations):
+                if run.status != 'ready' or run.concept.casefold() != proposal.local.concept.strip().casefold():
+                    continue
+                manifest_path = directory / 'segmentations' / run.id / 'manifest.json'
+                if not manifest_path.is_file():
+                    continue
+                manifest = json.loads(manifest_path.read_text())
+                if manifest['frame_map']['source_sha256'] != state.source.sha256:
+                    continue
+                by_frame = local_grading.records_for_range(manifest, manifest_path.parent, state.source,
+                                                           frame_index, frame_index, proposal.local.selection)
+                binary, _ids = local_grading.raster(by_frame[frame_index],
+                                                    manifest['frame_map']['proxy']['width'],
+                                                    manifest['frame_map']['proxy']['height'])
+                return binary.astype('float32')
+        except Problem:
+            return None
+        return None
 
     def cancel(self, project_id):
         with self.store.lock:
@@ -596,6 +772,8 @@ class Service:
                 self.render_grade(project_id, cancel)
             elif kind == "segment":
                 self.run_segmentation(project_id,cancel)
+            elif kind == "looks":
+                self.generate_looks(project_id, cancel)
             elif kind=='review':
                 self.review_and_revise(project_id,cancel,force=True)
             else:
@@ -878,14 +1056,31 @@ class Service:
                     'duration':run.duration_seconds or state.source.duration,'object_ids':[t['object_id'] for t in run.tracks]})
         if evidence:technical['operations']+=['regional_grade','selective_gain']
         if not candidate.recipe:
+            # A look selected for this exact brief is the approved style
+            # recipe: use its stored proposal verbatim, with no planner call.
+            # Any feedback changes the brief hash, so a stale look never applies.
+            selected_look=next((item for item in state.looks if item.id==state.selected_look_id),None)
+            use_look=(selected_look is not None and state.looks_brief_sha256==candidate.brief_sha256
+                    and selected_look.brief_sha256==candidate.brief_sha256)
+            if use_look:
+                proposal=selected_look.proposal.model_copy(deep=True)
+                selection=visual_evidence.plan(original,state.source,self.settings,cancel,proxy=directory/'analysis.mp4',
+                    shots=evidence['shots'] if evidence else None,cache=directory/'source-evidence-v3.json')
+                measurements,_look_images=rendering.samples(original,state.source,self.settings,cancel,selection=selection)
+                technical['sampling']={k:selection[k] for k in ['selected_indices','selection_reasons','scanned_frames','uncovered_shots','budget','uncertainty']}
+                self.mutate(project_id,lambda s:self.event(s,'Using selected look',
+                    'The approved look preview recipe is the render recipe; no planner call was made.',
+                    candidate=candidate.name,look_id=selected_look.id,look_name=selected_look.name))
             # Unchanged brief + source with a ready candidate: reuse its saved
             # plan instead of resending the same brief, analysis and sample
             # images to the planner. Any feedback changes the brief hash, so
             # a changed brief always takes the full planning path below.
-            prior=next((c for c in reversed(state.candidates) if c.id!=candidate.id and c.status=='ready'
+            prior=None if use_look else next((c for c in reversed(state.candidates) if c.id!=candidate.id and c.status=='ready'
                         and c.brief_sha256==candidate.brief_sha256 and c.source_sha256==state.source.sha256
                         and c.recipe and c.recipe.evidence_selection),None)
-            if prior is not None:
+            if use_look:
+                pass
+            elif prior is not None:
                 proposal=prior.recipe.proposal.model_copy(deep=True)
                 selection=prior.recipe.evidence_selection
                 measurements=prior.recipe.source_samples

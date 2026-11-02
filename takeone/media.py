@@ -96,10 +96,14 @@ def make_previews(directory: Path, source: Source, project_id: str, settings: Se
     analysis_tmp = directory / "analysis.partial.mp4"
     base = [settings.ffmpeg, "-hide_banner", "-v", "error", "-nostdin", "-y", "-hwaccel", "none", "-i", str(directory / "source.bin")]
     geometry = "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1"
-    command(base + ["-map", "0:v:0", "-map", "0:a:0?", "-vf", geometry, "-c:v", "libvpx-vp9",
+    # Decode the original once and feed both existing preview encoders. Quality,
+    # geometry and per-output cadence policies are unchanged.
+    graph='[0:v:0]split=2[displayin][analysisin];[displayin]'+geometry+'[display];[analysisin]'+geometry.replace('1280','640')+'[analysis]'
+    command(base + ["-filter_complex_threads","2","-filter_complex",graph,
+                    "-map", "[display]", "-map", "0:a:0?", "-c:v", "libvpx-vp9",
                     "-deadline", "realtime", "-cpu-used", "6", "-crf", "32", "-b:v", "0", "-pix_fmt", "yuv420p",
-                    "-c:a", "libopus", "-b:a", "96k", str(preview_tmp)], cancel)
-    command(base + ["-map", "0:v:0", "-an", "-vf", "scale=w='min(640,iw)':h='min(640,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
+                    "-c:a", "libopus", "-b:a", "96k", str(preview_tmp),
+                    "-map", "[analysis]", "-an",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
                     "-fps_mode", "vfr", "-movflags", "+faststart", str(analysis_tmp)], cancel)
     metadata = probe(preview_tmp, settings, cancel)

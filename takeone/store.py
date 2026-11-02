@@ -46,9 +46,11 @@ class Store:
             previous=(marker.details.get('progress_stage'),marker.details.get('progress_active'),marker.details.get('progress_job')) if marker else None
             if signature!=previous and (active or marker and marker.details.get('progress_active')):
                 interrupted=not active and bool(state.error and state.error.get('code')=='JOB_INTERRUPTED')
+                queued=next((e for e in reversed(state.events) if e.details.get('progress_job')==state.active_job and 'progress_retry' in e.details),None) if active else None
                 state.events.append(Event(title='Processing stage',timestamp=previous_update if interrupted else state.updated_at,
                     details={'progress_timing':True,'progress_stage':state.stage,'progress_active':active,
-                             'progress_status':state.status,'progress_job':state.active_job,'progress_interrupted':interrupted}))
+                             'progress_status':state.status,'progress_job':state.active_job,'progress_interrupted':interrupted,
+                             'progress_retry':bool(queued and queued.details.get('progress_retry'))}))
             temporary = directory / (".state-" + str(uuid4()) + ".tmp")
             try:
                 with temporary.open("w") as stream:

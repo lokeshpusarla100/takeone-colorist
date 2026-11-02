@@ -179,6 +179,8 @@ class GradeRecipe(StrictModel):
     tone_operator: Literal['legacy_fixed_pivot','bounded_sigmoid_v2','luminance_ocio_v3'] = 'legacy_fixed_pivot'
     timeline: dict | None = None
     evidence_selection: dict | None = None
+    execution_preflight: dict | None = None
+    execution_adjustment: dict | None = None
 
     @model_validator(mode='after')
     def legacy_controls(self):

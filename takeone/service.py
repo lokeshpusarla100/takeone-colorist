@@ -22,6 +22,7 @@ from . import sam
 from . import local_grading
 from . import evidence as visual_evidence
 from . import creative_review
+from . import grade_guard
 
 
 class Service:
@@ -155,7 +156,7 @@ class Service:
         if state.active_job:
             raise Problem("PROJECT_BUSY", "An operation is already running.", "Wait or cancel the current operation.", 409)
 
-    def submit(self, state: State, kind: str):
+    def submit(self, state: State, kind: str, *, retry=False):
         if self.closed or not self.slots.acquire(blocking=False):
             failure = Problem("WORKER_BUSY", "The local worker queue is full.",
                               "Wait for another operation to finish, then retry.", 409)
@@ -172,7 +173,8 @@ class Service:
         state.stage = ("inspect_source" if kind == "ingest" else "plan_grade" if kind == "render"
                        else 'creative_review' if kind=='review' else "verify_segmentation_input" if kind=="segment" else "analyze_scene" if not state.analysis else "select_question")
         state.error = None
-        self.event(state, "Preparing source" if kind == "ingest" else "Grade queued" if kind == "render" else "Segmentation queued" if kind=="segment" else "Analysis queued")
+        self.event(state, "Preparing source" if kind == "ingest" else "Grade queued" if kind == "render" else "Segmentation queued" if kind=="segment" else "Analysis queued",
+                   progress_job=job_id,progress_retry=retry)
         try:
             self.store.save(state)
             self.cancels[state.id] = cancel
@@ -340,7 +342,7 @@ class Service:
             if kind=="segment" and not cached_sam and not self.sam_provider.available():
                 raise Problem("SAM_NOT_CONFIGURED","The Meta key is not configured.","Set MODEL_API_KEY in .env.",503)
             state.receipts[command_id] = fingerprint
-            self.submit(state, kind)
+            self.submit(state, kind,retry=True)
             return state
 
     def generate(self, project_id, revision: int, command_id: str):
@@ -790,6 +792,49 @@ class Service:
         self._render_one(project_id,cancel,keep_active=True)
         self.review_and_revise(project_id,cancel)
 
+    def guard_grade(self,project_id,candidate,recipe,original,output,source,cancel):
+        """Resolve input-cutoff mistakes before encoding, retaining the original plan/version."""
+        limits=recipe.proposal.execution_limits
+        if recipe.proposal.mode!='global' or recipe.tone_operator!='luminance_ocio_v3' or (
+            limits.max_new_black_fraction is None and limits.max_new_white_fraction is None):return candidate,recipe,output
+        self.mutate(project_id,lambda s:setattr(s,'stage','preflight_grade'))
+        known_failure=bool(candidate.error and candidate.error.get('code')=='GRADE_EXECUTION_LIMIT' and recipe.execution_preflight)
+        if known_failure and recipe.proposal.parameters.black_point==0 and recipe.proposal.parameters.white_point==1:
+            raise Problem('GRADE_PREFLIGHT_FAILED','The previous full render failed even without input clipping cutoffs.',
+                          'Revise gamma, brightness or palette choices. The same failed recipe will not be encoded again.',422,
+                          previous_failure=candidate.error)
+        effective,report=grade_guard.prepare_execution(original,output/'preflight',recipe,source,self.settings,cancel,
+            cache_dir=self.store.directory(project_id),force_neutral_levels=known_failure)
+        self.check_cancel(cancel)
+        if report.get('changes'):
+            state=self.store.get(project_id)
+            if sum(c.brief_sha256==candidate.brief_sha256 for c in state.candidates)>=self.settings.max_render_iterations:
+                raise Problem('RENDER_BUDGET','A clipping correction is available, but this brief has reached its candidate limit.',
+                              'Review or revise the brief before another attempt. No full encode was started.',409,preflight=report)
+            child=RenderCandidate(id=str(uuid4()),name='V'+str(len(state.candidates)+1),source_sha256=source.sha256,
+                brief_sha256=candidate.brief_sha256,generation_id=candidate.generation_id or str(uuid4()),
+                parent_id=candidate.id,iteration=candidate.iteration+1,recipe=effective,status='rendering')
+            def corrected(s):
+                parent=next(c for c in s.candidates if c.id==candidate.id)
+                parent.status='failed';parent.revision_stop_reason='input_levels_corrected_before_encoding'
+                parent.error=candidate.error or Problem('GRADE_PREFLIGHT_REVISED','Input cutoffs needed correction to meet the saved clipping bounds.',
+                    'The corrected child candidate is being rendered; the original recipe is preserved.',422,preflight=report).public()
+                s.candidates.append(child);s.render_target_id=child.id;s.stage='plan_revision'
+                self.event(s,'Input level clipping correction','Preserved the original recipe and all clipping limits; only input black/white cutoffs changed.',
+                    candidate=child.name,parent_id=candidate.id,changes=report['changes'],preflight_seconds=report['elapsed_seconds'])
+            self.mutate(project_id,corrected)
+            candidate=child;output=self.store.directory(project_id)/'candidates'/child.id;output.mkdir(parents=True,exist_ok=True)
+            self.store.candidate_artifact(project_id,child.id,'plan.json',effective.proposal.model_dump(mode='json'))
+        self.store.candidate_artifact(project_id,candidate.id,'recipe.json',effective.model_dump(mode='json'))
+        self.mutate(project_id,lambda s:setattr(next(c for c in s.candidates if c.id==candidate.id),'recipe',effective))
+        self.event_guard_pass(project_id,candidate,report)
+        return candidate,effective,output
+
+    def event_guard_pass(self,project_id,candidate,report):
+        self.mutate(project_id,lambda s:self.event(s,'Encoded grading preflight passed',
+            'Representative original-resolution encoded frames satisfy the saved bounds; full output validation is still required.',
+            candidate=candidate.name,elapsed_seconds=report['elapsed_seconds']))
+
     def _render_one(self, project_id, cancel,keep_active=False):
         state = self.store.get(project_id)
         candidate = next((c for c in state.candidates if c.id == state.render_target_id), None)
@@ -815,8 +860,10 @@ class Service:
                    'shots':evidence['shots'] if evidence else [],
                    'current_video_feedback':[f for f in current_feedback(state) if f.get('text')],
                    'previous_candidates':[{'id':c.id,'brief_sha256':c.brief_sha256,'plan':c.recipe.proposal.model_dump(mode='json') if c.recipe else None,
-                       'technical_result':c.validation,'creative_opinion':c.creative_review.model_dump(mode='json') if c.creative_review else None}
-                       for c in state.candidates[-3:] if c.status=='ready']}
+                       'technical_result':c.validation,'creative_opinion':c.creative_review.model_dump(mode='json') if c.creative_review else None,
+                       'execution_error':{'code':c.error.get('code'),'message':c.error.get('message'),
+                           'observed_clipping':c.error.get('details',{}).get('observed_clipping')} if c.error else None}
+                       for c in state.candidates[-3:] if c.status in {'ready','failed'}]}
         technical['available_masks']=[]
         for run in state.segmentations:
             manifest_path=directory/'segmentations'/run.id/'manifest.json'
@@ -879,6 +926,7 @@ class Service:
                 self.event(state, "Resuming saved recipe", "No additional model call is needed.", candidate=candidate.name)
             self.mutate(project_id, resuming)
         self.check_cancel(cancel)
+        candidate,recipe,output=self.guard_grade(project_id,candidate,recipe,original,output,state.source,cancel)
         records=None;mask_qa=None
         if recipe.proposal.mode=='localized':
             if evidence is None or recipe.timeline['key']!=evidence['key']:
@@ -903,7 +951,24 @@ class Service:
             self.mutate(project_id,compositing)
         def render_stage(stage):
             self.mutate(project_id,lambda s:setattr(s,'stage',stage))
-        result = rendering.render(original, output, recipe, state.source, self.settings, cancel,on_stage=render_stage)
+        try:
+            result = rendering.render(original, output, recipe, state.source, self.settings, cancel,on_stage=render_stage)
+        except Problem as failure:
+            if failure.code!='GRADE_EXECUTION_LIMIT':raise
+            # Encoding context can differ from sparse probes. Preserve the failed
+            # attempt and permit one bounded level-only fallback, never a limit
+            # increase or another blind encode of identical parameters.
+            self.store.candidate_artifact(project_id,candidate.id,'validation.json',{'review_status':'rejected','error':failure.public()})
+            def rejected(s):
+                target=next(c for c in s.candidates if c.id==candidate.id);target.status='failed';target.error=failure.public()
+                self.event(s,'Full output clipping check stopped this candidate',failure.message,code=failure.code,candidate=candidate.name)
+            self.mutate(project_id,rejected)
+            current=self.store.get(project_id)
+            if (recipe.execution_preflight and recipe.proposal.mode=='global'
+                and (recipe.proposal.parameters.black_point>0 or recipe.proposal.parameters.white_point<1)
+                and sum(c.brief_sha256==candidate.brief_sha256 for c in current.candidates)<self.settings.max_render_iterations):
+                self._render_one(project_id,cancel,keep_active=keep_active);return
+            raise
         result['execution_capabilities']={k:technical[k] for k in ['operations','localized_available','limitations','shots']}
         self.check_cancel(cancel)
         def checking(s):
@@ -1036,6 +1101,14 @@ class Service:
                 finish(state.selected_candidate_id or candidate.id,'creative_review_failed');return
             preferred=review.preferred_candidate_id or candidate.id
             state=self.store.get(project_id);proposal=review.revision_plan;stop=None
+            if proposal and candidate.brief_sha256==brief_hash:
+                # A model revision cannot erase an execution bound on this same
+                # frozen brief. New explicit user feedback creates a new brief.
+                prior=candidate.recipe.proposal.execution_limits
+                for field in ['max_new_black_fraction','max_new_white_fraction','subject_max_chroma_change','subject_min_luma_ratio']:
+                    old=getattr(prior,field);new=getattr(proposal.execution_limits,field)
+                    if old is not None and (new is None or (new<old if field=='subject_min_luma_ratio' else new>old)):
+                        setattr(proposal.execution_limits,field,old)
             if review.decision!='revise':stop=review.decision
             elif preferred!=candidate.id:stop='previous_candidate_preferred'
             elif not proposal or not any(i.correctable for i in review.issues):stop='no_supported_targeted_revision'

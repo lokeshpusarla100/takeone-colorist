@@ -54,6 +54,8 @@ export default function RenderPanel({state,health,sending,online,direction,onGen
       </section>}
       {selected.recipe&&<>
         <p>{selected.recipe.proposal.summary}</p>
+        {selected.recipe.execution_adjustment&&<p className="inline-help"><strong>Execution correction: </strong>{selected.recipe.execution_adjustment.reason}
+          {' '}{Object.entries(selected.recipe.execution_adjustment.changes).map(([key,change])=>`${key}: ${change.from.toFixed(4)} → ${change.to.toFixed(4)}`).join(' · ')}</p>}
         <p>Treatment: {selected.recipe.proposal.mode??'global'}</p>
         {selected.recipe.proposal.local?<>
           <h3>Subject</h3>{values(selected.recipe.proposal.local.foreground)}

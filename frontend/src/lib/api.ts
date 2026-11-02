@@ -24,7 +24,7 @@ export type RenderCandidate = {
     issues:{id:string;description:string;evidence_ids:string[];correctable:boolean}[];preferred_candidate_id:string|null};
   review_error?:null|{message:string;action:string};
   review_evidence?:{frame_index:number;time:number;roles:string[]}[];
-  recipe:null|{tone_operator?:string;proposal:{parameters:GradeValues;mode?:'global'|'localized';
+  recipe:null|{tone_operator?:string;execution_adjustment?:null|{reason:string;changes:Record<string,{from:number;to:number}>};proposal:{parameters:GradeValues;mode?:'global'|'localized';
     local?:null|{concept:string;foreground:GradeValues;background:GradeValues;intervals:{start:number;end:number}[];preserve_subject_color:boolean};
     summary:string;decisions:{parameter:string;reason:string;source_ids:string[]}[];limitations:string[]}};
   preview_url:string|null;download_url:string|null;width:number|null;height:number|null;duration:number|null;
@@ -170,11 +170,12 @@ export function parseBackend(value:unknown):BackendState {
 export const activeJob=(s:BackendState)=>s.status==='ingesting'||s.status==='analyzing'||s.status==='rendering'||s.status==='segmenting'||s.status==='reviewing';
 export function stageLabel(stage:string) {
   const labels:Record<string,string>={
-    inspect_source:'Inspecting source metadata',prepare_preview:'Preparing video previews',
+    inspect_source:'Inspecting source metadata',prepare_preview:'Building display preview and analysis proxy',
     analyze_scene:'Muse is inspecting the video',select_question:'Checking whether clarification is needed',save_brief:'Saving the creative brief',
     awaiting_answer:'Waiting for your answer',brief_ready:'Creative brief ready',ready:'Source ready',
     cancelling:'Cancelling; an in-flight request may still finish',queue:'Waiting for the worker',
     plan_grade:'Planning supported adjustments',render_grade:'Rendering the video',render_ready:'Rendered video ready',
+    preflight_grade:'Checking clipping bounds before full rendering',
     verify_segmentation_input:'Verifying source/proxy frame mapping',segment_subject:'SAM is tracking the subject',
     render_mask_overlay:'Rendering the mask diagnostic overlay',segmentation_ready:'Subject tracking complete',
     decode_segmentation_masks:'Validating and decoding saved SAM masks locally',

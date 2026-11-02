@@ -12,13 +12,14 @@ export default function ProgressPanel({state,localBusy,localProgress,sending,onl
   const stepIds=['prepare','inspect','clarify','brief','grade','masks','review'] as const;
   const names={pending:'Not started',active:'In progress',complete:'Complete',waiting:'Your answer needed',failed:'Stopped'};
   return <div className="run-progress">
-    <div role="status" aria-live="polite"><h3>{progress.heading}</h3>
+    <div className="progress-square" role="status" aria-live="polite"><span className="progress-square-label">{progress.working?'Processing':state?.status==='awaiting_answer'?'Waiting for answer':'Current status'}</span><h3>{progress.heading}</h3>
       {!online&&<p className="inline-help">Backend unavailable. Status reflects the last saved update.</p>}
       {progress.working&&<progress aria-label="Processing in progress"/>}
+      <div><span className="progress-square-label">Current attempt</span><strong className="progress-square-time" aria-label="Total processing time">{formatDuration(timing.total)}</strong></div>
       <p className="inline-help">{progress.note}</p>
     </div>
-    <div className="processing-total"><span>Total processing</span><strong aria-label="Total processing time">{formatDuration(timing.total)}</strong></div>
-    <p className="inline-help">{!timing.recorded?'Timers start with new backend work; earlier steps were not timed.':!online?'Timer paused at the last saved update.':timing.interrupted?'Partial timing: interrupted work ends at its last saved update.':'Backend work only. Pauses between jobs and while waiting for answers.'}</p>
+    <p className="inline-help">{!timing.recorded?'Timers start with new backend work; earlier steps were not timed.':!online?'Timer paused at the last saved update.':timing.interrupted?'Partial timing: interrupted work ends at its last saved update.':'Retried steps reset. Earlier completed steps keep their last time. Waiting is excluded.'}</p>
+    {timing.recorded&&<details><summary>All attempts: {formatDuration(timing.lifetimeTotal)}</summary><p className="inline-help">Historical timings remain in the session log. Source preparation runs on import or an explicit source retry, not on render retry.</p></details>}
     <ol className="progress-steps">{progress.steps.map((step,index)=><li key={step.name} className={'step-'+step.phase}
       aria-current={step.phase==='active'||step.phase==='waiting'?'step':undefined}>
       <div><strong>{step.name}</strong><span>{names[step.phase]}<time aria-label={step.name+' time'}>{formatDuration(timing.byStep[stepIds[index]])}</time></span></div><p>{step.detail}</p>

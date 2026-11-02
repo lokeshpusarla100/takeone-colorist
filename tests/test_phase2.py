@@ -48,10 +48,15 @@ def test_declared_clipping_bound_is_enforced_without_forcing_brightness(settings
             return p,u
     with TestClient(create_app(settings,BlackPlanner(),Masks()),base_url='http://127.0.0.1') as c:
         result=generate(c,start(c,upload(c,dark_clip),'explicit preserve detail'))
-        assert result['status']=='failed' and result['error']['code']=='GRADE_EXECUTION_LIMIT'
-        details=result['error']['details']
-        assert details['observed_clipping']['new_black_fraction']>details['execution_limits']['max_new_black_fraction']
-        assert details['timing']['master']['max_normalized_error_ms']<=details['timing']['master']['quantization_bound_ms']
+        assert result['status']=='render_ready',result.get('error')
+        original,corrected=result['candidates']
+        assert original['recipe']['proposal']['parameters']['black_point']==.1
+        assert original['status']=='failed' and corrected['parent_id']==original['id']
+        assert corrected['recipe']['proposal']['parameters']['black_point']==0
+        assert corrected['recipe']['proposal']['execution_limits']['max_new_black_fraction']==0
+        assert corrected['recipe']['proposal']['parameters']['brightness_gain']==1
+        assert corrected['recipe']['execution_preflight']['status']=='corrected'
+        assert not corrected['validation']['warnings']
 
 
 def test_intentional_black_regions_are_reported_without_aesthetic_rejection(settings,dark_clip):

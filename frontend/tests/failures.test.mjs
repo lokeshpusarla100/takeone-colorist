@@ -50,6 +50,24 @@ test('untimed legacy sessions stay unknown and durations support long jobs',()=>
   assert.equal(formatDuration(250),'<1s');assert.equal(formatDuration(62000),'01:02');
   assert.equal(formatDuration(3661000),'01:01:01');
 });
+test('render retry resets render parts and attempt total while retaining completed source time',()=>{
+  const events=[timingEvent('a',0,'inspect_source',true,{progress_job:'source'}),timingEvent('b',10,'ready',false),
+    timingEvent('c',20,'plan_grade',true,{progress_job:'first'}),timingEvent('d',25,'render_grade',true,{progress_job:'first'}),
+    timingEvent('e',40,'check_output_quality',false),timingEvent('f',100,'plan_grade',true,{progress_job:'retry',progress_retry:true})];
+  const result=processingTimings({status:'rendering',events},timingNow(102));
+  assert.equal(result.byStep.prepare,10000);assert.equal(result.byStep.grade,2000);
+  assert.equal(result.parts.plan,2000);assert.equal(result.parts.render,undefined);assert.equal(result.total,2000);
+  assert.equal(result.lifetimeTotal,32000);
+  assert.deepEqual(processingTimings(JSON.parse(JSON.stringify({status:'rendering',events})),timingNow(102)),result);
+});
+test('answer continuation accumulates clarification but explicit analysis retry resets it',()=>{
+  const events=[timingEvent('a',0,'select_question',true,{progress_job:'q1'}),timingEvent('b',5,'awaiting_answer',false),
+    timingEvent('c',10,'select_question',true,{progress_job:'q2'})];
+  assert.equal(processingTimings({status:'analyzing',events},timingNow(12)).byStep.clarify,7000);
+  events.push(timingEvent('d',13,'select_question',false),timingEvent('e',20,'select_question',true,{progress_job:'retry',progress_retry:true}));
+  const result=processingTimings({status:'analyzing',events},timingNow(21));
+  assert.equal(result.byStep.clarify,1000);assert.equal(result.total,1000);
+});
 
 test('mutating workspace actions lock during local, remote and command processing',()=>{
   for(const status of ['ingesting','analyzing','rendering','segmenting','reviewing'])assert.equal(mutationLocked({status}),true);

@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import time
+import tempfile
 from fractions import Fraction
 
 import cv2
@@ -11,6 +12,72 @@ import numpy as np
 
 from .errors import Problem
 from .media import command
+
+
+def decoded_manifest(path,settings,cancel,metadata):
+    """One strict full video/audio decode, retaining every presented video PTS.
+
+    framecrc consumes decoded raw video/audio; it is not a packet-only probe.
+    Its encoder time base is explicit so validation cannot itself snap VFR PTS.
+    """
+    video=next(s for s in metadata['streams'] if s['codec_type']=='video')
+    raw=command([settings.ffmpeg,'-v','error','-xerror','-nostdin','-copyts','-threads','4','-i',str(path),
+        '-map','0:v:0','-map','0:a:0?','-c:v','rawvideo','-threads:v','1','-enc_time_base:v',video['time_base'],
+        '-fps_mode','passthrough','-c:a','pcm_s16le','-f','framecrc','-'],cancel,120)
+    return _decode_manifest(raw,metadata)
+
+
+def _decode_manifest(raw,metadata):
+    video=next(s for s in metadata['streams'] if s['codec_type']=='video')
+    try:
+        tick=Fraction(video['time_base']);pts=[];durations=[];seen_tick=None
+        for line in raw.splitlines():
+            if line.startswith('#tb 0:'):seen_tick=Fraction(line.split(':',1)[1].strip())
+            if line.startswith('#'):continue
+            fields=line.split(',')
+            if len(fields)>=6 and fields[0].strip()=='0':
+                pts.append(int(fields[2]));durations.append(int(fields[3]))
+        if seen_tick!=tick or not pts or len(pts)>15000 or any(b<=a for a,b in zip(pts,pts[1:])):raise ValueError()
+        return {'times':[float((p-pts[0])*tick) for p in pts],'width':video['width'],'height':video['height'],
+            'start':float(pts[0]*tick),'pts':pts,'time_base':str(tick),'nominal_rate':video.get('r_frame_rate','0/1'),
+            'durations':durations,'fully_decoded':True,'audio_decoded':any(s['codec_type']=='audio' for s in metadata['streams'])}
+    except (ValueError,KeyError,IndexError,ZeroDivisionError):
+        raise Problem('EVIDENCE_TIMING_INVALID','Decoded output has incomplete or inconsistent frame timestamps.',
+                      'The output was not accepted. Inspect decoder/timestamp diagnostics.',422)
+
+
+def decoded_evidence(path,settings,cancel,metadata,selection):
+    """Strict full-resolution decode/timing and bounded sample RGB in one pass.
+
+    Only the sparse evidence branch is scaled. All original video frames and
+    audio packets still traverse the independent full-resolution integrity path.
+    """
+    video=next(s for s in metadata['streams'] if s['codec_type']=='video')
+    indices=sorted(set(selection['selected_indices']));scale=min(256/video['width'],256/video['height'],1)
+    width=max(2,int(video['width']*scale)//2*2);height=max(2,int(video['height']*scale)//2*2)
+    expected=len(indices)*width*height*3
+    if not indices or len(indices)>12 or indices[0]<0 or indices[-1]>=len(selection['manifest']['times']):
+        raise Problem('EVIDENCE_TIMING_INVALID','The output evidence selection is invalid.',
+                      'Rebuild bounded source evidence before rendering.',422)
+    if expected>settings.sample_memory_bytes:
+        raise Problem('EVIDENCE_MEMORY_BUDGET','Requested visual evidence exceeds the configured memory budget.',
+                      'Reduce sample count or dimensions.',422)
+    selected='+'.join(fr'eq(n\,{i})' for i in indices)
+    graph=f'[0:v:0]split=2[full][samplein];[samplein]select={selected},scale={width}:{height}[samples]'
+    with tempfile.TemporaryDirectory(prefix='takeone-qc-') as directory:
+        sample_path=Path(directory)/'selected.rgb'
+        raw=command([settings.ffmpeg,'-v','error','-xerror','-nostdin','-copyts','-filter_complex_threads','2',
+            '-threads','4','-i',str(path),'-filter_complex',graph,
+            '-map','[full]','-map','0:a:0?','-c:v','rawvideo','-threads:v','1','-pix_fmt:v',video['pix_fmt'],
+            '-enc_time_base:v',video['time_base'],'-fps_mode','passthrough','-c:a','pcm_s16le','-f','framecrc','-',
+            '-map','[samples]','-an','-c:v','rawvideo','-threads:v','1','-pix_fmt','rgb24','-enc_time_base:v',video['time_base'],
+            '-fps_mode','passthrough','-f','rawvideo',str(sample_path)],cancel,120)
+        manifest=_decode_manifest(raw,metadata)
+        if sample_path.stat().st_size!=expected:
+            raise Problem('EVIDENCE_DECODE_FAILED','Decoded evidence does not match the selected frame identities.',
+                          'Inspect frame timing/decoder diagnostics; no model input was accepted.',422)
+        pixels=np.frombuffer(sample_path.read_bytes(),np.uint8).reshape(len(indices),height,width,3)
+    return manifest,{index:frame for index,frame in zip(indices,pixels)}
 
 
 def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -33,6 +100,48 @@ def frame_manifest(path,settings,cancel):
                       'Use a clip within the 15,000-frame analysis limit. No model call was made.',422)
 
 
+def source_manifest(path,settings,cancel,existing,metadata,identity,cache=None):
+    """Upgrade old, hash-bound decimal evidence without decoding the whole source.
+
+    Decimal PTS can be recovered only when the source tick is wider than their
+    recorded precision. Verify the final decoded PTS/duration and fall back to
+    full inspection on ambiguity. Nothing is resampled to nominal frame rate.
+    """
+    if existing and 'pts' in existing:return existing
+    key=digest({'source':identity,'existing':existing,'version':1})
+    if cache and Path(cache).is_file():
+        try:
+            saved=json.loads(Path(cache).read_text())
+            if saved.get('key')==key:return saved['manifest']
+        except (ValueError,KeyError):pass
+    result=None
+    try:
+        video=next(s for s in metadata['streams'] if s['codec_type']=='video');tick=Fraction(video['time_base'])
+        values=[Fraction(str(existing['start']))+Fraction(str(t)) for t in existing['times']]
+        pts=[round(v/tick) for v in values]
+        if (tick<=Fraction(1,1000000) or not pts or len(pts)>15000
+            or any(b<=a for a,b in zip(pts,pts[1:]))
+            or any(abs(p*tick-v)>Fraction(501,1000000000) for p,v in zip(pts,values))
+            or video.get('nb_frames') and int(video['nb_frames'])!=len(pts)):raise ValueError()
+        # Seek conservatively to the final GOP. This retains the final-frame
+        # duration check rather than inventing it from duration * nominal FPS.
+        seek=max(0,float(values[-1])-2)
+        tail=json.loads(command([settings.ffprobe,'-v','error','-select_streams','v:0','-read_intervals',f'{seek:.6f}%',
+            '-show_frames','-show_entries','frame=best_effort_timestamp,duration,pkt_duration','-of','json',str(path)],cancel,90))['frames']
+        last=tail[-1]
+        if int(last['best_effort_timestamp'])!=pts[-1]:raise ValueError()
+        durations=[None]*len(pts);durations[-1]=last.get('duration',last.get('pkt_duration'))
+        result={**existing,'pts':pts,'time_base':str(tick),'nominal_rate':video.get('r_frame_rate','0/1'),
+                'times':[float((p-pts[0])*tick) for p in pts],'start':float(pts[0]*tick),'durations':durations,
+                'legacy_pts_recovered':True}
+    except (ValueError,KeyError,TypeError,IndexError,ZeroDivisionError,StopIteration):pass
+    if result is None:result=frame_manifest(path,settings,cancel)
+    if cache:
+        from .sam import atomic
+        atomic(cache,{'key':key,'manifest':result})
+    return result
+
+
 def extract(path,manifest,indices,settings,cancel,width=256):
     indices=sorted(set(indices));scale=min(width/manifest['width'],width/manifest['height'],1)
     w=max(2,int(manifest['width']*scale)//2*2);h=max(2,int(manifest['height']*scale)//2*2)
@@ -41,7 +150,7 @@ def extract(path,manifest,indices,settings,cancel,width=256):
         raise Problem('EVIDENCE_MEMORY_BUDGET','Requested visual evidence exceeds the configured memory budget.',
                       'Reduce sample count or dimensions.',422)
     selection='+'.join(fr'eq(n\,{i})' for i in indices)
-    raw=command([settings.ffmpeg,'-v','error','-nostdin','-i',str(path),'-an','-vf',f'select={selection},scale={w}:{h}',
+    raw=command([settings.ffmpeg,'-v','error','-nostdin','-threads','4','-i',str(path),'-an','-vf',f'select={selection},scale={w}:{h}',
         '-frames:v',str(len(indices)),'-fps_mode','passthrough','-pix_fmt','rgb24','-f','rawvideo','-'],cancel,60,binary=True)
     if len(raw)!=expected:raise Problem('EVIDENCE_DECODE_FAILED','Decoded evidence does not match the selected frame identities.',
                                        'Inspect frame timing/decoder diagnostics; no model input was accepted.',422)
@@ -130,8 +239,8 @@ def plan(path,source,settings,cancel,*,proxy=None,shots=None,focus=(),cache=None
     return result
 
 
-def collect(path,source,settings,cancel,*,selection):
-    frames=extract(path,selection['manifest'],selection['selected_indices'],settings,cancel,width=256)
+def collect(path,source,settings,cancel,*,selection,frames=None):
+    frames=frames if frames is not None else extract(path,selection['manifest'],selection['selected_indices'],settings,cancel,width=256)
     records=[];images=[];used=0
     for i,pixels in frames.items():
         metric=measure(pixels);metric.update(frame_index=i,requested_time=selection['manifest']['times'][i],
@@ -183,10 +292,10 @@ def paired(original,rendered,source,settings,cancel,selection,cache=None):
         raise Problem('REVIEW_TIMING_INVALID','Source/rendered review samples do not align.','Technical validation must pass before creative review.',422)
     from dataclasses import replace
     bounded=replace(settings,sample_image_bytes=settings.sample_image_bytes//2)
-    source_records,source_images=collect(original,source,bounded,cancel,selection=selection)
-    output_records,output_images=collect(rendered,source,bounded,cancel,selection=selection)
     a=extract(original,selection['manifest'],selection['selected_indices'],settings,cancel)
     b=extract(rendered,selection['manifest'],selection['selected_indices'],settings,cancel)
+    source_records,source_images=collect(original,source,bounded,cancel,selection=selection,frames=a)
+    output_records,output_images=collect(rendered,source,bounded,cancel,selection=selection,frames=b)
     details=[]
     for i in a:
         x=a[i].astype(np.float32)@np.array([.2126,.7152,.0722],np.float32)/255

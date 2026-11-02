@@ -48,3 +48,14 @@ def test_public_question_history_preserves_user_choices_and_response_types():
     assert 'rubric' not in public
     assert [a['answer'] for a in public['rubric_history']]==['Soft contrast','Keep the red paint','Delegated to Muse','Skipped']
     assert public['rubric_history'][0]['question']=='How much contrast?'
+
+
+def test_retry_marker_retains_job_and_retry_identity(tmp_path):
+    from takeone.contracts import Event
+    store=Store(tmp_path)
+    state=State(id=str(uuid4()),filename='test.mp4',status='rendering',stage='plan_grade',active_job='retry-job')
+    state.events.append(Event(title='Grade queued',details={'progress_job':'retry-job','progress_retry':True}))
+    store.save(state)
+    marker=markers(store.get(state.id))[-1]
+    assert marker.details['progress_retry'] is True
+    assert marker.details['progress_job']=='retry-job'

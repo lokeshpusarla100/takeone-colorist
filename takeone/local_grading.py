@@ -15,15 +15,15 @@ from .media import command, probe
 
 def timeline(directory,source,settings,cancel):
     """Source/proxy identity and native scdet cuts, independent of creative wording."""
+    if abs(source.start_time)>0.002:
+        raise Problem('LOCAL_START_TIME_UNSUPPORTED','Localized grading currently requires a zero-start video timeline.',
+                      'Use a zero-start CFR source; no segmentation was requested.',422)
     key={'source_sha256':source.sha256,'proxy_sha256':sam.checksum(directory/'analysis.mp4'),'version':1}
     path=directory/'grading-timeline.json'
     if path.is_file():
         cached=json.loads(path.read_text())
         if cached.get('key')==key and sam.checksum(directory/'source.bin')==source.sha256:return cached
     mapping=sam.mapping(directory,source,settings,cancel)
-    if abs(source.start_time)>0.002:
-        raise Problem('LOCAL_START_TIME_UNSUPPORTED','Localized grading currently requires a zero-start video timeline.',
-                      'Use a zero-start CFR source; no segmentation was requested.',422)
     text=command([settings.ffmpeg,'-v','error','-i',str(directory/'analysis.mp4'),'-an',
                   '-vf','scdet=t=10,metadata=mode=print:file=-','-f','null','-'],cancel,120)
     cuts={0}

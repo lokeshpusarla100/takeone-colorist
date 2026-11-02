@@ -14,8 +14,9 @@ Then run in this directory:
 
 Open http://127.0.0.1:5173/. On a fresh checkout, run npm ci first. Dev and preview proxy /api to port 8000; TAKEONE_API_TARGET can override the target for isolated tests.
 
-The Progress tab displays elapsed backend time for each step and a total across this video's recorded
-attempts. Planning/render/QC and mask tracking/validation have separate breakdowns. Saved stage events
+The Progress tab displays elapsed backend time for each step and a square current-stage/attempt display.
+Retries reset the affected steps and current-attempt total; earlier jobs remain in All attempts and the log.
+Planning/render/QC and mask tracking/validation have separate breakdowns. Saved stage events
 preserve timing on refresh; waiting for answers and idle time are excluded. Older untimed work shows
 `—`, and interrupted/offline timing is explicitly qualified. Browser upload-transfer time is excluded.
 

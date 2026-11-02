@@ -39,6 +39,7 @@ export default function RubricDialog({open,onClose,state,disabled,online,changed
         {choice==='__other'&&<textarea rows={2} maxLength={4000} aria-label="Your answer" value={other} onChange={e=>setOther(e.target.value)}/>}
       </fieldset>
       <p className="question-reason"><strong>Why this matters: </strong>{question.decision_fork}</p>
+      {question.unresolved_preference&&<p className="inline-help"><strong>What needs clarification: </strong>{question.unresolved_preference}</p>}
       <div className="actions">
         <button disabled={disabled||!online||!choice||(choice==='__other'&&!other.trim())}
           onClick={()=>onAnswer(question.id,choice==='__other'?'free_text':'option',choice==='__other'?other.trim():choice)}>Continue</button>

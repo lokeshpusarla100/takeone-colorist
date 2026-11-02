@@ -88,6 +88,7 @@ def inspect_failure(directory, state, candidate):
 
 def smoke(max_seconds: int) -> int:
     tests = [
+        'tests/test_sam_prompting.py', 'tests/test_mask_recovery.py',
         'tests/test_render_preflight.py', 'tests/test_grade_guard_service.py', 'tests/test_render_performance.py', 'tests/test_render_timing.py',
         'tests/test_local_grading.py::test_global_only_does_not_call_sam',
         'tests/test_local_grading.py::test_localized_pixels_differ_and_subject_is_preserved_with_cache_reuse',

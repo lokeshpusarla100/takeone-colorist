@@ -7,6 +7,7 @@ import { AppError, asAppError } from './errors';
 import type { ErrorDetails } from './errors';
 import * as api from './api';
 import { preparedSource } from './preparedSource';
+import { validateRenderImport } from './renderImport';
 
 export function useWorkspace() {
   const [project, setProject] = useState<Project | null>(null);
@@ -187,17 +188,14 @@ export function useWorkspace() {
         const asset=await inspectVideo(file,{signal:aborter.signal});
         const latest=current.current;
         if(!latest?.source)throw new AppError('SOURCE_REQUIRED','Import a source first.','Choose the original video.');
-        if(asset.width!==latest.source.width||asset.height!==latest.source.height||Math.abs(asset.duration-latest.source.duration)>.15){
-          throw new AppError('RENDER_MISMATCH','This render does not match the source.',
-            'Use matching dimensions and duration.',{sourceWidth:latest.source.width,sourceHeight:latest.source.height,
-              renderWidth:asset.width,renderHeight:asset.height,sourceDuration:latest.source.duration,renderDuration:asset.duration});
-        }
+        const compatibility=validateRenderImport(latest.source,asset);
         const version:Version={id:crypto.randomUUID(),name:'Render '+(latest.versions.filter(v=>v.kind==='rendered').length+1),
-          kind:'rendered',createdAt:new Date().toISOString(),assetId:asset.id,recipe:null,
+          kind:'rendered',createdAt:new Date().toISOString(),assetId:asset.id,recipe:null,previewOnly:compatibility.previewOnly,
           parentId:latest.versions.find(v=>v.kind==='source')?.id};
         const next={...latest,assets:[...latest.assets,asset],versions:[...latest.versions,version],selectedVersionId:version.id,
           events:[...latest.events,makeEvent({actor:'user',kind:'activity',title:'Render imported',
-            reason:'Imported output. Recipe provenance is unknown.',details:{file:asset.name}})]};
+            reason:compatibility.previewOnly?'Imported lower-resolution preview. Recipe provenance is unknown.':'Imported output. Recipe provenance is unknown.',
+            details:{file:asset.name,preview_only:compatibility.previewOnly,width:asset.width,height:asset.height}})]};
         setCanCancel(false);await saveImport(next,asset.id,file);
         current.current=next;setProject(next);setSaveState('saved');
       }

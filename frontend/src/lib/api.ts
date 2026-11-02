@@ -4,7 +4,7 @@ import type { SessionEvent } from './types';
 import { nextProfile, nextContext } from './preferenceContext';
 
 export type Question = {
-  id:string; question:string; scope:string; decision_fork:string;
+  id:string; question:string; scope:string; decision_fork:string;unresolved_preference?:string;
   options:{id:string;label:string;intended_outcome:string}[];
 };
 export type Brief = {
@@ -33,7 +33,7 @@ export type RenderCandidate = {
 };
 export type LookPreview = {
   id:string;name:string;description:string;created_at:string;schema_version?:number;
-  brief_sha256:string;frame_index:number;frame_time:number;image_url:string;uses_local:boolean;
+  brief_sha256:string;frame_index:number;frame_time:number;image_url:string;uses_local:boolean;preview_only?:boolean;
   proposal:{parameters:GradeValues;mode?:'global'|'localized';
     local?:null|{concept:string;foreground:GradeValues;background:GradeValues;intervals:{start:number;end:number}[];preserve_subject_color:boolean};
     summary:string;decisions:{parameter:string;reason:string;source_ids:string[]}[];limitations:string[]};
@@ -75,7 +75,7 @@ export type BackendState = {
 export type Health = {
   status:string;model:string;muse_configured:boolean;ffmpeg_available:boolean;ffprobe_available:boolean;
   max_upload_bytes:number;max_duration_seconds:number;max_questions:number;grading_connected:boolean;
-  sam_model?:string;segmentation_connected?:boolean;
+  sam_model?:string;segmentation_connected?:boolean;look_previews_connected?:boolean;native_mask_timing_connected?:boolean;
 };
 const record=(value:unknown):value is Record<string,unknown>=>typeof value==='object'&&value!==null;
 const text=(value:unknown)=>typeof value==='string';
@@ -177,7 +177,7 @@ export function parseBackend(value:unknown):BackendState {
   if(value.looks!==undefined&&(!Array.isArray(value.looks)||!value.looks.every(l=>{
     if(!record(l)||!uuid(l.id)||!text(l.name)||!text(l.description)||!text(l.created_at)||!text(l.brief_sha256)
       ||!Number.isInteger(l.frame_index)||Number(l.frame_index)<0||!finite(l.frame_time)||Number(l.frame_time)<0
-      ||typeof l.uses_local!=='boolean'||!record(l.proposal)||!gradeValues(l.proposal.parameters)
+      ||typeof l.uses_local!=='boolean'||(l.preview_only!==undefined&&typeof l.preview_only!=='boolean')||!record(l.proposal)||!gradeValues(l.proposal.parameters)
       ||!text(l.proposal.summary)||!Array.isArray(l.proposal.decisions)||!strings(l.proposal.limitations))return false;
     return l.image_url==='/api/projects/'+value.id+'/looks/'+l.id+'/image';
   })))return invalidResponse();
@@ -232,6 +232,10 @@ export async function request<T>(path:string,options:RequestInit={},timeout=1500
     let body:unknown;
     try{body=await response.json();}catch(cause){
       if(controller.signal.aborted)throw cause;
+      if(response.status===413)throw new AppError('UPLOAD_LIMIT','The upload exceeds the server size limit.',
+        'Choose a smaller file or increase TAKEONE_MAX_UPLOAD_MB in the backend .env and restart it.',{http_status:413});
+      if(response.status>=500)throw new AppError('BACKEND_UNAVAILABLE','The backend or API proxy could not complete the request.',
+        'Check the backend connection and configured upload limit, then retry. This does not establish video corruption.',{http_status:response.status});
       throw new AppError('API_RESPONSE_INVALID','The backend returned an unreadable response.',
         'Check that the Python backend is running and the frontend API proxy is configured.',{http_status:response.status});
     }
@@ -250,19 +254,33 @@ export async function health() {
   const value=await request<unknown>('/api/health');
   if(!record(value)||value.status!=='ok'||!text(value.model)||typeof value.muse_configured!=='boolean'
     ||!finite(value.max_upload_bytes)||!finite(value.max_questions))return invalidResponse();
+  if(value.look_previews_connected!==undefined&&typeof value.look_previews_connected!=='boolean')return invalidResponse();
   return value as unknown as Health;
 }
 export const getState=async(id:string,signal?:AbortSignal)=>parseBackend(await request<unknown>('/api/projects/'+id,{signal}));
 export async function upload(file:File,signal:AbortSignal) {
+  // Check the actual running server before sending a potentially large body.
+  // Early server rejection during proxy streaming can otherwise mask a 413.
+  const limits=await request<Health>('/api/health',{signal});
+  if(!Number.isSafeInteger(limits.max_upload_bytes)||limits.max_upload_bytes<=0)invalidResponse();
+  if(file.size>limits.max_upload_bytes)throw new AppError('UPLOAD_LIMIT',
+    `This file is ${(file.size/1048576).toFixed(1)} MiB; the backend limit is ${(limits.max_upload_bytes/1048576).toFixed(0)} MiB.`,
+    'Choose a smaller file or increase TAKEONE_MAX_UPLOAD_MB in the backend .env and restart it.',
+    {bytes:file.size,max_upload_bytes:limits.max_upload_bytes});
   const form=new FormData();form.append('file',file);
   form.append('profile_id',nextProfile());form.append('preference_context',JSON.stringify(nextContext()));
   return parseBackend(await request<unknown>('/api/projects',{method:'POST',body:form,signal},120000));
 }
 export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select',body:Record<string,unknown>) {
-  return parseBackend(await request<unknown>('/api/projects/'+id+'/'+kind,{
+  try{return parseBackend(await request<unknown>('/api/projects/'+id+'/'+kind,{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({...body,command_id:crypto.randomUUID()}),
-  }));
+  }));}catch(cause){
+    if((kind==='looks'||kind==='looks/select')&&cause instanceof AppError&&cause.code==='API_FAILED'&&cause.details.http_status===404)
+      throw new AppError('BACKEND_UPDATE_REQUIRED','The running backend has not loaded look previews.',
+        'Restart the backend from this checkout, then refresh the page. Your saved project is kept.',{http_status:404});
+    throw cause;
+  }
 }
 export const cancel=async(id:string)=>parseBackend(await request<unknown>('/api/projects/'+id+'/cancel',{method:'POST'}));
 export function backendError(state:BackendState) {

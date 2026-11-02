@@ -60,6 +60,10 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
   const send=async(kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select',body:Record<string,unknown>)=>{
     const source=current.current;
     if(!source?.backend||inFlight.current||selectionInFlight.current||cancelInFlight.current||api.activeJob(source.backend))return false;
+    if((kind==='looks'||kind==='looks/select')&&health?.look_previews_connected!==true){
+      reportError(new AppError('BACKEND_UPDATE_REQUIRED','The running backend has not loaded look previews.',
+        'Restart the backend from this checkout, then refresh the page. Your saved project is kept.'),'backend.'+kind);return false;
+    }
     inFlight.current=true;setSending(true);
     const id=source.backend.id;
     try{

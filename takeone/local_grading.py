@@ -23,23 +23,28 @@ def timeline(directory,source,settings,cancel):
     The container's declared start_time is a hint only and is not trusted
     as frame identity.
     """
-    key={'source_sha256':source.sha256,'proxy_sha256':sam.checksum(directory/'analysis.mp4'),'version':2}
+    key={'source_sha256':source.sha256,'proxy_sha256':sam.checksum(directory/'analysis.mp4'),'version':3}
     path=directory/'grading-timeline.json'
     if path.is_file():
         cached=json.loads(path.read_text())
-        if cached.get('key')==key and sam.checksum(directory/'source.bin')==source.sha256:return cached
+        proxy=directory/cached.get('frame_map',{}).get('proxy_filename','analysis.mp4')
+        if cached.get('key')==key and proxy.is_file() and sam.checksum(proxy)==cached['frame_map']['proxy_sha256'] and sam.checksum(directory/'source.bin')==source.sha256:return cached
     mapping=sam.mapping(directory,source,settings,cancel)
+    analysis=sam.frame_info(directory/'analysis.mp4',settings,cancel,require_cfr=False)
+    if len(analysis['pts'])!=mapping['frame_count']:
+        raise Problem('SAM_FRAME_MAPPING_FAILED','The old analysis proxy has a different frame count.',
+                      'Re-import the original to prepare a frame-preserving analysis proxy.',422)
     text=command([settings.ffmpeg,'-v','error','-i',str(directory/'analysis.mp4'),'-an',
                   '-vf','scdet=t=10,metadata=mode=print:file=-','-f','null','-'],cancel,120)
     cuts={0}
     for value in re.findall(r'lavfi\.scd\.time=([0-9.]+)',text):
-        t=float(value);index=min(range(mapping['frame_count']),key=lambda i:abs(mapping['frames'][i]['time']-t))
-        if abs(mapping['frames'][index]['time']-t)<=.002:cuts.add(index)
+        t=float(value);index=min(range(mapping['frame_count']),key=lambda i:abs(analysis['normalized'][i]-t))
+        if abs(analysis['normalized'][index]-t)<=.002:cuts.add(index)
     result={'key':key,'frame_map':mapping,'cut_frames':sorted(cuts)}
     ends=sorted(cuts)+[mapping['frame_count']]
     step=float(1/Fraction(mapping['proxy']['rate']))
     result['shots']=[{'start':mapping['frames'][a]['time'],
-                      'end':mapping['frames'][b-1]['time']+step,'first_frame':a,'last_frame':b-1}
+                      'end':mapping['frames'][b]['time'] if b<mapping['frame_count'] else source.duration,'first_frame':a,'last_frame':b-1}
                      for a,b in zip(ends,ends[1:]) if b>a]
     sam.atomic(path,result)
     return result
@@ -59,7 +64,7 @@ def plan_ranges(plan,evidence,source):
     return result
 
 
-def records_for_range(manifest,directory,source,first,last,selection):
+def records_for_range(manifest,directory,source,first,last,selection,*,require_complete=True):
     mapping=manifest['frame_map']
     if mapping['source_sha256']!=source.sha256:
         raise Problem('LOCAL_MASK_SOURCE','Masks belong to a different original.','Request masks for this source.',409)
@@ -73,11 +78,11 @@ def records_for_range(manifest,directory,source,first,last,selection):
             item=dict(record,directory=str(directory),proxy=mapping['proxy'])
             by_frame.setdefault(frame,[]).append(item);object_ids.add(record['object_id'])
     missing=[i for i in range(first,last+1) if i not in by_frame]
-    if missing:
+    if missing and require_complete:
         raise Problem('LOCAL_MASK_GAP','Required local frames have no usable subject mask.',
                       'Inspect tracking/visibility or narrow the requested intervals. No global fallback was rendered.',422,
                       missing_frames=len(missing),first_missing_frame=missing[0])
-    if selection=='single_instance' and len(object_ids)!=1:
+    if selection=='single_instance' and object_ids and len(object_ids)!=1:
         raise Problem('LOCAL_SUBJECT_AMBIGUOUS','SAM found multiple object IDs in a required shot interval.',
                       'Use a more specific subject phrase or inspect the manual mask tool. No object was guessed.',422,object_count=len(object_ids))
     return by_frame
@@ -181,13 +186,14 @@ def prepare_matte(proxy,output,source,evidence,records,plan,settings,cancel,*,ad
                       flagged_frames=len(unstable))
     (output/'matte.partial.mkv').replace(output/'matte.mkv')
     matte=sam.frame_info(output/'matte.mkv',settings,cancel,interval_tolerance=.002)
-    if len(matte['pts'])!=mapping['frame_count'] or any(abs(t-f['time'])>.002 for t,f in zip(matte['normalized'],mapping['frames'])):
+    expected=[i/float(Fraction(mapping['proxy']['rate'])) for i in range(mapping['frame_count'])] if mapping.get('schema_version')==3 else [f['time'] for f in mapping['frames']]
+    if len(matte['pts'])!=mapping['frame_count'] or any(abs(t-e)>.002 for t,e in zip(matte['normalized'],expected)):
         raise Problem('LOCAL_MATTE_TIMING','The matte does not align frame-for-frame with the source.','Rebuild the matte.',422)
     return qa
 
 
 def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,limits=None,adaptive=False):
-    mapping=evidence['frame_map'];timing=sam.frame_info(graded,settings,cancel)
+    mapping=evidence['frame_map'];timing=sam.frame_info(graded,settings,cancel,require_cfr=mapping.get('schema_version')!=3)
     if len(timing['pts'])!=mapping['frame_count'] or any(abs(t-f['time'])>.002 for t,f in zip(timing['normalized'],mapping['frames'])):
         raise Problem('LOCAL_OUTPUT_TIMING','Rendered frames no longer match source timing.','The candidate was not accepted.',422)
     a,b=cv2.VideoCapture(str(original)),cv2.VideoCapture(str(graded))
@@ -195,7 +201,7 @@ def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,
     neutral=all(abs(getattr(plan.background,k)-v)<1e-8 for k,v in
                 [('contrast',1),('gamma',1),('saturation',1),('brightness_gain',1),('cooling',0)])
     def empty():return {'shadow_increase':0.,'subject_luma_ratio':1.,'chroma_change':0.,'highlight_chroma_change':0.}
-    worst={'subject':empty(),'background':empty()};counts={'subject':0,'background':0};background_black=0.;pixel_change={'subject':0.,'background':0.}
+    worst={'subject':empty(),'background':empty()};counts={'subject':0,'background':0};background_black=0.;pixel_change={'subject':0.,'background':0.};worst_frames={}
     try:
         for i in range(mapping['frame_count']):
             sam.check(cancel);oka,x=a.read();okb,y=b.read()
@@ -223,6 +229,7 @@ def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,
                 metrics=worst[name]
                 pixel_change[name]=max(pixel_change[name],float(np.abs(y[core]-x[core]).mean()))
                 metrics['shadow_increase']=max(metrics['shadow_increase'],increase)
+                if ratio<metrics['subject_luma_ratio']:worst_frames[name]=i
                 metrics['subject_luma_ratio']=min(metrics['subject_luma_ratio'],ratio)
                 metrics['chroma_change']=max(metrics['chroma_change'],chroma)
                 metrics['highlight_chroma_change']=max(metrics['highlight_chroma_change'],light_chroma);counts[name]+=1
@@ -243,7 +250,8 @@ def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,
         enforce=protected if not adaptive else name=='subject' and limits is not None
         if enforce and failed:
             raise Problem('LOCAL_PROTECTION_FAILED','A protected rendered layer did not meet measured preservation bounds.',
-                          'Review source/output and reduce the treatment; the candidate was not accepted.',422,layer=name,**metrics)
+                          'Review source/output at the reported frame; the candidate was not accepted.',422,layer=name,
+                          minimum_luma_frame=worst_frames.get(name),required_min_luma_ratio=limits.subject_min_luma_ratio if limits else None,**metrics)
     result['change_below_encoding_resolution']=max(pixel_change.values())<1/255
     if max(pixel_change.values())<.01 and not adaptive:
         raise Problem('LOCAL_NO_VISIBLE_EFFECT','The localized recipe produced no measurable change beyond encoding noise.',

@@ -131,7 +131,7 @@ def treatment_filter(parameters: GradeParameters, *, operator='bounded_sigmoid_v
     return "lutrgb=r='"+tone+"':g='"+tone+"':b='"+tone+"',colorchannelmixer="+matrix+','+balance+',format=gbrp16le'
 
 
-def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,first_frame_offset=0.) -> str:
+def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,first_frame_offset=0.,fast_local=True,native_time_base=None) -> str:
     operator=recipe.tone_operator if recipe else 'bounded_sigmoid_v2'
     def treatment(p,protected=False):
         return color_processing.lut(directory,p,protected) if operator=='luminance_ocio_v3' else treatment_filter(p,operator=operator,protected=protected)
@@ -157,11 +157,34 @@ def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,firs
             outgoing='1' if b+1==mapping['frame_count'] or b+1 in cuts else f'clip(({b}-N+2)/{ramp_frames:.9f},0,1)'
             weights.append(f'(gte(N,{a+1})*lte(N,{b+1})*min({incoming},{outgoing}))')
         weight='+'.join(weights)
-        # On disabled frames maskedmerge passes its first input (the base treatment).
-        start+=',split=3[basein][fgin][bgin];'
-        start+='[basein]'+treatment(parameters)+'[base];'
-        start+='[fgin]'+treatment(local.foreground,local.preserve_subject_color)+'[fg];'
-        start+='[bgin]'+treatment(local.background)+'[bg];'
+        steady=[];fading=[];used=[]
+        for index in range(mapping['frame_count']):
+            value=0.
+            for a,b in ranges:
+                if a<=index<=b:
+                    ramp=float(f'{max(1.,min(.15/dt,(b-a+1)/2)):.9f}')
+                    incoming=1 if a in cuts else min(1,max(0,(index-a)/ramp))
+                    outgoing=1 if b+1==mapping['frame_count'] or b+1 in cuts else min(1,max(0,(b-index+1)/ramp))
+                    value+=min(incoming,outgoing)
+            steady.append(value==1);fading.append(0<value<1);used.append(value>0)
+        def enabled(flags):
+            spans=[];i=0
+            while i<len(flags):
+                if not flags[i]:i+=1;continue
+                a=i
+                while i+1<len(flags) and flags[i+1]:i+=1
+                spans.append(f'between(n,{a},{i})');i+=1
+            return '+'.join(spans) or '0'
+        def gated(p,flags,protected=False):
+            op=treatment(p,protected)
+            return op+f":enable='{enabled(flags)}'" if fast_local and op.startswith('lut3d=') else op
+        # SIMD copies cover steady sections. The original floating-point blend
+        # expression remains solely on transition frames, preserving its math.
+        start+=(',split=4[basein][fgin][bgin][nativeclock];' if operator=='luminance_ocio_v3' else ',split=3[basein][fgin][bgin];')
+        start+='[basein]'+gated(parameters,[not x for x in steady])+'[base];'
+        foreground_used=[any(a<=i<=b for a,b in ranges) for i in range(mapping['frame_count'])] if operator=='luminance_ocio_v3' else used
+        start+='[fgin]'+gated(local.foreground,foreground_used,local.preserve_subject_color)+'[fg];'
+        start+='[bgin]'+gated(local.background,used)+'[bg];'
         # Matroska stores milliseconds; rebase the verified CFR mask by frame
         # index and place each mask half a frame before its video frame.
         # The video keeps its preserved PTS (which may start after the audio/
@@ -169,11 +192,33 @@ def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,firs
         # mask at or before it, so an exactly coincident or late mask lags
         # one frame, while a zero-based mask misaligns when the video origin
         # is offset by a frame or more.
-        offset_ticks=round((float(first_frame_offset)-float(1/rate)/2)*90000)
-        start+=f'[1:v]settb=expr=1/90000,setpts=(N*{90000*rate.denominator})/{rate.numerator}+{offset_ticks},format=gbrp16le,setparams=range=full[mask];'
-        start+='[bg][fg][mask]maskedmerge=planes=7[local];'
+        if mapping.get('schema_version')==3:
+            ticks=[f['source_tick'] for f in mapping['frames']]
+            tick=Fraction(mapping['source']['time_base'])
+            origin=round(Fraction(mapping['source']['format_start'])/tick)
+            lead=max(1,min((b-a for a,b in zip(ticks,ticks[1:])),default=2)//2)
+            def lookup(lo,hi):
+                if hi-lo==1:return str(ticks[lo]-origin-lead)
+                middle=(lo+hi)//2
+                return f'if(lt(N,{middle}),{lookup(lo,middle)},{lookup(middle,hi)})'
+            start+=f"[1:v]settb=expr={tick},setpts='{lookup(0,len(ticks))}',format=gbrp16le,setparams=range=full[mask];"
+        else:
+            offset_ticks=round((float(first_frame_offset)-float(1/rate)/2)*90000)
+            start+=f'[1:v]settb=expr=1/90000,setpts=(N*{90000*rate.denominator})/{rate.numerator}+{offset_ticks},format=gbrp16le,setparams=range=full[mask];'
+        if operator=='luminance_ocio_v3':
+            start+='[fg]null[subject];[bg]null[local];'
+        else:start+='[bg][fg][mask]maskedmerge=planes=7[local];'
         # The base is selected outside requested intervals, not a repeated stale mask.
-        start+=f"[base][local]blend=all_expr='A+(B-A)*({weight})':enable='{condition}':eof_action=endall:repeatlast=0,"
+        if fast_local:
+            start+='[local]split=2[solidlocal][fadelocal];'
+            start+=f"[base][solidlocal]blend=all_mode=normal:all_opacity=0:enable='{enabled(steady)}':eof_action=endall:repeatlast=0[solid];"
+            start+=f"[solid][fadelocal]blend=all_expr='A+(B-A)*({weight})':enable='{enabled(fading)}':eof_action=endall:repeatlast=0"
+        else:start+=f"[base][local]blend=all_expr='A+(B-A)*({weight})':enable='{condition}':eof_action=endall:repeatlast=0"
+        if operator=='luminance_ocio_v3':
+            source_tb=native_time_base or mapping.get('source',{}).get('time_base','1/90000')
+            start+=f"[fadedbg];[fadedbg]settb=expr={source_tb}[nativebg];[nativebg][subject][mask]maskedmerge=planes=7[protected];"
+            start+='[nativeclock][protected]blend=all_mode=normal:all_opacity=0:eof_action=endall:repeatlast=0,'
+        else:start+=','
     else:
         start+=','+treatment(parameters)+','
     return (start+
@@ -183,7 +228,7 @@ def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,firs
             "[view]scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[preview]")
 
 
-def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Settings, audio_codec: str | None, *, timing_policy,filter_threads=None):
+def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Settings, audio_codec: str | None, *, timing_policy,filter_threads=None,fast_local=True):
     source=source.resolve();directory=directory.resolve()
     audio = "copy" if audio_codec in {"aac", "mp3", "alac"} else "aac"
     inputs=['-i',str(source)]
@@ -197,9 +242,9 @@ def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Se
         except (KeyError,TypeError,ValueError):
             offset=0.
         if not (offset==offset and abs(offset)!=float('inf')):offset=0.
-    return [settings.ffmpeg, "-hide_banner", "-v", "error", "-nostdin", "-y",
+    args=[settings.ffmpeg, "-hide_banner", "-v", "error", "-nostdin", "-y",
             "-filter_complex_threads", str(filter_threads or min(4,max(1,(os.cpu_count() or 2)//3))), "-copyts", "-start_at_zero", *inputs,
-            "-filter_complex", filter_graph(recipe.proposal.parameters,recipe=recipe,directory=directory,first_frame_offset=offset),
+            "-filter_complex", filter_graph(recipe.proposal.parameters,recipe=recipe,directory=directory,first_frame_offset=offset,fast_local=fast_local,native_time_base=timing_policy['encoder_time_base']),
             "-map", "[master]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "17",
             "-threads", "4", "-pix_fmt", "yuv420p", "-fps_mode", "passthrough",
             "-enc_time_base:v",timing_policy['encoder_time_base'],
@@ -211,6 +256,16 @@ def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Se
             "-g", "48", "-keyint_min", "48",
             "-fps_mode", "passthrough", "-enc_time_base:v",timing_policy['encoder_time_base'],
             "-c:a", "libopus", "-b:a", "96k", str(directory / "preview.partial.webm")]
+    index=args.index('-filter_complex')
+    if len(args[index+1])>60000:
+        # A balanced per-frame PTS lookup may exceed Linux's per-argument
+        # limit. The graph is generated solely from validated integer PTS.
+        graph_path=directory/'native-mask-timing.ffscript'
+        temporary=graph_path.with_suffix('.tmp');temporary.write_text(args[index+1]);temporary.replace(graph_path)
+        help_text=command([settings.ffmpeg,'-h','full'],threading.Event(),10)
+        args[index]='-filter_complex_script' if '-filter_complex_script ' in help_text else '-/filter_complex'
+        args[index+1]=str(graph_path)
+    return args
 
 
 def probe_grade_samples(source,directory,recipe,original,settings,cancel,selection):
@@ -295,8 +350,16 @@ def _render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,pr
         existing if existing and 'pts' in existing else _elapsed(profile,'source_timeline_seconds',lambda:evidence.frame_manifest(source,settings,cancel)))
     profile['filter_threads']=min(4,max(1,(os.cpu_count() or 2)//3)) if qc_mode=='optimized' else 2
     if on_stage:on_stage('render_local_grade' if recipe.proposal.mode=='localized' else 'render_grade')
-    _elapsed(profile,'encode_seconds',lambda:command(render_args(source,directory,recipe,settings,original.audio_codec,
-        timing_policy=policy,filter_threads=profile['filter_threads']),cancel,300,cwd=directory.resolve()))
+    args=render_args(source,directory,recipe,settings,original.audio_codec,
+        timing_policy=policy,filter_threads=profile['filter_threads'],fast_local=qc_mode=='optimized')
+    progress_path=directory.resolve()/'encode-progress.log'
+    from uuid import uuid4
+    for name in ['grade.partial.mp4','preview.partial.webm','grade.mp4','preview.webm','encode-progress.log']:
+        path=directory/name
+        if path.exists():path.rename(path.with_name(path.name+'.previous-'+uuid4().hex[:8]))
+    args[1:1]=['-progress',str(progress_path),'-stats_period','1']
+    _elapsed(profile,'encode_seconds',lambda:command(args,cancel,None,cwd=directory.resolve(),
+        progress_path=progress_path,stall_timeout=120))
     if on_stage:on_stage('check_output_quality')
     master = directory / "grade.partial.mp4"
     view = directory / "preview.partial.webm"
@@ -373,6 +436,7 @@ def _render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,pr
         "source_samples": recipe.source_samples, "output_samples": after, "warnings": warnings,
         "review_status": "needs_user_review",
         "mode":recipe.proposal.mode,"tone_operator":recipe.tone_operator,
+        "local_composition_policy":'background_fade_then_foreground_merge_v1' if recipe.proposal.local and recipe.tone_operator=='luminance_ocio_v3' else 'legacy',
         "timing":timing_result,
         "diagnostics":diagnostics,
         "limitations": [

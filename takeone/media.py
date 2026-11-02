@@ -3,6 +3,7 @@ import math
 import subprocess
 import threading
 import time
+import os
 from pathlib import Path
 
 from .config import Settings
@@ -10,25 +11,50 @@ from .contracts import Source, Preview
 from .errors import Problem
 
 
-def command(args: list[str], cancel: threading.Event, timeout: float = 180, *, binary=False,cwd=None):
+def command(args: list[str], cancel: threading.Event, timeout: float | None = 180, *, binary=False,cwd=None,progress_path=None,stall_timeout=None):
+    """Run a cancellable tool. Timeouts bound inactivity, not productive work."""
     try:
         process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=not binary,cwd=cwd)
     except FileNotFoundError:
         raise Problem("MEDIA_TOOL_MISSING", "FFmpeg or FFprobe is not installed.",
                       "Set the tool paths or install the required media tools.", 503)
     start = time.monotonic()
+    last_advance=start;last_frame=-1;progress={};last_cpu=0
     while True:
         try:
             stdout, stderr = process.communicate(timeout=0.2)
             break
         except subprocess.TimeoutExpired:
-            if cancel.is_set() or time.monotonic() - start > timeout:
+            if progress_path and Path(progress_path).is_file():
+                with Path(progress_path).open('rb') as log:
+                    log.seek(max(0,Path(progress_path).stat().st_size-8192))
+                    for line in log.read().decode(errors='replace').splitlines():
+                        if '=' in line:
+                            key,value=line.split('=',1);progress[key]=value
+                try:frame=int(progress.get('frame','-1'))
+                except ValueError:frame=-1
+                if frame>last_frame:last_frame=frame;last_advance=time.monotonic()
+            if timeout is not None or stall_timeout is not None:
+                # Encoding can spend time on a frame or final muxing. On Linux,
+                # meaningful CPU work also proves that processing is advancing;
+                # a progress heartbeat alone must not mask a deadlocked encoder.
+                try:
+                    fields=Path(f'/proc/{process.pid}/stat').read_text().rsplit(')',1)[1].split()
+                    cpu=int(fields[11])+int(fields[12])
+                    if cpu-last_cpu>=os.sysconf('SC_CLK_TCK'):
+                        last_cpu=cpu;last_advance=time.monotonic()
+                except (OSError,ValueError,IndexError):pass
+            idle_limit=stall_timeout if stall_timeout is not None else timeout
+            stalled=idle_limit is not None and time.monotonic()-last_advance>idle_limit
+            if cancel.is_set() or stalled:
                 process.kill()
                 process.communicate()
                 if cancel.is_set():
                     raise Problem("JOB_CANCELLED", "The operation was cancelled.", "You can retry the saved step.", 409)
                 raise Problem("MEDIA_TOOL_TIMEOUT", "Media processing timed out.",
-                              "Try a shorter clip or retry the failed step.", 422)
+                              "Inspect saved encoder progress before retrying. The original and earlier versions are kept.", 422,
+                              timeout_kind='stalled',elapsed_seconds=time.monotonic()-start,
+                              last_encoded_frame=last_frame,encoder_speed=progress.get('speed'))
     if cancel.is_set():
         raise Problem("JOB_CANCELLED", "The operation was cancelled.", "You can retry the saved step.", 409)
     if process.returncode:
@@ -96,9 +122,10 @@ def make_previews(directory: Path, source: Source, project_id: str, settings: Se
     analysis_tmp = directory / "analysis.partial.mp4"
     base = [settings.ffmpeg, "-hide_banner", "-v", "error", "-nostdin", "-y", "-hwaccel", "none", "-i", str(directory / "source.bin")]
     geometry = "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1"
+    native_video=next(s for s in probe(directory/'source.bin',settings,cancel)['streams'] if s['codec_type']=='video')
     # Decode the original once and feed both existing preview encoders. Quality,
     # geometry and per-output cadence policies are unchanged.
-    graph='[0:v:0]split=2[displayin][analysisin];[displayin]'+geometry+'[display];[analysisin]'+geometry.replace('1280','640')+'[analysis]'
+    graph='[0:v:0]split=2[displayin][analysisin];[displayin]'+geometry+'[display];[analysisin]'+geometry.replace('1280','640')+',setpts=PTS-STARTPTS[analysis]'
     command(base + ["-filter_complex_threads","2","-filter_complex",graph,
                     "-map", "[display]", "-map", "0:a:0?", "-c:v", "libvpx-vp9",
                     "-deadline", "realtime", "-cpu-used", "6", "-crf", "32", "-b:v", "0", "-pix_fmt", "yuv420p",
@@ -108,7 +135,7 @@ def make_previews(directory: Path, source: Source, project_id: str, settings: Se
                     "-c:a", "libopus", "-b:a", "96k", str(preview_tmp),
                     "-map", "[analysis]", "-an",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p",
-                    "-fps_mode", "vfr", "-movflags", "+faststart", str(analysis_tmp)], cancel)
+                    "-fps_mode", "passthrough", "-enc_time_base:v",native_video['time_base'],"-movflags", "+faststart", str(analysis_tmp)], cancel)
     metadata = probe(preview_tmp, settings, cancel)
     v = next(s for s in metadata["streams"] if s["codec_type"] == "video")
     if v.get("codec_name") != "vp9" or v.get("pix_fmt") != "yuv420p":
@@ -148,7 +175,7 @@ def capabilities(source: Source):
         "operations": (["global_grade","regional_grade"] if source.rotation==0 else ["global_grade"]) if supported else [],
         "limitations": [
             "SDR Rec.709 luminance tone, black/white points, bounded brightness and OCIO CDL saturation/RGB balance are supported. These are not calibrated scene-exposure or Kelvin estimates.",
-            "Localized grading requires verified upright CFR timing and complete, unambiguous SAM masks. No physical relighting, reconstruction or shot matching.",
+            "Localized grading requires upright footage, a verified frame-index/native-PTS mapping and complete unambiguous SAM masks. Irregular source timing uses a separate tracking proxy; source timing is preserved. No physical relighting, reconstruction or shot matching.",
             *source.technical_notes,
         ],
         "supports_look_previews": False,

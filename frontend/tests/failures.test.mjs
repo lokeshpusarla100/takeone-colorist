@@ -7,15 +7,80 @@ const {mediaFailure,asAppError}=await load('errors');
 const {inspectVideo}=await load('media');
 const {validateProject}=await load('storage');
 const {makeProject}=await load('types');
-const {parseBackend,request,waitForSource}=await load('api');
+const {parseBackend,request,waitForSource,command,health,upload}=await load('api');
 const {preparedSource}=await load('preparedSource');
 const {tokenUsage}=await load('tokenUsage');
 const {mutationLocked,runProgress}=await load('workflow');
 const {processingTimings,formatDuration}=await load('progressTiming');
+const {validateRenderImport}=await load('renderImport');
+test('proportional playback previews can be compared without claiming master resolution',()=>{
+  const source={width:3840,height:2160,duration:24.695222};
+  assert.deepEqual(validateRenderImport(source,{width:1280,height:720,duration:24.797}),{previewOnly:true});
+  assert.deepEqual(validateRenderImport(source,{width:3840,height:2160,duration:24.7}),{previewOnly:false});
+  assert.deepEqual(validateRenderImport({width:1920,height:1080,duration:10},{width:640,height:360,duration:10}),{previewOnly:true});
+});
+test('preview import still rejects changed framing, upscales and duration mismatches',()=>{
+  const source={width:3840,height:2160,duration:24.695222};
+  for(const render of [
+    {width:1280,height:800,duration:24.797},{width:720,height:1280,duration:24.7},
+    {width:7680,height:4320,duration:24.7},{width:1280,height:720,duration:25.5},
+    {width:NaN,height:720,duration:24.7},{width:0,height:0,duration:24.7},
+  ])assert.throws(()=>validateRenderImport(source,render),{code:'RENDER_MISMATCH'});
+});
+test('imported preview label survives persistence and has no candidate provenance',()=>{
+  const p=makeProject();const asset={id:crypto.randomUUID(),name:'preview.webm',size:1,type:'video/webm',width:1280,height:720,duration:24.797,thumbnail:''};
+  p.source={...asset,id:crypto.randomUUID(),name:'source.mp4',width:3840,height:2160,duration:24.695222};
+  p.assets=[p.source,asset];p.versions=[{id:crypto.randomUUID(),name:'Imported preview',kind:'rendered',createdAt:new Date().toISOString(),assetId:asset.id,recipe:null,previewOnly:true}];
+  p.selectedVersionId=p.versions[0].id;
+  validateProject(JSON.parse(JSON.stringify(p)));assert.equal(p.versions[0].candidateId,undefined);
+  assert.throws(()=>validateProject({...p,versions:[{...p.versions[0],previewOnly:'yes'}]}),{code:'STORAGE_CORRUPT'});
+});
 
 const timingEvent=(id,second,stage,active=true,extra={})=>({id,timestamp:new Date(Date.UTC(2026,10,2,10)+second*1000).toISOString(),
   details:{progress_timing:true,progress_stage:stage,progress_active:active,...extra}});
 const timingNow=second=>Date.UTC(2026,10,2,10)+second*1000;
+test('oversized source upload is rejected before sending any file bytes',async t=>{
+  const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});let calls=0;
+  globalThis.fetch=async path=>{calls++;assert.equal(path,'/api/health');return Response.json({max_upload_bytes:256*1048576});};
+  await assert.rejects(upload({size:477646151},new AbortController().signal),e=>e.code==='UPLOAD_LIMIT'
+    &&e.details.bytes===477646151&&e.details.max_upload_bytes===256*1048576);
+  assert.equal(calls,1);
+});
+test('within-limit uploads still reach the source endpoint',async t=>{
+  const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});const calls=[];
+  globalThis.fetch=async(path,options)=>{
+    calls.push(path);if(path==='/api/health')return Response.json({max_upload_bytes:512*1048576});
+    assert.equal(options.body.get('file').name,'small.mp4');
+    return Response.json({id:crypto.randomUUID(),revision:1,status:'ingesting',stage:'inspect_source',filename:'small.mp4',
+      request:'',answered_count:0,max_questions:5,model_calls:0,source:null,preview:null,question:null,brief:null,events:[],error:null});
+  };
+  assert.equal((await upload(new File(['test'],'small.mp4'),new AbortController().signal)).status,'ingesting');
+  assert.deepEqual(calls,['/api/health','/api/projects']);
+});
+test('plain proxy and upload errors retain meaningful status instead of invalid JSON diagnosis',async t=>{
+  const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});
+  for(const status of [413,500,502,503,504]){
+    globalThis.fetch=async()=>new Response('upstream error',{status});
+    await assert.rejects(request('/api/projects'),e=>e.code===(status===413?'UPLOAD_LIMIT':'BACKEND_UNAVAILABLE')&&e.details.http_status===status);
+  }
+  globalThis.fetch=async()=>new Response('<html/>',{status:200});
+  await assert.rejects(request('/api/projects'),{code:'API_RESPONSE_INVALID'});
+});
+test('missing look routes report a backend update and preserve structured project errors',async t=>{
+  const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});
+  globalThis.fetch=async()=>new Response(JSON.stringify({detail:'Not Found'}),{status:404});
+  for(const kind of ['looks','looks/select'])await assert.rejects(command(crypto.randomUUID(),kind,{}),
+    e=>e.code==='BACKEND_UPDATE_REQUIRED'&&e.action.includes('Restart'));
+  globalThis.fetch=async()=>new Response(JSON.stringify({error:{code:'PROJECT_NOT_FOUND',message:'Missing project',action:'Import again',details:{}}}),{status:404});
+  await assert.rejects(command(crypto.randomUUID(),'looks',{}),e=>e.code==='PROJECT_NOT_FOUND');
+});
+test('health distinguishes an older backend from connected look support',async t=>{
+  const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});
+  const base={status:'ok',model:'mock',muse_configured:true,max_upload_bytes:1,max_questions:5};
+  globalThis.fetch=async()=>Response.json(base);assert.equal((await health()).look_previews_connected,undefined);
+  globalThis.fetch=async()=>Response.json({...base,look_previews_connected:true});assert.equal((await health()).look_previews_connected,true);
+  globalThis.fetch=async()=>Response.json({...base,look_previews_connected:'yes'});await assert.rejects(health(),{code:'API_RESPONSE_INVALID'});
+});
 test('processing timers persist across refreshes and exclude answer and idle waits',()=>{
   const events=[timingEvent('a',0,'inspect_source'),timingEvent('b',3,'prepare_preview'),timingEvent('c',8,'ready',false),
     timingEvent('d',100,'analyze_scene'),timingEvent('e',110,'select_question'),timingEvent('f',115,'awaiting_answer',false)];
@@ -99,6 +164,9 @@ test('progress distinguishes waiting for a single answer from model processing a
   const tracking=runProgress({...state,status:'segmenting',stage:'segment_subject',brief:{},segmentations:[{status:'streaming',frame_count:12,frames_with_masks:4}]});
   assert.equal(tracking.working,true);
   assert.equal(tracking.steps[5].phase,'active');
+  const gap=runProgress({...state,status:'failed',stage:'decode_segmentation_masks',error:{code:'LOCAL_MASK_GAP'},
+    segmentations:[{status:'ready',frame_count:680,frames_with_masks:496}]});
+  assert.equal(gap.steps[5].phase,'failed');
   const validating=runProgress({...state,status:'rendering',stage:'validate_local_masks',brief:{},
     candidates:[{status:'rendering',recipe:{proposal:{mode:'localized'}}}],segmentations:[{status:'ready',frame_count:12,frames_with_masks:12}]});
   assert.equal(validating.steps[5].phase,'active');

@@ -33,7 +33,7 @@ export function runProgress(state?:BackendState,localBusy=false,localProgress?:s
       ...(latest&&['failed','cancelled'].includes(latest.status)&&!working?{phase:'failed' as Phase}:{})},
     {...step('Subject masks · when needed',!masking&&(masks?.status==='ready'||masks?.status==='empty'),masking,
       masks?`${masks.frames_with_masks}/${masks.frame_count} frames with masks. Review the diagnostic overlay.`:'Starts automatically for localized plans; manual tracking is also available.'),
-      ...(masks&&['failed','cancelled'].includes(masks.status)&&!working?{phase:'failed' as Phase}:{})},
+      ...((masks&&['failed','cancelled'].includes(masks.status)||state?.error?.code==='LOCAL_MASK_GAP')&&!working?{phase:'failed' as Phase}:{})},
     step('Creative review',!!latest?.creative_review,state?.status==='reviewing','Muse inspects actual rendered/source evidence. Its opinion does not approve the candidate for you.'),
   ];
   let heading=localBusy?(localProgress||'Preparing source'):sending?'Sending request…':!state?'Import a video to begin':stageLabel(state.stage);

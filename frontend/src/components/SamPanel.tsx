@@ -18,6 +18,7 @@ export default function SamPanel({state,health,online,locked,sending,onTrack,onC
   return <section className="sam-panel" aria-labelledby="sam-heading">
     <h2 id="sam-heading">Subject masks · SAM</h2>
     <p className="inline-help">Manual diagnostics: track one subject in the silent proxy using the same Meta key. This may incur per-frame usage. Ordinary localized grading requests SAM automatically; this panel remains available for inspecting masks.</p>
+    {health?.native_mask_timing_connected&&<p className="inline-help">Original frame timing is preserved. Irregular footage uses a separate tracking proxy; masks map back to the original frame indices and timestamps.</p>}
     <label htmlFor="sam-concept">Subject phrase</label>
     <div className="actions"><input id="sam-concept" value={concept} maxLength={120} disabled={locked}
       placeholder="e.g. motorcycle" onChange={e=>setConcept(e.target.value)}/>

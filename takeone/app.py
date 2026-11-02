@@ -27,7 +27,7 @@ class Command(StrictModel):
 
 
 class StartCommand(Command):
-    request: str = Field(max_length=4000)
+    request: str = Field(max_length=16000)
 
 
 class AnswerCommand(Command):
@@ -111,6 +111,8 @@ def create_app(settings: Settings | None = None, provider=None, sam_provider=Non
             "max_duration_seconds": settings.max_duration,
             "max_questions": settings.max_questions,
             "grading_connected": True,
+            "look_previews_connected": True,
+            "native_mask_timing_connected": True,
             "sam_model":settings.sam_model,"segmentation_connected":True,
         }
 

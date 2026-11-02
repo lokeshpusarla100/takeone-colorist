@@ -78,3 +78,28 @@ produced RGB sample records exactly equal to the earlier separate extraction. Fo
 combined-QC/optimized-output comparisons passed. This is a QC measurement on the same file, not a
 second complete encode benchmark. The full recovered replay before this final merge took 235.16 s;
 its encode was159.37 s, so there is no measured full-clip encode speedup claim.
+
+
+## Localized rendering and active-work timeout correction
+
+The latest saved 4K localized attempt was killed by a fixed 300-second encode deadline after producing
+334 of 741 preview frames. Native instance-prompted recovery had already supplied all 184 missing
+masks, with 15 overlap frames and minimum observed IoU above 0.93. The subsequent failure was a
+runtime policy error, not another segmentation failure.
+
+Media-tool timeout budgets now measure inactivity. Productive frame advancement or meaningful Linux
+process CPU work resets the inactivity clock. Rendering has no fixed elapsed-time deadline. Cancel,
+process failure and 120 seconds without encoding/CPU advancement still terminate a stalled render.
+Encoder progress is persisted in encode-progress.log; stall errors include the last encoded frame,
+speed and elapsed time. Earlier partial outputs and progress logs are retained before retry.
+
+The v3 localized fast path skips unused layer LUTs per frame and uses a direct normal blend for
+full-opacity regions. The original blend expression is kept on fade frames. A 12-frame 4K steady
+localized-section comparison measured 12.164 s reference versus 7.347 s optimized, with identical
+decoded master and preview frame hashes/timestamps. This is one bounded comparison, not a full-clip
+benchmark. Source quality, codec/preset/CRF, timing, masks and output validation were retained.
+
+Validation: 26 timing/performance/liveness checks passed, then four focused liveness/localized-fade
+checks passed after the final inactivity-policy change. A full 4K rerender has not been run here.
+
+    .venv/bin/python -m pytest -q tests/test_render_liveness.py tests/test_render_timing.py tests/test_render_performance.py

@@ -53,21 +53,31 @@ def check(cancel):
         raise Problem('JOB_CANCELLED','Segmentation cancelled.','Saved source, brief and masks are retained.',409)
 
 
-def frame_info(path,settings,cancel,*,interval_tolerance=.00002):
+def frame_info(path,settings,cancel,*,interval_tolerance=.00002,require_cfr=True):
     raw=json.loads(command([settings.ffprobe,'-v','error','-select_streams','v:0','-show_frames',
-        '-show_entries','frame=best_effort_timestamp_time:stream=width,height,avg_frame_rate',
+        '-show_entries','frame=best_effort_timestamp,best_effort_timestamp_time:stream=width,height,avg_frame_rate,r_frame_rate,time_base:format=start_time',
         '-of','json',str(path)],cancel,90))
     try:
         pts=[float(f['best_effort_timestamp_time']) for f in raw['frames']]
         stream=raw['streams'][0]
-        rate=Fraction(stream['avg_frame_rate'])
+        try:rate=Fraction(stream['avg_frame_rate'])
+        except (ValueError,ZeroDivisionError):
+            if require_cfr:raise
+            rate=Fraction(len(pts)-1)/Fraction(str(pts[-1]-pts[0])) if len(pts)>1 else Fraction(30)
         if not pts or len(pts)>15000 or rate<=0 or not all(math.isfinite(t) for t in pts):raise ValueError()
         normalized=[t-pts[0] for t in pts]
-        if any(abs((b-a)-float(1/rate))>interval_tolerance for a,b in zip(normalized,normalized[1:])):raise ValueError()
+        if any(b<=a for a,b in zip(pts,pts[1:])):raise ValueError()
+        cfr=all(abs((b-a)-float(1/rate))<=interval_tolerance for a,b in zip(normalized,normalized[1:]))
+        if require_cfr and not cfr:raise ValueError()
+        if not require_cfr and any(type(f.get('best_effort_timestamp')) is not int for f in raw['frames']):raise ValueError()
     except (KeyError,ValueError,ZeroDivisionError,IndexError):
         raise Problem('SAM_TIMING_UNSUPPORTED','SAM preview currently requires a constant-frame-rate clip with valid frame timestamps.',
                       'Use a CFR source. No segmentation request was made.',422)
-    return {'width':stream['width'],'height':stream['height'],'rate':str(rate),'pts':pts,'normalized':normalized}
+    return {'width':stream['width'],'height':stream['height'],'rate':str(rate),'pts':pts,'normalized':normalized,
+            'cfr':cfr,'time_base':stream.get('time_base','1/1000000'),
+            'ticks':[f.get('best_effort_timestamp') for f in raw['frames']],
+            'nominal_rate':stream.get('r_frame_rate',str(rate)),
+            'format_start':raw.get('format',{}).get('start_time','0')}
 
 
 def mapping(directory,source,settings,cancel):
@@ -77,7 +87,35 @@ def mapping(directory,source,settings,cancel):
     if source.rotation!=0:
         raise Problem('SAM_GEOMETRY_UNSUPPORTED','Rotated source metadata is not verified for SAM mapping yet.',
                       'Use an upright source with zero rotation metadata.',422)
-    a,b=frame_info(original,settings,cancel),frame_info(proxy,settings,cancel)
+    info_path=directory/'source-frame-info.json'
+    try:saved=json.loads(info_path.read_text()) if info_path.exists() else {}
+    except (ValueError,OSError):saved={}
+    a=saved.get('info') if saved.get('source')==source.sha256 and saved.get('version')==1 else None
+    required={'width','height','rate','pts','normalized','cfr','time_base','ticks','nominal_rate','format_start'}
+    if not isinstance(a,dict) or not required<=a.keys():
+        a=frame_info(original,settings,cancel,require_cfr=False)
+        atomic(info_path,{'source':source.sha256,'version':1,'info':a})
+    if not a['cfr'] and any(y-x<2 for x,y in zip(a['ticks'],a['ticks'][1:])):
+        raise Problem('SAM_TIMING_RESOLUTION','Source frames are too close in their time base for unambiguous mask scheduling.',
+                      'No segmentation was requested. Use a higher-resolution source time base.',422)
+    if not a['cfr']:
+        try:rate=Fraction(a['nominal_rate'])
+        except (ValueError,ZeroDivisionError):rate=Fraction(30)
+        if not 1<=rate<=120:rate=Fraction(30)
+        proxy=directory/'tracking.mp4';receipt=directory/'tracking-identity.json'
+        identity={'source':source.sha256,'rate':str(rate),'version':1}
+        cached=json.loads(receipt.read_text()) if receipt.exists() else {}
+        if not proxy.exists() or cached.get('identity')!=identity or cached.get('sha256')!=checksum(proxy):
+            temporary=directory/'tracking.partial.mp4'
+            command([settings.ffmpeg,'-v','error','-nostdin','-y','-threads','4','-i',str(original),'-an',
+                '-vf',f"scale=w='min(640,iw)':h='min(640,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,settb={rate.denominator}/{rate.numerator},setpts=N",
+                '-c:v','libx264','-preset','veryfast','-crf','26','-pix_fmt','yuv420p','-fps_mode','passthrough',
+                '-enc_time_base:v',str(1/rate),str(temporary)],cancel,180)
+            temporary.replace(proxy);atomic(receipt,{'identity':identity,'sha256':checksum(proxy)})
+        b=frame_info(proxy,settings,cancel)
+        if len(a['pts'])!=len(b['pts']):
+            raise Problem('SAM_FRAME_MAPPING_FAILED','Tracking proxy lost or added source frames.','No masks can be used without exact frame identity.',422)
+    else:b=frame_info(proxy,settings,cancel)
     # Strict frame identity with a nonzero start: neither file's timestamps
     # are reset or snapped to a nominal rate. Each frame keeps its absolute
     # source/proxy PTS; only the *comparison* is made on each file's own
@@ -85,18 +123,19 @@ def mapping(directory,source,settings,cancel):
     # A shifted container start is therefore supported exactly when the two
     # decoded frame sequences still correspond one to one, and rejected when
     # their relative timing drifts, however small the absolute offset is.
-    if len(a['pts'])!=len(b['pts']) or a['rate']!=b['rate'] or any(abs(x-y)>0.002 for x,y in zip(a['normalized'],b['normalized'])):
+    if len(a['pts'])!=len(b['pts']) or (a['cfr'] and (a['rate']!=b['rate'] or any(abs(x-y)>0.002 for x,y in zip(a['normalized'],b['normalized'])))):
         raise Problem('SAM_FRAME_MAPPING_FAILED','Source and proxy frames do not align one to one.',
                       'Prepare a frame-preserving proxy before segmentation. No SAM request was made.',422)
     if (a['width'],a['height'])!=(source.width,source.height) or abs(a['width']/a['height']-b['width']/b['height'])>0.005:
         raise Problem('SAM_GEOMETRY_UNSUPPORTED','Source/proxy geometry is not a verified scale-only mapping.',
                       'Use upright square-pixel footage.',422)
-    return {'schema_version':2,'source_sha256':source.sha256,'proxy_sha256':checksum(proxy),
-        'source':{k:a[k] for k in ['width','height','rate']},'proxy':{k:b[k] for k in ['width','height','rate']},
-        'normalization':{'method':'first_decoded_frame_pts','source_offset_seconds':a['pts'][0],
+    return {'schema_version':3 if not a['cfr'] else 2,'source_sha256':source.sha256,'proxy_sha256':checksum(proxy),
+        'proxy_filename':proxy.name,
+        'source':{k:a[k] for k in ['width','height','rate','time_base','format_start']},'proxy':{k:b[k] for k in ['width','height','rate']},
+        'normalization':{'method':'frame_index_to_native_pts' if not a['cfr'] else 'first_decoded_frame_pts','source_offset_seconds':a['pts'][0],
                           'proxy_offset_seconds':b['pts'][0],
                           'max_relative_error_seconds':max((abs(x-y) for x,y in zip(a['normalized'],b['normalized'])),default=0.)},
-        'frame_count':len(a['pts']),'frames':[{'index':i,'source_pts':x,'proxy_pts':y,'time':a['normalized'][i]}
+        'frame_count':len(a['pts']),'frames':[{'index':i,'source_pts':x,'source_tick':a['ticks'][i],'proxy_pts':y,'time':a['normalized'][i]}
                                              for i,(x,y) in enumerate(zip(a['pts'],b['pts']))]}
 
 
@@ -132,12 +171,30 @@ class SamProvider:
     def available(self):return bool(MuseProvider(self.settings).key())
 
     def segment(self,path,concept,remote_id,remember,cancel,progress,raw_path,on_usage,on_request):
+        return self._segment(path,concept,remote_id,remember,cancel,progress,raw_path,on_usage,on_request)
+
+    def segment_prompted(self,path,concept,remote_id,remember,cancel,progress,raw_path,on_usage,on_request,*,object_prompt,propagation_direction='both'):
+        if propagation_direction not in {'both','forward','backward'} or not object_prompt or not re.match(r'^<\d+f>',object_prompt):
+            raise Problem('SAM_PROMPT_INVALID','Invalid instance tracking prompt or direction.','Rebuild the validated object prompt.',422)
+        if propagation_direction=='backward' and min(int(i) for i in re.findall(r'<(\d+)f>',object_prompt))==0:
+            raise Problem('SAM_PROMPT_INVALID','Backward propagation needs a seed after frame zero.',
+                          'Choose a later seed or bidirectional propagation.',422)
+        return self._segment(path,concept,remote_id,remember,cancel,progress,raw_path,on_usage,on_request,
+            object_prompt=object_prompt,propagation_direction=propagation_direction)
+
+    def _segment(self,path,concept,remote_id,remember,cancel,progress,raw_path,on_usage,on_request,*,object_prompt=None,propagation_direction='both'):
         events_path=raw_path.with_name('events.ndjson')
         receipt_path=raw_path.with_name('stream-complete.json')
+        binding={'input_sha256':checksum(path),'concept':concept}
+        metadata={'mask_encoding':'one_bit'}
+        if object_prompt:
+            binding.update(object_prompt=object_prompt,propagation_direction=propagation_direction,include_confidence=True,
+                           model=self.settings.sam_model,prompt_protocol='object-v1')
+            metadata.update(propagation_direction=propagation_direction,include_confidence='true')
         async def execute():
             if receipt_path.is_file():
                 receipt=json.loads(receipt_path.read_text())
-                if receipt!={'events_sha256':checksum(events_path),'input_sha256':checksum(path),'concept':concept}:
+                if receipt!={'events_sha256':checksum(events_path),**binding}:
                     raise Problem('SAM_CACHE_CHANGED','The cached SAM response does not match its input.','Start a new mask run.',409)
             else:
                 await download()
@@ -169,9 +226,9 @@ class SamProvider:
                 else:file_id=remote_id
                 check(cancel);on_request()
                 stream=await client.responses.create(model=self.settings.sam_model,stream=True,store=False,
-                    input=[{'role':'user','content':[{'type':'input_text','text':concept},
+                    input=[{'role':'user','content':[{'type':'input_text','text':object_prompt if object_prompt else concept},
                                                   {'type':'input_video','file_id':file_id}]}],
-                    metadata={'mask_encoding':'one_bit'})
+                    metadata=metadata)
                 async with stream, aclosing(normalized_events(stream,cancel,raw_path,on_usage)) as events:
                     completed=False;received=set();last=0
                     with events_path.open('w') as stored:
@@ -185,7 +242,7 @@ class SamProvider:
                         stored.flush();os.fsync(stored.fileno())
                     if not completed:
                         raise Problem('SAM_INCOMPLETE','The SAM stream ended without completion.','Partial output is preserved; retry only explicitly.',502)
-                    atomic(receipt_path,{'events_sha256':checksum(events_path),'input_sha256':checksum(path),'concept':concept})
+                    atomic(receipt_path,{'events_sha256':checksum(events_path),**binding})
         async def supervised():
             work=asyncio.create_task(execute())
             try:

@@ -80,13 +80,14 @@ Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and por
 ## Limits
 
 - Default: 256 MiB per upload, 120 seconds, up to 4K.
+- For larger generated masters, set `TAKEONE_MAX_UPLOAD_MB=512` in the local `.env` and restart the backend. The editor checks the running server's limit before sending the file; server-side limits still apply. The local development configuration was raised to 512 MiB for the 455.5 MiB `V2-graded.mp4` import. This does not change duration, codec or geometry restrictions.
 - HDR conversion and non-square-pixel sources are rejected explicitly until verified.
 - Source color interpretation remains known/unknown. Global grading capabilities are restricted to supported source metadata.
 - Browser previews are compressed 8-bit working views. Original precision is retained in the upload.
 - Global rendering preserves source presentation timestamps, including near-CFR jitter and VFR. Encoder/MP4 time bases are explicit; decoded frame counts, per-frame timing and the master's audio/video origin are validated. See [timing policy and RENDER_TIMING_CHANGED diagnosis](docs/RENDER_TIMING.md).
 - Scene understanding uses the complete silent proxy; it is not a calibrated color measurement.
-- Tools support bounded contrast, saturation, gamma, brightness gain and explicit red/blue cooling in the SDR/Rec.709 display domain. Local execution supports one segmentation concept with foreground/background controls and up to twelve requested intervals, split at detected cuts. Local paths require upright CFR footage with a verified source/proxy frame mapping (a nonzero container start is normalized from decoded frame PTS, never by resetting timestamps) and complete unambiguous masks. Physical relighting, reconstruction and shot matching are unavailable.
-- Imported renders can be compared when dimensions and duration match; imported outputs have no verified recipe provenance.
+- Tools support bounded contrast, saturation, gamma, brightness gain and explicit red/blue cooling in the SDR/Rec.709 display domain. Local execution supports one segmentation concept with foreground/background controls and up to twelve requested intervals, split at detected cuts. Upright CFR, near-CFR and VFR sources use verified frame identity and complete unambiguous masks. Original timestamps remain unchanged; only the separate tracking proxy has uniform timing. Physical relighting, reconstruction and shot matching are unavailable.
+- Imported renders can be compared when duration matches and framing is identical or a proportional downscale (with bounded encoder rounding). Lower-resolution imports are labeled preview-only; they do not acquire backend recipe provenance or become full-resolution masters. Cropped, stretched, upscaled or duration-mismatched imports remain rejected. Use the app's **Download video** button for the master MP4; saving the browser player downloads its smaller WebM preview.
 - Local mask gaps, ambiguity, instability or preservation failures stop the candidate with no silent global fallback. Technical checks and mask-core statistics do not establish semantic mask accuracy or aesthetic success; moving-video approval remains yours.
 
 ## Run dashboard
@@ -107,7 +108,17 @@ Importing/replacing media, switching sessions, renaming, changing versions/prefe
 
 After the brief is ready, use **Subject masks · SAM**. Enter one subject phrase, such as motorcycle, choose **First 5 seconds** (default) or **Full clip**, and click **Track subject**. It uses the existing MODEL_API_KEY with hosted sam-3.1 and may incur per-frame usage. No local model weights or second API key are required.
 
-The backend verifies source/proxy frame counts, timestamps and scale-only geometry before upload. This path supports CFR, upright sources. SAM's explicit frame/object IDs are retained and gaps remain gaps. Manual diagnostics show every match without selecting an editing target. Automatic grading requires one unambiguous ID per shot interval, or an explicitly planned all-matches concept. Valid masks are refined into an original-resolution matte and consumed by FFmpeg's masked merge.
+The backend verifies source/proxy frame counts and scale-only geometry before upload. For irregular footage, a separate CFR tracking proxy preserves one frame per original frame. SAM IDs map back to native source PTS; the renderer schedules masks on that native clock. The original video/audio timing is never normalized. Gaps remain gaps. Manual diagnostics show every match without selecting an editing target. Automatic grading requires one unambiguous ID per shot interval, or an explicitly planned all-matches concept. Valid masks are refined into an original-resolution matte and consumed by FFmpeg's masked merge. See [native timing support](docs/NATIVE_MASK_TIMING.md).
+
+Incomplete single-subject coverage now gets bounded recovery: at most two requests per original track,
+each limited to 300 proxy frames including up to 15 overlap frames. Known masks supply explicit boxes
+and interior points for native SAM bidirectional propagation on the original-order excerpt. New
+recovery never physically reverses the video or reuses a concept-only result as a seeded response. At least three anchor frames and
+spatial agreement with the original track are required before new masks can fill missing frames.
+Raw masks remain unchanged, recovery IDs/provenance are retained, and failed/unverified repairs cannot
+be reused as standalone tracks. Full geometry, stability, completeness and rendered-output QC still
+apply. Recovery never assumes absence, paints missing masks, or substitutes a global grade. A normal
+Retry may incur the bounded SAM recovery usage; verified repairs are reused without another call.
 
 Network events are saved before local decoding, so a completed response can be replayed after a decode/overlay failure without another SAM request. Incomplete streams remain failed and require an explicit new remote attempt. Local decoding can take substantially longer than downloading the response. See [SAM integration and validation](docs/SAM_INTEGRATION.md) for APIs, limits and the bounded live test.
 

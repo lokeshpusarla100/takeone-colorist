@@ -66,7 +66,7 @@ class Store:
 
     def artifact(self, project_id: str, filename: str, value: dict):
         # Only application-owned constant artifact names are accepted.
-        if filename not in {"metadata.json", "analysis.json", "brief.json"}:
+        if filename not in {"metadata.json", "analysis.json", "brief.json", "looks-plan.json"}:
             raise ValueError("Unknown artifact")
         directory = self.directory(project_id)
         temporary = directory / ("." + filename + ".tmp")

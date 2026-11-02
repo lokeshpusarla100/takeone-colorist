@@ -55,6 +55,7 @@ export function validateProject(value: unknown): asserts value is Project {
     && (value.source === null || asset(value.source)) && Array.isArray(value.assets) && value.assets.every(asset)
     && Array.isArray(value.versions) && value.versions.every(v => obj(v) && text(v.id) && text(v.name)
       && ['source','draft','rendered'].includes(v.kind as string) && date(v.createdAt)
+      && (v.previewOnly===undefined||typeof v.previewOnly==='boolean')
       && (v.recipe === null || recipe(v.recipe)))
     && (value.selectedVersionId === null || text(value.selectedVersionId))
     && Array.isArray(value.events) && value.events.every(e => obj(e) && text(e.id) && date(e.timestamp)

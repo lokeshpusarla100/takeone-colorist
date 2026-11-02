@@ -234,6 +234,7 @@ class RenderCandidate(StrictModel):
     review_attempts: int = 0
     review_history: list[dict] = Field(default_factory=list)
     review_evidence: list[dict] = Field(default_factory=list)
+    preflight_replan_attempted: bool = False
 
 
 class LookPreview(StrictModel):
@@ -250,6 +251,7 @@ class LookPreview(StrictModel):
     frame_time: float = Field(ge=0, allow_inf_nan=False)
     image_url: str
     uses_local: bool = False
+    preview_only: bool = False
     proposal: GradeProposal
 
 
@@ -272,6 +274,12 @@ class SegmentationRun(StrictModel):
     start_seconds: float = 0
     first_frame: int | None = None
     last_frame: int | None = None
+    reverse_tracking: bool = False
+    object_prompt: str | None = None
+    propagation_direction: Literal['both','forward','backward'] = 'both'
+    recovery_run_ids: list[str] = Field(default_factory=list)
+    recovery_parent_id: str | None = None
+    request_count: int = Field(default=0,ge=0)
     received_frames: int = 0
     frame_count: int = 0
     frames_with_masks: int = 0

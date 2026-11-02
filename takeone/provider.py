@@ -97,7 +97,7 @@ class MuseProvider:
             "allowed_source_ids": references,
             "controls": {
                 "contrast": "0.75..1.25; neutral 1.0; bounded sigmoid x^c/(x^c+(1-x)^c), no fixed-pivot subtraction",
-                "gamma": "0.8..1.2; neutral 1.0; RGB power 1/gamma: above 1 lifts midtones, below 1 darkens",
+                "gamma": "0.8..1.2; neutral 1.0; encoded luminance power 1/gamma: above 1 lifts midtones, below 1 darkens",
                 "saturation": "0..1.5; neutral 1.0; Rec.709-weighted encoded RGB channel mixing",
                 "brightness_gain":"0.65..1.35, neutral 1.0. Bounded display-domain brightness, not physical relighting.",
                 "cooling":"-0.15..0.15, neutral 0. Positive reduces red and increases blue using explicit Rec.709 RGB gains; not calibrated Kelvin.",
@@ -158,6 +158,11 @@ class MuseProvider:
                         "label a global approximation as localized. Explain changed controls in ordinary "
                         "If a required user instruction cannot be executed, list it in unfulfilled_requests; this stops rendering "
                         "for explicit clarification, rather than silently substituting a different treatment. "
+                        "Distinguish required instructions from optional effects the user explicitly permits approximating. "
+                        "When rain/cloud/haze generation is optional and the user asks for a grading-only impression if unsupported, "
+                        "report those generative effects as limitations, not unfulfilled required instructions. "
+                        "Required subject protection and different foreground/background treatment still need executable local tools; "
+                        "never replace these silently with a global approximation. Explain unavailable operations precisely. "
                         "visual terms, citing allowed_source_ids. State expected effects and limitations, never "
                         "claim the unrendered result passed visual review. Fit strength to the request and evidence, "
                         "without imposing a default style, brightness target or predefined cinematic preset. "

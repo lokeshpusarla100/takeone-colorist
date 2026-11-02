@@ -53,6 +53,20 @@ need a source timestamp scan. These repeated traversals are concrete opportuniti
 
 ## Recovery policy
 
+Follow-up motorcycle case: at frame 717 / 23.9s, source median encoded luma was 0.02296 and 17.13%
+of sampled pixels were already encoded black. Even after neutralizing input cutoffs, the chosen
+contrast 1.12 / gamma 0.97 / gain 0.92 added 18.57 percentage points of black in the encoder probe,
+exceeding the unchanged 5-point limit. This is a tonal-plan conflict, not the earlier input-cutoff mistake.
+The guard must not silently choose different gamma/contrast or relax the declared limit.
+
+Preflight failures now feed the current brief, actual source images, prior executable plan and measured
+failure into one bounded Muse planning attempt. Its new candidate retains the same preservation
+bounds and must pass preflight before encoding. The parent plan/artifacts remain intact. Unchanged,
+unsupported or still-invalid plans stop, and repeated retry does not start another automatic planning
+call for the same candidate. Existing candidate and inference budgets continue to apply. This is a
+planning correction, not a critic opinion about an unrendered video. Tests use mocked providers; the
+new motorcycle plan and its aesthetic result still require actual generation/review.
+
 The production guard operates before the expensive render. It uses the actual source samples and
 versioned v3 math to check the existing declared clipping limits, then confirms a supported candidate
 with an encoded full-resolution sample probe. Level-only correction moves an input black cutoff toward
@@ -151,3 +165,31 @@ For the full offline regression suite when desired:
 
 Final moving-video review remains a human decision. This failure and its repair do not establish
 boat-specific masking, semantic subject preservation or professional cinematic quality.
+
+
+## Subject protection at interval fade boundaries
+
+The completed boat render reached dense preservation QC and failed subject_min_luma_ratio=0.85.
+A read-only per-frame replay found the minimum at source frame 61 (ratio 0.638309) and frame 62
+(ratio 0.751300). Frame 63 was 0.861038 and later checked frames were higher; steady-state foreground
+ratios were around 1.15. Chroma change 0.02449 was below the declared 0.35 bound. The shadow-increase
+value was diagnostic; the failing v3 condition was subject luminance.
+
+The compositor faded the entire local foreground/background result from a darker global base.
+Consequently the first protected subject frames inherited the dark base rather than their bright
+foreground treatment. This was an integration defect; independent layer math and steady-state
+comparisons did not test this preservation invariant at the interval boundary.
+
+The v3 compositor now fades the background treatment first and applies the foreground through its
+mask throughout the required interval. An original-clock selector preserves frame count and exact
+PTS after multi-input framesync. Older recipe operators keep their original interpretation. Numeric
+foreground/background controls and preservation bounds are unchanged. Render validation records
+local_composition_policy=background_fade_then_foreground_merge_v1; errors include the minimum-luma
+frame and required ratio. Previous rejected master/preview files are archived before retry.
+
+A bounded 74-frame check on the actual 4K source verified frames 61–73 above 0.85 (frame 61=1.150345),
+with all 74 original integer PTS preserved. It made no Meta calls and was not a full accepted render.
+Synthetic checks cover both fade boundaries, preserved subject pixels, unchanged treatment outside
+intervals, exact reference/optimized output equality, moving masks and irregular timestamps.
+Sixteen focused regression checks passed. Full moving-video/aesthetic acceptance remains pending.
+Local evidence: outputs/subject-transition-validation/validation.json.

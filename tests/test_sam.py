@@ -95,7 +95,8 @@ def test_api_tracking_persists_manifest_playable_overlay_and_deduplicates(settin
         assert manifest['frame_map']['frame_count']==12 and manifest['frames_with_masks']==3
         preview=c.get(run['preview_url'],headers={'Range':'bytes=0-31'})
         assert preview.status_code==206 and len(preview.content)==32
-        assert [e for e in done['events'] if not e['details'].get('progress_timing')][-1]['title']=='Subject masks ready'
+        assert [e for e in done['events'] if not e['details'].get('progress_timing')][-1]['title']=='Subject masks partial'
+        assert run['received_frames']==3
 
 
 def test_overlay_retry_reuses_completed_masks_without_another_sam_request(settings,video,monkeypatch):
@@ -124,9 +125,9 @@ def test_zero_matches_return_empty_success(settings,video):
 def test_mapping_rejects_frame_loss_before_any_remote_request(tmp_path,settings,monkeypatch):
     (tmp_path/'source.bin').write_bytes(b'original');(tmp_path/'analysis.mp4').write_bytes(b'proxy')
     source=SimpleNamespace(sha256=sam.checksum(tmp_path/'source.bin'),rotation=0,width=192,height=108)
-    def info(path,*_):
+    def info(path,*_,**__):
         times=[0,.033333,.066667] if path.name=='source.bin' else [0,.066667]
-        return dict(width=192,height=108,rate='30',pts=times,normalized=times)
+        return dict(width=192,height=108,rate='30',pts=times,normalized=times,cfr=True)
     monkeypatch.setattr(sam,'frame_info',info)
     with pytest.raises(Problem,match='align'):sam.mapping(tmp_path,source,settings,threading.Event())
 
@@ -189,10 +190,10 @@ def test_cancel_interrupts_a_waiting_network_request(settings,tmp_path,monkeypat
 def test_mapping_normalizes_different_nonzero_starts_without_resetting_pts(tmp_path,settings,monkeypatch):
     (tmp_path/'source.bin').write_bytes(b'original');(tmp_path/'analysis.mp4').write_bytes(b'proxy')
     source=SimpleNamespace(sha256=sam.checksum(tmp_path/'source.bin'),rotation=0,width=192,height=108)
-    def info(path,*_):
+    def info(path,*_,**__):
         base=10.08 if path.name=='source.bin' else .04
         pts=[base+i/30 for i in range(3)]
-        return dict(width=192,height=108,rate='30/1',pts=pts,normalized=[t-pts[0] for t in pts])
+        return dict(width=192,height=108,rate='30/1',pts=pts,normalized=[t-pts[0] for t in pts],cfr=True,time_base='1/90000',format_start='0',ticks=[round(t*90000) for t in pts])
     monkeypatch.setattr(sam,'frame_info',info)
     result=sam.mapping(tmp_path,source,settings,threading.Event())
     # Absolute PTS are retained; only the relative comparison is normalized.
@@ -207,10 +208,10 @@ def test_mapping_normalizes_different_nonzero_starts_without_resetting_pts(tmp_p
 def test_mapping_rejects_relative_drift_despite_a_plausible_nonzero_start(tmp_path,settings,monkeypatch):
     (tmp_path/'source.bin').write_bytes(b'original');(tmp_path/'analysis.mp4').write_bytes(b'proxy')
     source=SimpleNamespace(sha256=sam.checksum(tmp_path/'source.bin'),rotation=0,width=192,height=108)
-    def info(path,*_):
+    def info(path,*_,**__):
         if path.name=='source.bin':pts=[2.0,2.0+1/30,2.0+2/30]
         else:pts=[0.,1/30,2/30+.01]  # third frame drifts 10 ms relative to the source
-        return dict(width=192,height=108,rate='30/1',pts=pts,normalized=[t-pts[0] for t in pts])
+        return dict(width=192,height=108,rate='30/1',pts=pts,normalized=[t-pts[0] for t in pts],cfr=True,time_base='1/90000',format_start='0',ticks=[round(t*90000) for t in pts])
     monkeypatch.setattr(sam,'frame_info',info)
     with pytest.raises(Problem) as caught:sam.mapping(tmp_path,source,settings,threading.Event())
     assert caught.value.code=='SAM_FRAME_MAPPING_FAILED'

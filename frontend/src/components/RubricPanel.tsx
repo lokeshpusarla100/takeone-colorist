@@ -24,16 +24,17 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
   const close=()=>setOpen(false);
   return <section className="direction rubric-panel" aria-label="Creative direction consultation">
     <label htmlFor="direction">Creative direction</label>
-    <textarea id="direction" value={direction} disabled={disabled} maxLength={4000} rows={3}
+    <textarea id="direction" value={direction} disabled={disabled} rows={3}
       placeholder="Describe the changes you want and anything to preserve. Leave blank to delegate the direction."
       onChange={e=>onDirection(e.target.value)} onBlur={onSaveDirection}/>
+    <p className="inline-help" role={direction.length>16000?'alert':undefined}>{direction.length.toLocaleString()} / 16,000 characters{direction.length>16000?' · Request is too long to submit. Your text is kept; shorten it to continue.':''}</p>
     {!online&&<p className="inline-help">Backend unavailable. Start the Python server to prepare footage and run the consultation.</p>}
     {online&&!health?.muse_configured&&<p className="inline-help">Set MODEL_API_KEY in the root .env, then refresh this page to enable Muse.</p>}
     {hasSource&&!state&&<div className="consultation-actions"><span>This saved video needs backend preparation.</span>
       <button disabled={busy||!online} onClick={onPrepare}>Prepare source</button></div>}
     {!working&&!(question&&!changed)&&!(brief&&!changed)&&<div className="consultation-actions"><span className="muted">
       {hasSource?'Start sends the silent analysis video and your request to Meta.':'Import a video before starting.'}</span>
-      <button disabled={disabled||!state?.preview||!online||!health?.muse_configured
+      <button disabled={disabled||direction.trim().length>16000||!state?.preview||!online||!health?.muse_configured
         ||(!changed&&!!state&&['awaiting_answer','brief_ready','render_ready','failed','cancelled'].includes(state.status))}
         onClick={onStart}>{changed&&state?.request?'Start with new direction':'Start analysis'}</button></div>}
     {working&&!['rendering','segmenting','reviewing'].includes(state.status)&&<div className="consultation-status" role="status"><span>{stageLabel(state.stage)}</span><button disabled={sending||!online||state.stage==='cancelling'} onClick={onCancel}>Cancel</button></div>}

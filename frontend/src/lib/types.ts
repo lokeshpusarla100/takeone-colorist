@@ -34,6 +34,7 @@ export type Version = {
   recipe: Recipe | null;
   candidateId?: string;
   downloadUrl?: string;
+  previewOnly?: boolean;
 };
 
 export type SessionEvent = {

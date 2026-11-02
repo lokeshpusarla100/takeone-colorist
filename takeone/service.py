@@ -424,6 +424,9 @@ class Service:
             if look is None:
                 raise Problem("LOOK_NOT_FOUND", "That look preview is not part of this project.",
                               "Generate look previews and select one from the current brief.", 422)
+            if look.preview_only:
+                raise Problem('LOOK_MASK_REQUIRED','This palette preview does not execute the required subject protection.',
+                              'Track the subject and regenerate localized previews, or use full generation with automatic SAM.',409)
             brief_hash = rendering.fingerprint(state.brief.model_dump(mode="json")) if state.brief else None
             if state.looks_brief_sha256 != brief_hash or look.brief_sha256 != brief_hash:
                 raise Problem("LOOK_STALE", "These look previews belong to an earlier brief.",
@@ -444,14 +447,18 @@ class Service:
         rendering.verify_source(original, state.source, self.settings, cancel)
         brief_hash = rendering.fingerprint(state.brief.model_dump(mode="json"))
         evidence = None
+        local_error = None
         try:
             evidence = local_grading.timeline(directory, state.source, self.settings, cancel)
         except Problem as error:
             if error.code in {'SOURCE_CHANGED', 'JOB_CANCELLED'}:
                 raise
+            local_error=error.public()
         technical = {'operations': ['global_grade', 'cooling', 'brightness_gain'],
                      'localized_available': evidence is not None,
-                     'limitations': [] if evidence else ['No verified local timeline.'],
+                     'limitations': [] if evidence else [local_error['message'] if local_error else 'No verified local timeline.'],
+                     'localized_blocker':local_error,
+                     'purpose':'representative_still_look_preview',
                      'shots': evidence['shots'] if evidence else [],
                      'current_video_feedback': [f for f in current_feedback(state) if f.get('text')],
                      'previous_candidates': [], 'available_masks': []}
@@ -476,10 +483,14 @@ class Service:
         proposal, usage = self.provider.grade(state.brief, state.analysis, state.source, measurements, images,
                                               technical_context=technical)
         self.record_usage(project_id, request_id, "colorist", usage, call_number)
+        self.store.artifact(project_id,'looks-plan.json',{'brief_sha256':brief_hash,
+            'proposal':proposal.model_dump(mode='json'),'localized_blocker':local_error})
         if proposal.unfulfilled_requests:
             raise Problem('GRADE_REQUEST_UNFULFILLED', 'The planner reported required instructions it cannot execute.',
                           'Clarify these instructions or choose a supported treatment. No look was generated.', 422,
-                          unfulfilled_count=len(proposal.unfulfilled_requests))
+                          unfulfilled_count=len(proposal.unfulfilled_requests),
+                          unfulfilled_instructions='\n'.join(proposal.unfulfilled_requests),
+                          localized_blocker=local_error)
         times = selection['manifest']['times']
         selected_indices = selection['selected_indices']
         frame_index = min(selected_indices, key=lambda i: abs(times[i] - state.source.duration / 2))
@@ -493,7 +504,7 @@ class Service:
             alpha = self._look_mask(directory, state, proposal, frame_index, cancel)
             if alpha is None:
                 limitation = ('Localized previews need SAM masks covering the representative frame; '
-                              'these previews use the feasible global treatment only. Run subject tracking '
+                              'these are palette-only references and cannot be selected as a protected-subject recipe. Run subject tracking '
                               'first, or the full render will plan localized grading separately.')
                 proposal = proposal.model_copy(deep=True)
                 proposal.mode = 'global'
@@ -512,6 +523,7 @@ class Service:
         records = []
         for item in built:
             image = item.pop('image')
+            item['preview_only']=limitation is not None
             path = looks_directory / (item['id'] + '.jpg')
             if not cv2.imwrite(str(path), image[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 88]):
                 raise Problem('LOOK_IMAGE_FAILED', 'A look preview image could not be saved.',
@@ -537,6 +549,9 @@ class Service:
             for run in reversed(state.segmentations):
                 if run.status != 'ready' or run.concept.casefold() != proposal.local.concept.strip().casefold():
                     continue
+                if run.recovery_parent_id:
+                    proof=directory/'segmentations'/run.id/'coverage-verification.json'
+                    if not proof.is_file() or json.loads(proof.read_text()).get('source_sha256')!=state.source.sha256:continue
                 manifest_path = directory / 'segmentations' / run.id / 'manifest.json'
                 if not manifest_path.is_file():
                     continue
@@ -602,7 +617,8 @@ class Service:
             self.mutate(project_id,change)
         update('preparing','verify_segmentation_input')
         frame_map=sam.mapping(directory,state.source,self.settings,cancel)
-        input_path=directory/'analysis.mp4'
+        input_path=directory/frame_map.get('proxy_filename','analysis.mp4')
+        full_proxy=input_path
         if target.duration_seconds is not None or target.start_seconds or target.first_frame is not None:
             selected=([f for f in frame_map['frames'] if target.first_frame<=f['index']<=target.last_frame]
                       if target.first_frame is not None else
@@ -610,21 +626,24 @@ class Service:
             if not selected:raise Problem('SAM_INTERVAL_EMPTY','The requested mask interval has no frames.','Use a source interval.',422)
             count=len(selected);first=selected[0]['index'];last=selected[-1]['index']
             frame_map['source_frame_count']=frame_map['frame_count']
-            frame_map['frames']=selected;frame_map['frame_count']=count
+            frame_map['frames']=list(reversed(selected)) if target.reverse_tracking else selected;frame_map['frame_count']=count
             input_path=output/'input.mp4'
             if not input_path.is_file():
                 temporary=output/'input.partial.mp4'
-                sam.command([self.settings.ffmpeg,'-v','error','-y','-i',str(directory/'analysis.mp4'),
-                    '-an','-vf',fr'select=between(n\,{first}\,{last}),setpts=PTS-STARTPTS','-frames:v',str(count),'-c:v','libx264','-preset','veryfast','-crf','26',
+                filters=fr'select=between(n\,{first}\,{last}),'+('reverse,' if target.reverse_tracking else '')+'setpts=PTS-STARTPTS'
+                sam.command([self.settings.ffmpeg,'-v','error','-y','-i',str(full_proxy),
+                    '-an','-vf',filters,'-frames:v',str(count),'-c:v','libx264','-preset','veryfast','-crf','26',
                     '-fps_mode','passthrough','-movflags','+faststart',str(temporary)],cancel,120)
                 temporary.replace(input_path)
             inspected=sam.frame_info(input_path,self.settings,cancel)
             origin=selected[0]['proxy_pts']
-            if len(inspected['pts'])!=count or any(abs(f['proxy_pts']-origin-t)>0.002 for f,t in zip(frame_map['frames'],inspected['pts'])):
+            expected=[i/float(Fraction(frame_map['proxy']['rate'])) for i in range(count)]
+            if len(inspected['pts'])!=count or any(abs(t-e)>0.002 for t,e in zip(inspected['normalized'],expected)):
                 raise Problem('SAM_EXCERPT_MAPPING','The excerpt changed frame mapping.','Inspect the prepared proxy.',422)
             frame_map['proxy_sha256']=sam.checksum(input_path)
         frame_map['scope']={'start_seconds':target.start_seconds,'requested_duration':target.duration_seconds,'full_source_frames':
                             frame_map.get('source_frame_count',frame_map['frame_count'])}
+        if target.reverse_tracking:frame_map['scope']['direction']='reverse_for_coverage_recovery'
         previous_map=json.loads((output/'frame-map.json').read_text()) if (output/'frame-map.json').exists() else None
         if (output/'stream-complete.json').exists() and previous_map!=frame_map:
             raise Problem('SAM_SOURCE_CHANGED','The completed stream belongs to a different source mapping.','Start a new tracking run.',409)
@@ -650,6 +669,7 @@ class Service:
             def requested():
                 def change(s):
                     s.sam_calls+=1
+                    next(r for r in s.segmentations if r.id==target.id).request_count+=1
                     self.event(s,'Tracking subject with SAM',actor='muse',model=self.settings.sam_model,
                                request_id=request_id,segmentation_id=target.id)
                 self.mutate(project_id,change)
@@ -658,8 +678,15 @@ class Service:
                 self.mutate(project_id,lambda s:self.event(s,'SAM request usage',actor='muse',
                     model=self.settings.sam_model,request_id=request_id,video_frames_processed=value.get('video_frames_processed'),
                     token_usage=True,**usage_details(value)))
-            result=self.sam_provider.segment(input_path,target.concept,remote,remember,cancel,progress,
-                output/'raw.txt',usage,requested)
+            if target.object_prompt:
+                method=getattr(self.sam_provider,'segment_prompted',None)
+                if method is None:raise Problem('SAM_PROMPTING_UNAVAILABLE','This SAM provider cannot perform instance-prompted tracking.',
+                    'Use the hosted SAM provider with box/point prompting support.',503)
+                result=method(input_path,target.concept,remote,remember,cancel,progress,output/'raw.txt',usage,requested,
+                    object_prompt=target.object_prompt,propagation_direction=target.propagation_direction)
+            else:
+                result=self.sam_provider.segment(input_path,target.concept,remote,remember,cancel,progress,
+                    output/'raw.txt',usage,requested)
             manifest=sam.persist_result(result,frame_map,output,cancel)
             manifest['processing_config']=sam.processing_config(target.model)
             sam.atomic(output/'manifest.json',manifest)
@@ -673,11 +700,12 @@ class Service:
             run.status='ready' if manifest['mask_count'] else 'empty'
             run.frame_count=frame_map['frame_count'];run.mask_count=manifest['mask_count']
             run.frames_with_masks=manifest['frames_with_masks'];run.tracks=manifest['tracks'];run.error=None
+            run.received_frames=manifest['frames_with_masks']
             prefix=f'/api/projects/{project_id}/segmentations/{run.id}'
             run.preview_url=prefix+'/preview' if run.status=='ready' and not automatic else None
             run.manifest_url=prefix+'/manifest'
             if not automatic:s.status=run.return_status;s.stage='segmentation_ready';s.active_job=None
-            self.event(s,'Subject masks ready' if run.status=='ready' else 'No matching subject found',
+            self.event(s,('Subject masks partial' if run.frames_with_masks<run.frame_count else 'Subject masks ready') if run.status=='ready' else 'No matching subject found',
                        'Masks will be validated before localized compositing.' if automatic else 'Review object IDs and the moving overlay; no diagnostic mask is applied without a grading plan.',
                        mask_count=run.mask_count,frames_with_masks=run.frames_with_masks,frame_count=run.frame_count)
         self.mutate(project_id,ready)
@@ -689,6 +717,7 @@ class Service:
         for first,last in ranges:
             self.check_cancel(cancel);state=self.store.get(project_id);found=None
             for run in reversed(state.segmentations):
+                if run.recovery_parent_id or run.reverse_tracking:continue
                 if run.concept.casefold()!=plan.concept.strip().casefold() or run.model!=self.settings.sam_model:continue
                 path=directory/'segmentations'/run.id/'manifest.json'
                 if not path.is_file():continue
@@ -732,8 +761,107 @@ class Service:
                 target=next(c for c in s.candidates if c.id==candidate_id)
                 if run_id not in target.mask_run_ids:target.mask_run_ids.append(run_id)
             self.mutate(project_id,attached)
-            records.update(local_grading.records_for_range(manifest,mask_directory,source,first,last,plan.selection))
+            current=local_grading.records_for_range(manifest,mask_directory,source,first,last,plan.selection,require_complete=False)
+            if len(current)<last-first+1:
+                current=self.recover_mask_coverage(project_id,candidate_id,run_id,current,evidence,plan,first,last,cancel)
+            records.update(current)
         return records,ranges
+
+    def recover_mask_coverage(self,project_id,candidate_id,parent_id,current,evidence,plan,first,last,cancel):
+        """At most two source-bound repairs; overlap establishes identity, never fills a hole."""
+        import numpy as np
+        state=self.store.get(project_id);directory=self.store.directory(project_id);source=state.source
+        missing=[i for i in range(first,last+1) if i not in current]
+        last_repair_id=None
+        def stop(reason):
+            failure=Problem('LOCAL_MASK_GAP','Required local frames still have no verified subject mask.',
+                'Coverage recovery stopped: '+reason+'. No global fallback was rendered.',422,
+                missing_frames=len(missing),first_missing_frame=missing[0],recovery_reason=reason)
+            if last_repair_id:
+                def rejected(s):
+                    run=next(r for r in s.segmentations if r.id==last_repair_id);run.status='failed';run.error=failure.public()
+                self.mutate(project_id,rejected)
+            raise failure
+        if not current or plan.selection!='single_instance':stop('a single visible anchor subject is required')
+        source_ids={r['object_id'] for rows in current.values() for r in rows}
+        if len(source_ids)!=1:stop('the original track is ambiguous')
+        canonical=next(iter(source_ids));mapping=evidence['frame_map'];width=mapping['proxy']['width'];height=mapping['proxy']['height']
+        parent=next(r for r in state.segmentations if r.id==parent_id)
+        # Reuse prior repair artifacts before considering another billable request.
+        runs=[next(r for r in state.segmentations if r.id==rid) for rid in parent.recovery_run_ids]
+        for attempt in range(2):
+            self.check_cancel(cancel)
+            missing=[i for i in range(first,last+1) if i not in current]
+            if not missing:return current
+            begin=missing[0];end=begin
+            while end+1<=last and end+1 not in current:end+=1
+            reverse=begin==first
+            anchor=[i for i in range(end+1,min(last,end+15)+1) if i in current] if reverse else [i for i in range(max(first,begin-15),begin) if i in current]
+            if len(anchor)<3:stop('fewer than three overlap frames establish identity')
+            lo=begin if reverse else min(anchor);hi=max(anchor) if reverse else end
+            if hi-lo+1>300:stop('missing span exceeds the 300-frame repair budget')
+            from .sam_prompting import seed_from_masks
+            prompt,seeds=seed_from_masks(current,anchor,lo,width,height,canonical)
+            # Native bidirectional propagation returns the anchor context AND
+            # the missing prefix. Never reverse/re-detect the video itself.
+            run=next((r for r in runs if r.first_frame==lo and r.last_frame==hi and not r.reverse_tracking
+                and r.object_prompt==prompt and r.propagation_direction=='both'),None)
+            if run is None:
+                state=self.store.get(project_id);parent=next(r for r in state.segmentations if r.id==parent_id)
+                if len(parent.recovery_run_ids)>=2:stop('the two-request recovery budget is exhausted')
+                target=next(c for c in state.candidates if c.id==candidate_id)
+                repair_ids={r.id for r in state.segmentations if r.recovery_parent_id}
+                if len(set(target.mask_run_ids)&repair_ids)>=2:stop('the candidate recovery request budget is exhausted')
+                run=SegmentationRun(id=str(uuid4()),concept=plan.concept,model=self.settings.sam_model,
+                    first_frame=lo,last_frame=hi,start_seconds=mapping['frames'][lo]['time'],
+                    duration_seconds=(hi-lo+1)/float(Fraction(mapping['proxy']['rate'])),recovery_parent_id=parent_id,
+                    object_prompt=prompt,propagation_direction='both')
+                def attach(s):
+                    next(r for r in s.segmentations if r.id==parent_id).recovery_run_ids.append(run.id)
+                    s.segmentations.append(run);next(c for c in s.candidates if c.id==candidate_id).mask_run_ids.append(run.id)
+                    self.event(s,'Recovering missing SAM coverage','Instance-prompted native propagation from existing subject masks; original masks remain unchanged.',
+                        first_frame=lo,last_frame=hi,propagation_direction='both',seed_frames=[v['source_frame'] for v in seeds],segmentation_id=run.id)
+                self.mutate(project_id,attach);runs.append(run)
+            def link_repair(s):
+                target=next(c for c in s.candidates if c.id==candidate_id)
+                if run.id not in target.mask_run_ids:target.mask_run_ids.append(run.id)
+            self.mutate(project_id,link_repair)
+            last_repair_id=run.id
+            repair_directory=directory/'segmentations'/run.id
+            if run.request_count and not (repair_directory/'manifest.json').exists() and not (repair_directory/'stream-complete.json').exists():
+                stop('the prior repair request did not complete; no automatic paid retry was made')
+            try:manifest,folder=self.run_segmentation(project_id,cancel,run.id,automatic=True)
+            except Exception as error:
+                failure=safe_problem(error,'segment')
+                def failed(s):
+                    target=next(r for r in s.segmentations if r.id==run.id)
+                    target.status='cancelled' if failure.code=='JOB_CANCELLED' else 'failed';target.error=failure.public()
+                self.mutate(project_id,failed);raise
+            if manifest['frame_map']['proxy']!=mapping['proxy'] or any(
+                abs(f['time']-mapping['frames'][f['index']]['time'])>.002 for f in manifest['frame_map']['frames']):stop('repair frame mapping changed')
+            proposed=local_grading.records_for_range(manifest,folder,source,lo,hi,plan.selection,require_complete=False)
+            ids={r['object_id'] for rows in proposed.values() for r in rows}
+            if len(ids)!=1:stop('repair subject identity is ambiguous')
+            if ids!={canonical}:stop('the response did not preserve the explicitly prompted object ID')
+            overlap=[i for i in anchor if i in proposed]
+            if len(overlap)<3:stop('the repair did not recover enough anchor frames')
+            ious=[]
+            for i in overlap:
+                a,_=local_grading.raster(current[i],width,height);b,_=local_grading.raster(proposed[i],width,height)
+                ious.append(float(np.logical_and(a,b).sum()/max(1,np.logical_or(a,b).sum())))
+            if sum(v>=.7 for v in ious)<max(3,int(np.ceil(.8*len(anchor)))):stop('repair masks disagree with the existing subject in overlap')
+            added=[]
+            for i in missing:
+                if i in proposed:
+                    current[i]=[dict(r,object_id=canonical,recovery_object_id=r['object_id'],recovery_run_id=run.id) for r in proposed[i]];added.append(i)
+            sam.atomic(folder/'coverage-verification.json',{'source_sha256':source.sha256,'parent_run_id':parent_id,
+                'canonical_object_id':canonical,'repair_object_id':next(iter(ids)),
+                'method':'native_object_prompt_v1','seeds':seeds,'propagation_direction':'both',
+                'overlap_frames':overlap,'overlap_iou':ious,'min_iou':.7,'required_overlap_fraction':.8,'added_source_frames':added})
+            if not added:stop('the repair returned no new missing-frame masks')
+        missing=[i for i in range(first,last+1) if i not in current]
+        if missing:stop('coverage remains incomplete after bounded recovery')
+        return current
 
     def count_call(self, project_id, title,kind='consultation'):
         request_id = str(uuid4())
@@ -970,7 +1098,7 @@ class Service:
         self._render_one(project_id,cancel,keep_active=True)
         self.review_and_revise(project_id,cancel)
 
-    def guard_grade(self,project_id,candidate,recipe,original,output,source,cancel):
+    def guard_grade(self,project_id,candidate,recipe,original,output,source,cancel,technical=None):
         """Resolve input-cutoff mistakes before encoding, retaining the original plan/version."""
         limits=recipe.proposal.execution_limits
         if recipe.tone_operator!='luminance_ocio_v3' or (
@@ -982,8 +1110,58 @@ class Service:
             raise Problem('GRADE_PREFLIGHT_FAILED','The previous full render failed even without input clipping cutoffs.',
                           'Revise gamma, brightness or palette choices. The same failed recipe will not be encoded again.',422,
                           previous_failure=candidate.error)
-        effective,report=grade_guard.prepare_execution(original,output/'preflight',recipe,source,self.settings,cancel,
-            cache_dir=self.store.directory(project_id),force_neutral_levels=known_failure)
+        try:
+            effective,report=grade_guard.prepare_execution(original,output/'preflight',recipe,source,self.settings,cancel,
+                cache_dir=self.store.directory(project_id),force_neutral_levels=known_failure)
+        except Problem as failure:
+            if failure.code!='GRADE_PREFLIGHT_FAILED':raise
+            state=self.store.get(project_id)
+            target=next(c for c in state.candidates if c.id==candidate.id)
+            if target.preflight_replan_attempted:raise
+            if sum(c.brief_sha256==candidate.brief_sha256 for c in state.candidates)>=self.settings.max_render_iterations:raise
+            # This is an executable-plan failure, not a rendered-image critique.
+            # One Muse planning request may change creative controls; the tool
+            # itself must not silently alter gamma/palette or relax constraints.
+            def attempted(s):
+                next(c for c in s.candidates if c.id==candidate.id).preflight_replan_attempted=True
+                s.stage='plan_revision'
+            self.mutate(project_id,attempted);self.check_cancel(cancel)
+            selection,_,_=grade_guard.source_pixels(original,recipe,source,self.settings,cancel,self.store.directory(project_id))
+            stats,images=rendering.samples(original,source,self.settings,cancel,selection=selection)
+            context={**(technical or {}),'current_video_feedback':current_feedback(state),
+                'preflight_failure':{'failed_plan':recipe.proposal.model_dump(mode='json'),'evidence':failure.details,
+                    'instruction':'Revise the executable plan using the actual images and failure measurements. Keep the same creative brief and execution limits. Do not just resubmit the failed controls. Input-cutoff removal was insufficient; supported tonal controls or local treatment may need revision. Do not call this a review of a completed candidate.'}}
+            request_id=self.count_call(project_id,'Muse is revising a clipping-incompatible plan')
+            call=self.store.get(project_id).model_calls
+            try:proposal,usage=self.provider.grade(state.brief,state.analysis,source,stats,images,technical_context=context)
+            except Problem as error:
+                if error.details.get('usage_reported'):self.record_usage(project_id,request_id,'colorist',error.details,call)
+                raise
+            self.record_usage(project_id,request_id,'colorist',usage,call);self.check_cancel(cancel)
+            prior=recipe.proposal.execution_limits
+            for field in ['max_new_black_fraction','max_new_white_fraction','subject_max_chroma_change','subject_min_luma_ratio']:
+                old=getattr(prior,field);new=getattr(proposal.execution_limits,field)
+                if old is not None and (new is None or (new<old if field=='subject_min_luma_ratio' else new>old)):
+                    setattr(proposal.execution_limits,field,old)
+            if (proposal.unfulfilled_requests or
+                recipe.proposal.local and recipe.proposal.local.preserve_subject_color and (not proposal.local or not proposal.local.preserve_subject_color) or
+                creative_review.execution_identity(proposal,duration=source.duration)==creative_review.execution_identity(recipe.proposal,duration=source.duration)):
+                failure.details['replan_outcome']='No different supported plan with the same protections was returned.'
+                failure.action='Muse could not repair this plan within the saved constraints. Refine the creative brief; repeated retry will not make another planning call.'
+                raise
+            revised=recipe.model_copy(deep=True);revised.proposal=proposal;revised.execution_preflight=None;revised.execution_adjustment=None
+            revised.timeline=(recipe.timeline or local_grading.timeline(self.store.directory(project_id),source,self.settings,cancel)) if proposal.local else None
+            child=RenderCandidate(id=str(uuid4()),name='V'+str(len(state.candidates)+1),source_sha256=source.sha256,
+                brief_sha256=candidate.brief_sha256,generation_id=candidate.generation_id or str(uuid4()),
+                parent_id=candidate.id,iteration=candidate.iteration+1,recipe=revised,status='rendering',preflight_replan_attempted=True)
+            def replanned(s):
+                parent=next(c for c in s.candidates if c.id==candidate.id);parent.status='failed';parent.error=failure.public()
+                parent.revision_stop_reason='preflight_replanned_by_muse';s.candidates.append(child);s.render_target_id=child.id
+                self.event(s,'Muse revised the incompatible plan','A new candidate preserves the brief and clipping bounds. It must pass preflight before full encoding.',actor='muse',candidate=child.name,parent_id=candidate.id)
+            self.mutate(project_id,replanned)
+            self.store.candidate_artifact(project_id,child.id,'plan.json',proposal.model_dump(mode='json'))
+            self.store.candidate_artifact(project_id,child.id,'recipe.json',revised.model_dump(mode='json'))
+            return self.guard_grade(project_id,child,revised,original,self.store.directory(project_id)/'candidates'/child.id,source,cancel,technical)
         self.check_cancel(cancel)
         if report.get('changes'):
             state=self.store.get(project_id)
@@ -992,7 +1170,7 @@ class Service:
                               'Review or revise the brief before another attempt. No full encode was started.',409,preflight=report)
             child=RenderCandidate(id=str(uuid4()),name='V'+str(len(state.candidates)+1),source_sha256=source.sha256,
                 brief_sha256=candidate.brief_sha256,generation_id=candidate.generation_id or str(uuid4()),
-                parent_id=candidate.id,iteration=candidate.iteration+1,recipe=effective,status='rendering')
+                parent_id=candidate.id,iteration=candidate.iteration+1,recipe=effective,status='rendering',preflight_replan_attempted=candidate.preflight_replan_attempted)
             def corrected(s):
                 parent=next(c for c in s.candidates if c.id==candidate.id)
                 parent.status='failed';parent.revision_stop_reason='input_levels_corrected_before_encoding'
@@ -1105,7 +1283,7 @@ class Service:
                               unfulfilled_count=len(proposal.unfulfilled_requests),unfulfilled_instructions='; '.join(proposal.unfulfilled_requests)[:1500])
             if proposal.mode=='localized' and not evidence:
                 raise Problem('LOCAL_GRADE_UNAVAILABLE','The requested localized plan has no supported frame mapping.',
-                              'Use upright CFR SDR footage with a verified source/proxy frame mapping. No global fallback was made.',422,limitation=local_limitation)
+                              'Use upright SDR footage with valid, frame-preserving source/proxy mapping. No global fallback was made.',422,limitation=local_limitation)
             recipe = GradeRecipe(schema_version='takeone-grade-v3',prompt_version='colorist-v3',
                                  source_sha256=state.source.sha256, brief_sha256=candidate.brief_sha256,
                                  model=self.settings.model, proposal=proposal, source_samples=measurements,
@@ -1141,7 +1319,7 @@ class Service:
                 self.event(state, "Resuming saved recipe", "No additional model call is needed.", candidate=candidate.name)
             self.mutate(project_id, resuming)
         self.check_cancel(cancel)
-        candidate,recipe,output=self.guard_grade(project_id,candidate,recipe,original,output,state.source,cancel)
+        candidate,recipe,output=self.guard_grade(project_id,candidate,recipe,original,output,state.source,cancel,technical)
         records=None;mask_qa=None
         if recipe.proposal.mode=='localized':
             if evidence is None or recipe.timeline['key']!=evidence['key']:
@@ -1150,12 +1328,13 @@ class Service:
             records,ranges=self.local_masks(project_id,candidate.id,evidence,recipe.proposal.local,cancel)
             # Frame-derived interval boundaries, never guessed request timestamps.
             step=float(1/Fraction(evidence['frame_map']['proxy']['rate']))
-            recipe.timeline['active_ranges']=[[evidence['frame_map']['frames'][a]['time'],evidence['frame_map']['frames'][b]['time']+step] for a,b in ranges]
+            recipe.timeline['active_ranges']=[[evidence['frame_map']['frames'][a]['time'],
+                evidence['frame_map']['frames'][b+1]['time'] if b+1<evidence['frame_map']['frame_count'] else state.source.duration] for a,b in ranges]
             recipe.timeline['active_frame_ranges']=[list(pair) for pair in ranges]
             def validating(s):
                 s.stage='validate_local_masks';self.event(s,'Validating localized masks',required_frames=len(records),shot_intervals=len(ranges))
             self.mutate(project_id,validating)
-            mask_qa=local_grading.prepare_matte(directory/'analysis.mp4',output,state.source,evidence,records,
+            mask_qa=local_grading.prepare_matte(directory/evidence['frame_map'].get('proxy_filename','analysis.mp4'),output,state.source,evidence,records,
                                                recipe.proposal.local,self.settings,cancel,adaptive=recipe.tone_operator=='luminance_ocio_v3')
             mask_qa['selection_policy']=recipe.proposal.local.selection
             mask_qa['selected_objects_by_interval']=[{'first_frame':a,'last_frame':b,

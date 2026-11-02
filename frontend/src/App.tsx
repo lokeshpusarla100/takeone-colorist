@@ -104,10 +104,10 @@ export default function App() {
               void consultation.captureSelection({kind:'version_selected',
                 version_id:v.kind==='source'?'source':v.candidateId??'client:'+v.id,original_wording:''});
             }}>
-            {project.versions.map(v=><option key={v.id} value={v.id}>{v.name}{v.kind==='draft'?' (unrendered)':v.kind==='rendered'?v.candidateId?' (graded)':' (imported)':''}</option>)}
+            {project.versions.map(v=><option key={v.id} value={v.id}>{v.name}{v.kind==='draft'?' (unrendered)':v.kind==='rendered'?v.previewOnly?' (imported preview)':v.candidateId?' (graded)':' (imported)':''}</option>)}
           </select></label>
           <button disabled={locked} onClick={()=>renderInput.current?.click()}>Import render</button>
-          {selected?.kind==='rendered'&&<button onClick={()=>void downloadVideo()}>Download video</button>}
+          {selected?.kind==='rendered'&&<button onClick={()=>void downloadVideo()}>{selected.previewOnly?'Download imported preview':'Download video'}</button>}
         </div>}
         <RubricPanel key={'rubric:'+project.id} state={project.backend} health={consultation.health} online={consultation.online} busy={busy||!!project.pendingBackend} error={error}
           sending={sending} hasSource={!!project.source} direction={direction} onDirection={setDirection}

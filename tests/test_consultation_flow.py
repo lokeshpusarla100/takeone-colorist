@@ -78,6 +78,18 @@ def test_zero_questions_has_explicit_saved_reason_without_filling_budget(setting
         assert saved['consultation']==state['consultation']
 
 
+def test_long_direction_survives_transport_without_being_cut_at_4000(settings,video):
+    request='explicit detailed direction '+('preserve subject detail; '*210)+'END OF FULL REQUEST'
+    assert 4000<len(request)<16000
+    with client(settings,FakeMuse()) as c:
+        result=start(c,upload(c,video),request)
+        assert result['status']=='brief_ready'
+        assert result['request']==request and result['brief']['initial_request']==request
+        assert result['answered_count']==0
+        too_long=c.post('/api/projects/'+result['id']+'/analyze',json={'command_id':str(uuid4()),'revision':result['revision'],'request':'x'*16001})
+        assert too_long.status_code==422
+
+
 def test_invalid_tool_contract_fails_explicitly_instead_of_completing_consultation(settings,video):
     muse=FakeMuse();muse.operation='unsupported_mask'
     with client(settings,muse) as c:

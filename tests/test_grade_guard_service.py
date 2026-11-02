@@ -80,8 +80,39 @@ def test_impossible_bound_fails_before_full_encode_without_brightening(settings,
         assert candidate['recipe']['proposal']['parameters']['gamma']==.8
         assert candidate['recipe']['proposal']['parameters']['brightness_gain']==.65
         assert candidate['recipe']['proposal']['execution_limits']['max_new_black_fraction']==0
-        assert not calls and planner.grade_calls==1 and masks.calls==0
+        assert not calls and planner.grade_calls==2 and masks.calls==0
         assert client.app.state.service.store.get(result['id']).active_job is None
+        again=client.post('/api/projects/'+result['id']+'/retry',json={'revision':result['revision'],'command_id':str(uuid4())})
+        assert again.status_code==202
+        assert done(client,result['id'])['status']=='failed'
+        assert planner.grade_calls==2 # No new paid replan on repeated retry.
+
+
+def test_incompatible_creative_controls_trigger_one_measured_muse_replan(settings,shadow_edge):
+    class Repair(Planner):
+        def grade(self,*args,**kwargs):
+            proposal,usage=super().grade(*args,**kwargs)
+            if self.grade_calls==1:
+                proposal.parameters.gamma=.8;proposal.parameters.brightness_gain=.65
+                proposal.execution_limits.max_new_black_fraction=0
+            else:
+                context=kwargs['technical_context']
+                assert context['preflight_failure']['failed_plan']['parameters']['gamma']==.8
+                assert context['preflight_failure']['evidence']['preflight']['encoded_checks']
+                assert args[4] # Actual source visual evidence, not parameter-only advice.
+                proposal.execution_limits.max_new_black_fraction=None # Cannot erase prior bound.
+            return proposal,usage
+    planner=Repair();masks=Masks()
+    with TestClient(create_app(settings,planner,masks),base_url='http://127.0.0.1') as client:
+        result=generate(client,start(client,upload(client,shadow_edge),'explicit preserve dark detail'))
+        assert result['status']=='render_ready',result.get('error')
+        parent,child=result['candidates']
+        assert parent['status']=='failed' and child['parent_id']==parent['id']
+        assert parent['recipe']['proposal']['parameters']['gamma']==.8
+        assert child['recipe']['proposal']['parameters']['gamma']==1
+        assert child['recipe']['proposal']['execution_limits']['max_new_black_fraction']==0
+        assert parent['preflight_replan_attempted'] and child['preflight_replan_attempted']
+        assert planner.grade_calls==2 and masks.calls==0
 
 
 def test_correction_obeys_candidate_budget_before_full_encode(settings,dark_clip,monkeypatch):

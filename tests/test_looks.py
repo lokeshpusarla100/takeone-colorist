@@ -36,6 +36,8 @@ def select(c, state, look_id):
 def test_eight_brief_derived_previews_on_a_representative_sampled_frame(settings, scene):
     planner = Planner()
     with TestClient(create_app(settings, planner, Masks()), base_url='http://127.0.0.1') as c:
+        assert c.get('/api/health').json()['look_previews_connected'] is True
+        assert '/api/projects/{project_id}/looks' in c.get('/openapi.json').json()['paths']
         state = start(c, upload(c, scene), 'explicit increase overall contrast')
         brief_before = state['brief']
         done = make_looks(c, state)
@@ -102,6 +104,24 @@ def test_localized_plan_without_cached_masks_shows_only_feasible_global_looks(se
         assert len(state['looks']) == 8
         assert all(l['proposal']['mode'] == 'global' and not l['uses_local'] for l in state['looks'])
         assert state['looks_limitation'] and 'SAM masks' in state['looks_limitation']
+        assert all(l['preview_only'] for l in state['looks'])
+        response=c.post('/api/projects/'+state['id']+'/looks/select',json={'revision':state['revision'],'command_id':str(uuid4()),'look_id':state['looks'][0]['id']})
+        assert response.status_code==409 and response.json()['error']['code']=='LOOK_MASK_REQUIRED'
+
+
+def test_unfulfilled_look_instructions_are_preserved_and_reported(settings,scene):
+    class Unsupported(Planner):
+        def grade(self,*args,**kwargs):
+            p,u=super().grade(*args,**kwargs);p.unfulfilled_requests=['First required unsupported operation','Second required unsupported operation'];return p,u
+    with TestClient(create_app(settings,Unsupported(),Masks()),base_url='http://127.0.0.1') as c:
+        state=start(c,upload(c,scene),'explicit request')
+        result=make_looks(c,state)
+        assert result['status']=='failed' and not result['looks']
+        assert result['error']['details']['unfulfilled_instructions']=='First required unsupported operation\nSecond required unsupported operation'
+        import json
+        saved=json.loads((settings.workspace/state['id']/'looks-plan.json').read_text())
+        assert len(saved['proposal']['unfulfilled_requests'])==2
+        assert result['brief']==state['brief']
 
 
 def test_localized_looks_use_cached_sam_mask_when_one_covers_the_frame(settings, scene):

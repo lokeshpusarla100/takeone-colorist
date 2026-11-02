@@ -120,6 +120,12 @@
           "maxLength": 800,
           "title": "Clarification Reason",
           "type": "string"
+        },
+        "unresolved_preference": {
+          "default": "",
+          "maxLength": 1200,
+          "title": "Unresolved Preference",
+          "type": "string"
         }
       },
       "required": [

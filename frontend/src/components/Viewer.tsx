@@ -88,6 +88,7 @@ export default function Viewer({source,selectedVersion,selectedAsset,busy,onChoo
         onPlay={resumeComparison} onPause={()=>comparison.pause()} onEnded={()=>comparison.pause()}
         onError={e=>{setFailed(true);onError(mediaFailure(e.currentTarget.error,asset?.name??'unknown','media.playback'));}}/></div>
     </div>}
+    {selectedVersion?.previewOnly&&<p className="inline-note">Imported preview · {selectedAsset?.width} × {selectedAsset?.height}. This file is for comparison; it is not the original-resolution master. Grading provenance is unverified.</p>}
     {selectedVersion?.kind==='draft' && <p className="inline-note">Unrendered recipe. Showing original footage.</p>}
   </section>;
 }

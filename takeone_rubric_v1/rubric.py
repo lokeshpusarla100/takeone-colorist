@@ -105,6 +105,7 @@ class Candidate(StrictModel):
     decision_id: str | None = Field(default=None,min_length=1,max_length=160)
     followup_to: str | None = None
     clarification_reason: str = Field(default='',max_length=800)
+    unresolved_preference: str = Field(default='',max_length=1200)
 
 
 class Proposal(StrictModel):

@@ -117,6 +117,7 @@ def create_app(settings: Settings | None = None, provider=None, sam_provider=Non
             "look_previews_connected": True,
             "native_mask_timing_connected": True,
             "sam_model":settings.sam_model,"segmentation_connected":True,
+            "pricing": settings.pricing(),
         }
 
     @application.post("/api/projects", status_code=202)

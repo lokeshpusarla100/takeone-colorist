@@ -9,6 +9,7 @@ export type SegmentPhase='done'|'active'|'waiting'|'failed'|'pending'|'skipped';
 export type Segment={id:SegmentId;label:string;phase:SegmentPhase;fraction?:number};
 
 const ORDER:SegmentId[]=['inspect','clarify','brief','plan','masks','render','check','review'];
+export const SEGMENT_ORDER:readonly SegmentId[]=ORDER;
 const LABEL:Record<SegmentId,string>={inspect:'Inspect',clarify:'Q&A',brief:'Brief',plan:'Plan',masks:'Masks',render:'Render',check:'Check',review:'Review'};
 const STAGE:Record<string,SegmentId>={
   analyze_scene:'inspect',select_question:'clarify',awaiting_answer:'clarify',save_brief:'brief',

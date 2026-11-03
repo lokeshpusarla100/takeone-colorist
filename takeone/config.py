@@ -8,6 +8,15 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _rate(name: str, default: float) -> float:
+    """A non-negative number from the environment; anything else keeps the published default."""
+    try:
+        value = float(os.getenv(name, "").strip() or default)
+    except ValueError:
+        return default
+    return value if value >= 0 and value == value and value != float("inf") else default
+
+
 @dataclass(frozen=True)
 class Settings:
     workspace: Path
@@ -46,6 +55,37 @@ class Settings:
     # Skip the round-closing call when Muse predicted no follow-up for the options chosen. Off until the
     # recorded predictions (question_proposals) are shown to agree with the closing call.
     rubric_skip_closing: bool = False
+    # Single-pass SAM tracking: one request tracks every area of a localized grade instead of one request per area
+    # (takeone/sam_single_pass.py). OFF until it has been measured on more footage. A short detection window per area
+    # (`window` frames, billed at least 50) seeds one request over the whole range; an area whose tracked masks do not
+    # reproduce its detection masks (mean IoU below `gate`) goes back to its own request. Needs at least `min_areas`
+    # areas and `min_frames` frames, below which it could not save anything.
+    sam_single_pass: bool = False
+    sam_single_pass_gate: float = 0.85
+    sam_single_pass_window: int = 50
+    sam_single_pass_min_frames: int = 150
+    sam_single_pass_min_areas: int = 3
+    # Meta Model API list prices in USD, used only to ESTIMATE what a video cost from the usage the provider
+    # reported (it is not a bill). Source: https://dev.meta.ai/docs/pricing-rate-limits, read 2026-11-03.
+    # Cached input is billed at its own rate; reasoning tokens are part of the output count. A SAM video request
+    # is billed for at least `sam_min_billed_frames` frames. Override with TAKEONE_PRICE_* if Meta changes them.
+    price_muse_input_per_m: float = 1.25
+    price_muse_cached_input_per_m: float = 0.15
+    price_muse_output_per_m: float = 4.25
+    price_sam_per_1k_frames: float = 0.20
+    sam_min_billed_frames: int = 50
+
+    def pricing(self) -> dict:
+        """The rates the UI uses to turn reported usage into dollars."""
+        return {
+            "currency": "USD", "basis": "estimate_from_reported_usage",
+            "source": "https://dev.meta.ai/docs/pricing-rate-limits", "checked": "2026-11-03",
+            "muse": {"model": self.model, "input_per_million": self.price_muse_input_per_m,
+                     "cached_input_per_million": self.price_muse_cached_input_per_m,
+                     "output_per_million": self.price_muse_output_per_m},
+            "sam": {"model": self.sam_model, "per_thousand_frames": self.price_sam_per_1k_frames,
+                    "min_billed_frames": self.sam_min_billed_frames},
+        }
 
     @classmethod
     def from_env(cls):
@@ -77,4 +117,11 @@ class Settings:
             sam_parallel=max(1,min(6,int(os.getenv('TAKEONE_SAM_PARALLEL','3')))),
             rubric_mode='one_at_a_time' if os.getenv('TAKEONE_RUBRIC_MODE','batch').strip()=='one_at_a_time' else 'batch',
             rubric_skip_closing=os.getenv('TAKEONE_RUBRIC_SKIP_CLOSING','').strip().lower() in {'1','true','yes'},
+            sam_single_pass=os.getenv('TAKEONE_SAM_SINGLE_PASS','').strip().lower() in {'1','true','yes'},
+            sam_single_pass_gate=min(.99,max(.5,_rate('TAKEONE_SAM_SINGLE_PASS_GATE',.85))),
+            price_muse_input_per_m=_rate('TAKEONE_PRICE_MUSE_INPUT_PER_M', 1.25),
+            price_muse_cached_input_per_m=_rate('TAKEONE_PRICE_MUSE_CACHED_INPUT_PER_M', 0.15),
+            price_muse_output_per_m=_rate('TAKEONE_PRICE_MUSE_OUTPUT_PER_M', 4.25),
+            price_sam_per_1k_frames=_rate('TAKEONE_PRICE_SAM_PER_1K_FRAMES', 0.20),
+            sam_min_billed_frames=int(_rate('TAKEONE_SAM_MIN_BILLED_FRAMES', 50)),
         )

@@ -25,7 +25,7 @@ export type RenderCandidate = {
     issues:{id:string;description:string;evidence_ids:string[];correctable:boolean}[];preferred_candidate_id:string|null};
   review_error?:null|{message:string;action:string};
   review_evidence?:{frame_index:number;time:number;roles:string[]}[];
-  recipe:null|{tone_operator?:string;execution_adjustment?:null|{reason:string;changes:Record<string,{from:number;to:number}>};proposal:{parameters:GradeValues;mode?:'global'|'localized';
+  recipe:null|{tone_operator?:string;execution_adjustment?:null|{kind?:string;reason?:string;changes?:Record<string,{from:number;to:number}>;concept?:string;object_count?:number|null};proposal:{parameters:GradeValues;mode?:'global'|'localized';
     local?:null|{concept:string;foreground:GradeValues;background:GradeValues;intervals:{start:number;end:number}[];preserve_subject_color:boolean;regions?:{concept:string;treatment:GradeValues}[]};
     summary:string;decisions:{parameter:string;reason:string;source_ids:string[]}[];limitations:string[]}};
   preview_url:string|null;download_url:string|null;width:number|null;height:number|null;duration:number|null;
@@ -48,7 +48,8 @@ export type BackendState = {
   status:'ingesting'|'ready'|'analyzing'|'awaiting_answer'|'brief_ready'|'rendering'|'render_ready'|'segmenting'|'reviewing'|'failed'|'cancelled';
   stage:string;filename:string;request:string;answered_count:number;max_questions:number;model_calls:number;
   source:null|{name:string;bytes:number;sha256:string;width:number;height:number;duration:number;
-    video_codec:string;audio_codec:string|null;technical_notes:string[]};
+    video_codec:string;audio_codec:string|null;technical_notes:string[];
+    pixel_format?:string|null;color_space?:string|null;color_primaries?:string|null;color_transfer?:string|null;rotation?:number|null};
   preview:null|{url:string;width:number;height:number;duration:number;bytes:number};
   analysis:null|{summary:string;caveats:string[]};
   question:Question|null;pending_questions?:Question[];brief:Brief|null;events:SessionEvent[];
@@ -79,6 +80,7 @@ export type Health = {
   status:string;model:string;muse_configured:boolean;ffmpeg_available:boolean;ffprobe_available:boolean;
   max_upload_bytes:number;max_duration_seconds:number;max_questions:number;grading_connected:boolean;
   sam_model?:string;segmentation_connected?:boolean;look_previews_connected?:boolean;native_mask_timing_connected?:boolean;
+  pricing?:unknown;
 };
 const record=(value:unknown):value is Record<string,unknown>=>typeof value==='object'&&value!==null;
 const text=(value:unknown)=>typeof value==='string';

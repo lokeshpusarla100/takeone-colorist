@@ -22,29 +22,34 @@ The backend is unchanged for this: the start is the ordinary `POST /render` comm
 
 ## What the progress panel shows
 
-`ProgressPanel` shows the whole run as eight segments: Inspect, Q&A, Brief, Plan, Masks, Render, Check, Review
-(`frontend/src/lib/progressModel.ts`). Position comes from the backend stage. A fill inside the running segment is
-shown **only where something is measured**; nothing is estimated:
+The **Run** tab shows the whole run as one list of nine steps: Prepare source, Watch the video, Questions, Creative brief,
+Plan the grade, Subject masks (SAM), Render, Quality check, Creative review (`frontend/src/lib/stepper.ts`, built on the
+segments of `progressModel.ts`). The status strip over the video, the caption ("Step 6 of 9: Subject masks (SAM)"), the
+overall bar and the list all come from the same rows (`useRunModel`), so they cannot disagree, and the encode is polled once.
+Position comes from the backend stage. A fill inside the running step is shown **only where something is measured**;
+nothing is estimated:
 
 | Stage | Measured fill | Source |
 |---|---|---|
 | Render | encode position, speed, time left | FFmpeg `-progress`, via `GET /api/projects/{id}/progress` |
-| Masks (SAM tracking) | frames tracked of total | `segmentations[-1].received_frames` |
+| Subject masks (SAM) | frames tracked of total | `segmentations[-1].received_frames` |
 | Everything else | indeterminate stripe + elapsed time | - |
 
-- Masks is dashed and not counted when the plan is a whole-frame grade. A render that was never reviewed shows Review
-  the same way.
-- A revision pass moves the run back to Plan; the segments after it restart.
+- Subject masks is "Not needed" (and leaves the count) when the plan is a whole-frame grade. A render that was never
+  reviewed shows Review the same way. The total therefore can shrink once the plan is known (Step 3 of 9, then Step 5 of 8).
+- A revision pass moves the run back to Plan; the steps after it restart.
 - After Cancel the backend overwrites the stage with `cancelling`; the position is recovered from the last timing
   marker, so the stopped step is shown as stopped.
+- The "Subject masks" time includes mask validation, which can be most of it on a long 4K clip (3m51s in one recorded run).
 
 ### Clocks
 
 - **Active time** accumulates across the consultation, the render and review passes since this direction was
   submitted (`request_started_at`). Waiting for your answers is never counted; a new direction starts it again.
 - **This step** is the running step's own clock, with **last time**: how long the previous finished visit to the same
-  step took (including an earlier revision pass). It is a recorded fact, not a forecast.
-- The older per-step times and "All attempts" below are unchanged.
+  step took (including an earlier revision pass). It is a recorded fact, not a forecast. The running row in the list
+  shows the same number.
+- Each finished row shows its own time; "All attempts" at the foot is everything ever timed for the session.
 
 ### Live encode measurement (backend)
 
@@ -61,6 +66,7 @@ request, simply means no live fill.
   question at a time"; the masks step said "Not started" for grades that need no masks.
 - Token usage sat above the progress and pushed it below the fold; it is now below the steps.
 - A second render pass briefly showed the first pass's final percentage (cleared on every new stage).
+- Two step lists with different names (an 8-segment bar and a 7-row list) are now one list; the caption "Step 5 of 8" no longer disagrees with a list of nine rows.
 
 ## Source preparation time
 

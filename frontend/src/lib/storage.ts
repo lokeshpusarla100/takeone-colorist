@@ -138,6 +138,10 @@ export const getMedia = (id: string) => read<Blob | undefined>('media', id);
 export function getActiveId(): string | null {
   try { return localStorage.getItem(ACTIVE_KEY); } catch { return null; }
 }
+/** Forget which session opens first; every saved session record stays in IndexedDB. */
+export function clearActiveId(): void {
+  try { localStorage.removeItem(ACTIVE_KEY); } catch { /* A new session simply opens next time. */ }
+}
 export function setActiveId(id: string): void {
   try { localStorage.setItem(ACTIVE_KEY, id); } catch { /* Project records remain in IndexedDB. */ }
 }

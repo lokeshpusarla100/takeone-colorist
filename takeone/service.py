@@ -28,6 +28,7 @@ from . import grade_guard
 from . import render_preflight
 from . import convergence
 from . import concepts as sam_concepts
+from . import sam_single_pass
 from . import model_payload
 
 
@@ -887,9 +888,20 @@ class Service:
         gate.set()
 
     def masks_for(self,project_id,candidate_id,evidence,plans,cancel):
-        """local_masks for each plan (subject first, then regions). SAM time is network latency, so the
-        requests run concurrently; results, and the error reported if any fails, are in plan order exactly
-        as when run one by one. sam_parallel=1 (or a single plan) keeps the strictly sequential path."""
+        """local_masks for each plan (subject first, then regions): (records, ranges, concept used, selection used).
+
+        One SAM request per area by default. With settings.sam_single_pass, areas that suit it are tracked together in
+        one request and each is checked against its own detection masks (see single_pass_masks); anything that does
+        not suit it, or does not pass, is requested the ordinary way. The result has the same shape either way."""
+        if self.settings.sam_single_pass and len(plans)>=self.settings.sam_single_pass_min_areas:
+            try:return self.single_pass_masks(project_id,candidate_id,evidence,plans,cancel)
+            except sam_single_pass.NotApplicable as reason:
+                self.mutate(project_id,lambda s:self.event(s,'Single-pass SAM not used',f'{reason}. One request per area is used instead.'))
+        return self._masks_concurrently(project_id,candidate_id,evidence,plans,cancel)
+
+    def _masks_concurrently(self,project_id,candidate_id,evidence,plans,cancel):
+        """The areas' requests run concurrently (their time is network latency); results, and the error reported if any
+        fails, are in plan order exactly as when run one by one. sam_parallel=1 (or a single plan) is strictly sequential."""
         if len(plans)==1 or self.settings.sam_parallel<=1:
             return [self.local_masks(project_id,candidate_id,evidence,p,cancel) for p in plans]
         from concurrent.futures import ThreadPoolExecutor as Pool
@@ -902,6 +914,75 @@ class Service:
         for ok,value in outcomes:
             if not ok:raise value
         return [value for _,value in outcomes]
+
+    def single_pass_masks(self,project_id,candidate_id,evidence,plans,cancel):
+        """Track every area in ONE request seeded from short detection windows; fall back per area.
+
+        1. Each area gets its ordinary concept request over only the first `window` frames: that is where its objects
+           and masks come from (and where an ambiguous subject is reported exactly as before).
+        2. One object-prompt request over the whole range, seeded with every detected object, tracks them all.
+        3. Per area, the tracked masks must reproduce its detection masks and leave no gap; the areas that do not
+           are requested the ordinary way over the whole range. Nothing is guessed or carried across a gap."""
+        settings=self.settings;state=self.store.get(project_id);source=state.source
+        ranges=[local_grading.plan_ranges(p,evidence,source) for p in plans]
+        if any(r!=ranges[0] for r in ranges) or len(ranges[0])!=1:
+            raise sam_single_pass.NotApplicable('the areas do not share one uninterrupted frame range')
+        (first,last),=ranges[0];count=last-first+1;window=settings.sam_single_pass_window
+        if count<settings.sam_single_pass_min_frames or count<2*window:
+            raise sam_single_pass.NotApplicable(f'{count} frames is too short for one request to save anything')
+        mapping=evidence['frame_map'];frames=mapping['frames'];proxy=mapping['proxy'];width,height=proxy['width'],proxy['height']
+        step=float(1/Fraction(proxy['rate']))
+        interval=type(plans[0].intervals[0])
+        windowed=[p.model_copy(update={'intervals':[interval(start=frames[first]['time'],end=frames[first+window]['time'])]}) for p in plans]
+        detected=self._masks_concurrently(project_id,candidate_id,evidence,windowed,cancel)
+        self.check_cancel(cancel)
+        objects=[]
+        for area,(records,_ranges,_phrase,_selection) in enumerate(detected):
+            objects+=sam_single_pass.area_objects(records,width,height,first,area)
+        prompt=sam_single_pass.build_prompt(width,height,objects)
+        state=self.store.get(project_id)
+        run=next((r for r in reversed(state.segmentations) if r.object_prompt==prompt and r.first_frame==first and r.last_frame==last
+                  and r.propagation_direction=='both' and not r.recovery_parent_id and r.model==settings.sam_model),None)
+        if run is None:
+            run=SegmentationRun(id=str(uuid4()),concept='all areas: '+', '.join(p.concept for p in plans),model=settings.sam_model,
+                first_frame=first,last_frame=last,start_seconds=frames[first]['time'],duration_seconds=count*step,
+                object_prompt=prompt,propagation_direction='both')
+        def attach(s):
+            if not any(r.id==run.id for r in s.segmentations):
+                s.segmentations.append(run)
+                self.event(s,'Single-pass SAM tracking',f'One request tracks {len(objects)} objects across {len(plans)} areas for {count} frames, '
+                    f'seeded from their first {window} frames, instead of {len(plans)} requests of {count} frames.',
+                    areas=len(plans),objects=len(objects),frames=count,window=window,segmentation_id=run.id)
+            target=next(c for c in s.candidates if c.id==candidate_id)
+            if run.id not in target.mask_run_ids:target.mask_run_ids.append(run.id)
+        self.mutate(project_id,attach)
+        try:manifest,folder=self.run_segmentation(project_id,cancel,run.id,automatic=True)
+        except Exception as error:
+            failure=safe_problem(error,'segment')
+            def failed(s):
+                r=next(r for r in s.segmentations if r.id==run.id);r.status='cancelled' if failure.code=='JOB_CANCELLED' else 'failed';r.error=failure.public()
+            self.mutate(project_id,failed)
+            sent=next(r for r in self.store.get(project_id).segmentations if r.id==run.id).request_count
+            # Once a request has been sent it may already be billed: never repeat it silently as one request per area.
+            if failure.code=='JOB_CANCELLED' or sent:raise
+            raise sam_single_pass.NotApplicable('the request was not sent ('+failure.message.rstrip('.')+')')
+        results=[None]*len(plans);redo=[]
+        for area,plan in enumerate(plans):
+            records=local_grading.records_for_range(sam_single_pass.split_manifest(manifest,area),folder,source,first,last,'all_matches',require_complete=False)
+            check=sam_single_pass.agreement(detected[area][0],{i:records[i] for i in detected[area][0] if i in records},width,height)
+            complete=all(i in records for i in range(first,last+1))
+            ok=sam_single_pass.acceptable(check,settings.sam_single_pass_gate) and complete
+            self.mutate(project_id,lambda s,plan=plan,check=check,ok=ok,complete=complete:self.event(s,
+                'Single-pass check passed' if ok else 'Single-pass check failed',
+                (f'"{plan.concept}" matches its detection masks (mean overlap {check["mean_iou"]:.2f}).' if ok else
+                 f'"{plan.concept}" is requested on its own: '+('it leaves frames without a mask.' if not complete else
+                 f'mean overlap with its detection masks is {check["mean_iou"]:.2f}, below {settings.sam_single_pass_gate:.2f}.')),
+                concept=plan.concept,mean_iou=round(check['mean_iou'],3),lost_frames=check['lost'],frames_compared=check['frames'],complete=complete))
+            if ok:results[area]=(records,ranges[area],detected[area][2],detected[area][3])
+            else:redo.append(area)
+        if redo:
+            for area,outcome in zip(redo,self._masks_concurrently(project_id,candidate_id,evidence,[plans[a] for a in redo],cancel)):results[area]=outcome
+        return results
 
     def local_masks(self,project_id,candidate_id,evidence,plan,cancel):
         """Masks for plan.concept, falling back to simpler phrases only when SAM finds nothing at all.

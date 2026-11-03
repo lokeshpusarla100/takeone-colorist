@@ -1,8 +1,8 @@
 import type { SessionEvent } from './types';
 
-type Stage='analysis'|'rubric'|'colorist'|'sam'|'critic';
+export type Stage='analysis'|'rubric'|'colorist'|'sam'|'critic';
 export type UsageRow={
-  id:string;timestamp:string;label:string;model:string|null;
+  id:string;timestamp:string;label:string;stage:Stage;model:string|null;
   input:number|null;output:number|null;total:number|null;cached:number|null;reasoning:number|null;
   reported:boolean;running:boolean;
   processedFrames?:number|null;
@@ -40,7 +40,7 @@ export function tokenUsage(events:SessionEvent[],activeStage?:string){
     if(start){
       const id=requestId??event.id;
       if(requests.has(id))continue;
-      const row:UsageRow={id,timestamp:event.timestamp,label:labels[start],model:text(details.model),
+      const row:UsageRow={id,timestamp:event.timestamp,label:labels[start],stage:start,model:text(details.model),
         input:null,output:null,total:null,cached:null,reasoning:null,reported:false,running:false};
       rows.push(row);requests.set(id,row);legacy[start]=row;latestRequest=row;
       continue;
@@ -52,7 +52,7 @@ export function tokenUsage(events:SessionEvent[],activeStage?:string){
     let row=requestId?requests.get(requestId):legacy[stage];
     if(!row){
       const id=requestId??event.id;
-      row={id,timestamp:event.timestamp,label:labels[stage],model:text(details.model),
+      row={id,timestamp:event.timestamp,label:labels[stage],stage,model:text(details.model),
         input:null,output:null,total:null,cached:null,reasoning:null,reported:false,running:false};
       rows.push(row);requests.set(id,row);
     }

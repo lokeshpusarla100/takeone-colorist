@@ -9,6 +9,18 @@ import * as api from './api';
 import { preparedSource } from './preparedSource';
 import { validateRenderImport } from './renderImport';
 
+let restoring: Promise<Project> | undefined;
+async function restoreOrCreate(): Promise<Project> {
+  const id = getActiveId();
+  const saved = id ? await getProject(id) : undefined;
+  if (id && !saved) throw new AppError('SESSION_MISSING', 'The active session could not be found.',
+    'Start a new session. Existing records have not been changed.', { projectId: id });
+  const next = saved ?? makeProject();
+  if (!saved) await saveProject(next);
+  setActiveId(next.id);
+  return next;
+}
+
 export function useWorkspace() {
   const [project, setProject] = useState<Project | null>(null);
   const [saveState, setSaveState] = useState<'saving'|'saved'|'error'>('saving');
@@ -49,20 +61,12 @@ export function useWorkspace() {
   useEffect(() => {
     let cancelled = false;
     setError(null);
-    void (async () => {
-      try {
-        const id = getActiveId();
-        const saved = id ? await getProject(id) : undefined;
-        if (id && !saved) throw new AppError('SESSION_MISSING', 'The active session could not be found.',
-          'Start a new session. Existing records have not been changed.', { projectId: id });
-        if (!cancelled) {
-          const next = saved ?? makeProject();
-          setActiveId(next.id); setProject(next);
-        }
-      } catch (cause) {
-        if (!cancelled) { setSaveState('error'); reportError(cause, 'storage.restore'); }
-      }
-    })();
+    // One restore serves every run of this effect (React StrictMode runs it twice in development), so a brand-new
+    // session is created once and is on disk before it counts as the active one.
+    const task = restoring ?? (restoring = restoreOrCreate());
+    void task.then(next => { if (!cancelled) setProject(next); },
+      cause => { if (!cancelled) { setSaveState('error'); reportError(cause, 'storage.restore'); } })
+      .finally(() => { if (restoring === task) restoring = undefined; });
     return () => { cancelled = true; };
   }, [restoreAttempt, reportError]);
 

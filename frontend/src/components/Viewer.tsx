@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import Icon from './Icon';
 import type { MediaAsset, Version } from '../lib/types';
 import { useAssetUrl } from '../lib/useWorkspace';
 import { AppError, asAppError, mediaFailure } from '../lib/errors';
 import { createComparisonSync, isPlaybackAbort } from '../lib/playbackSync';
 
-export default function Viewer({source,selectedVersion,selectedAsset,busy,onChooseVideo,onDropVideo,onError,onPreviewReady}:{
-  source:MediaAsset|null; selectedVersion?:Version; selectedAsset?:MediaAsset; busy:boolean;
+export default function Viewer({source,selectedVersion,selectedAsset,busy,onChooseVideo,onDropVideo,onError,onPreviewReady,controls,hint}:{
+  source:MediaAsset|null; selectedVersion?:Version; selectedAsset?:MediaAsset; busy:boolean;controls?:ReactNode;hint?:string;
   onChooseVideo:()=>void; onDropVideo:(file:File)=>void; onError:(error:AppError)=>void;onPreviewReady?:()=>void;
 }) {
   const [original,setOriginal] = useState(false);
@@ -60,24 +62,35 @@ export default function Viewer({source,selectedVersion,selectedAsset,busy,onChoo
 
   return <section className="viewer" aria-label="Video viewer"
     onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();if(!busy&&e.dataTransfer.files[0])onDropVideo(e.dataTransfer.files[0]);}}>
-    {rendered && <div className="viewer-options">
-      <button aria-pressed={original} onClick={()=>{comparison.pause();setOriginal(true);setCompare(false);}}>Original</button>
-      <button aria-pressed={!original} onClick={()=>{comparison.invalidate();setOriginal(false);}}>Render</button>
-      <label><input type="checkbox" checked={compare} onChange={e=>{setOriginal(false);setCompare(e.target.checked);if(!e.target.checked)comparison.pause();}}/>Compare</label>
+    {source&&<div className="viewer-bar">
+      {rendered&&<div className="segmented" role="group" aria-label="What to play">
+        <button aria-pressed={original} onClick={()=>{comparison.pause();setOriginal(true);setCompare(false);}}>Original</button>
+        <button aria-pressed={!original} onClick={()=>{comparison.invalidate();setOriginal(false);}}>Graded</button>
+      </div>}
+      {rendered&&<button className="toggle" aria-pressed={compare} onClick={()=>{setOriginal(false);setCompare(!compare);if(compare)comparison.pause();}}><Icon name="split" size={16}/>Side by side</button>}
+      {!rendered&&<span className="viewer-label"><Icon name="film" size={16}/>Original</span>}
+      <div className="viewer-controls">{controls}</div>
     </div>}
-    {!source ? <div className="empty-viewer"><p>No video loaded.</p><button onClick={onChooseVideo} disabled={busy}>Import video</button><span>Or drop a file here.</span></div>
+    {!source ? <div className="empty-viewer dropzone">
+      <span className="drop-icon"><Icon name="upload" size={30}/></span>
+      <h2>Drop a video to begin</h2>
+      <p className="help">Describe the look you want, answer a few short questions, and Take One grades the whole clip. Your original is never changed.</p>
+      <button className="primary large" onClick={onChooseVideo} disabled={busy}><Icon name="upload" size={18}/>Choose a video</button>
+      <span className="help">{hint??'Or drop a file anywhere on this panel.'}</span>
+      <ol className="how"><li><b>1</b>Import</li><li><b>2</b>Describe the look</li><li><b>3</b>Answer a few questions</li><li><b>4</b>Compare and download</li></ol>
+    </div>
     : error || failed ? <div className="empty-viewer">
       <p>{source.playbackUrl?'Preview playback failed. The source is still prepared for analysis.':'Preview unavailable. See the error details.'}</p>
-      <button onClick={()=>{setFailed(false);setAttempt(n=>n+1);}} disabled={busy}>Retry playback</button>
-      {!source.playbackUrl&&<button onClick={onChooseVideo} disabled={busy}>Choose another video</button>}
+      <div className="actions"><button onClick={()=>{setFailed(false);setAttempt(n=>n+1);}} disabled={busy}>Retry playback</button>
+      {!source.playbackUrl&&<button onClick={onChooseVideo} disabled={busy}>Choose another video</button>}</div>
     </div>
-    : !url ? <div className="empty-viewer" role="status">Loading saved video…</div>
+    : !url ? <div className="empty-viewer" role="status"><span className="spinner large"/>Loading saved video…</div>
     : <div className={'video-container '+(compare?'comparison':'')}>
       {compare && sourceUrl && <div><span className="video-label">Original</span><video ref={before} src={sourceUrl} muted playsInline preload="auto"
         aria-label="Original comparison video"
         onLoadedData={()=>{comparison.sync(true);resumeComparison();}}
         onError={e=>{setCompare(false);onError(mediaFailure(e.currentTarget.error,source.name,'media.compare'));}}/></div>}
-      <div>{compare && <span className="video-label">Render</span>}<video ref={main} src={url} controls playsInline preload="metadata"
+      <div>{compare && <span className="video-label graded">Graded</span>}<video ref={main} src={url} controls playsInline preload="metadata"
         aria-label={rendered&&!original?'Selected rendered video':'Original video'}
         onLoadedMetadata={e=>{e.currentTarget.currentTime=Math.min(position.current,e.currentTarget.duration||position.current);}}
         onCanPlay={onPreviewReady}
@@ -88,7 +101,7 @@ export default function Viewer({source,selectedVersion,selectedAsset,busy,onChoo
         onPlay={resumeComparison} onPause={()=>comparison.pause()} onEnded={()=>comparison.pause()}
         onError={e=>{setFailed(true);onError(mediaFailure(e.currentTarget.error,asset?.name??'unknown','media.playback'));}}/></div>
     </div>}
-    {selectedVersion?.previewOnly&&<p className="inline-note">Imported preview · {selectedAsset?.width} × {selectedAsset?.height}. This file is for comparison; it is not the original-resolution master. Grading provenance is unverified.</p>}
-    {selectedVersion?.kind==='draft' && <p className="inline-note">Unrendered recipe. Showing original footage.</p>}
+    {selectedVersion?.previewOnly&&<p className="inline-note"><Icon name="info" size={16}/>Imported preview · {selectedAsset?.width} × {selectedAsset?.height}. This file is for comparison; it is not the original-resolution master. Grading provenance is unverified.</p>}
+    {selectedVersion?.kind==='draft' && <p className="inline-note"><Icon name="info" size={16}/>Unrendered recipe. Showing original footage.</p>}
   </section>;
 }

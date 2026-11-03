@@ -50,6 +50,8 @@ export function runProgress(state?:BackendState,localBusy=false,localProgress?:s
     stage==='check_output_quality'?'Checking frame timing, protected areas and clipping on the finished file.':
     state?.status==='render_ready'?'The graded video is ready. Compare it with the original, review it, or generate another version.':
     state?.status==='brief_ready'?'The brief is saved. Generate a graded video to continue.':
+    !state?'Your video stays on this computer until you press Start analysis.':
+    state?.status==='ready'?'Your video is ready. Describe the look you want, then start the analysis.':
     'Percentages shown are measured (encoding, tracking). Other stages show their elapsed time.';
   if(failed)note=state.error?.action??'Saved source and answers remain available for an explicit retry.';
   if(state?.status==='segmenting')note='Manual subject tracking on the verified proxy. Missing masks remain explicit gaps.';

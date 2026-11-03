@@ -15,6 +15,12 @@ const {processingTimings,formatDuration,lastTime}=await load('progressTiming');
 const {runPipeline,parseLive,formatEta,segmentOfStage}=await load('progressModel');
 const {shouldAutoRender,consultationRunning,loadAutoRender,saveAutoRender,MAX_AUTO_ATTEMPTS}=await load('autoRender');
 const {validateRenderImport}=await load('renderImport');
+const {describeAdjustment,formatChange}=await load('adjustment');
+const {projectCost,parsePricing,formatUsd,priceRow}=await load('cost');
+const {safeguards,parseEnvelope,headline,codecName,sizeName,seconds,megabytes}=await load('briefVisual');
+const {parseMarkdown,inline}=await load('markdown');
+const {CONTROLS,cellFor,layersOf,activeControls}=await load('recipeView');
+const {runSteps,stepProgress}=await load('stepper');
 test('proportional playback previews can be compared without claiming master resolution',()=>{
   const source={width:3840,height:2160,duration:24.695222};
   assert.deepEqual(validateRenderImport(source,{width:1280,height:720,duration:24.797}),{previewOnly:true});
@@ -588,4 +594,163 @@ test('a cancelled or cancelling run keeps its place from the last timing marker'
   const stopping=piece({status:'rendering',stage:'cancelling',brief:{},candidates:[{status:'rendering',recipe}],events:events.slice(0,3)});
   assert.equal(stopping.segments.find(s=>s.id==='render').phase,'active');   // still the render until it has actually stopped
   assert.equal(piece({status:'cancelled',stage:'cancelling',brief:{},candidates:[],events:[]}).segments.every(s=>s.phase!=='failed'),true);  // unknown place: nothing is blamed
+});
+
+test('every shape of execution adjustment the backend records can be described without throwing',()=>{
+  // The record written when the user chooses "grade all matches": no reason, no changes. This crashed the whole editor.
+  const all=describeAdjustment({kind:'user_selected_all_matches',concept:'passenger boat',object_count:4});
+  assert.equal(all.title,'Every match graded');assert.match(all.detail,/all 4 matches of “passenger boat”/);assert.deepEqual(all.changes,[]);
+  // Input-level clipping recovery: reason plus per-layer changes.
+  const clip=describeAdjustment({kind:'input_level_clipping_recovery',reason:'Cutoffs were reduced.',changes:{'background.black_point':{from:.05,to:.03}}});
+  assert.equal(clip.detail,'Cutoffs were reduced.');assert.equal(formatChange(clip.changes[0]),'background black point: 0.0500 → 0.0300');
+  // Both written onto one record (the "all matches" record is merged over an earlier correction).
+  const both=describeAdjustment({kind:'user_selected_all_matches',concept:'sky',object_count:2,reason:'Also protected.',changes:{black_point:{from:.1,to:.08}}});
+  assert.match(both.detail,/all 2 matches of “sky”.*Also protected\./);assert.equal(both.changes.length,1);
+  // Unknown kinds, partial or malformed records, and non-records never throw.
+  assert.equal(describeAdjustment({kind:'some_future_kind'}).title,'Some future kind');
+  assert.equal(describeAdjustment({kind:'x',changes:{a:{from:'1',to:null},b:7,c:{from:1,to:2}}}).changes.length,1);
+  assert.equal(describeAdjustment({kind:'user_selected_all_matches'}).detail.startsWith('You chose to grade every match of the ambiguous area'),true);
+  for(const junk of [null,undefined,0,'text',[],[1],{}])assert.equal(describeAdjustment(junk),null);
+  assert.doesNotThrow(()=>describeAdjustment({changes:'nope',object_count:'4',concept:7,reason:3}));
+});
+
+const RATES={currency:'USD',basis:'estimate_from_reported_usage',source:'x',checked:'2026-11-03',
+  muse:{model:'muse-spark-1.3',input_per_million:1.25,cached_input_per_million:.15,output_per_million:4.25},
+  sam:{model:'sam-3.1',per_thousand_frames:.2,min_billed_frames:50}};
+const near=(a,b)=>assert.ok(Math.abs(a-b)<1e-12,`${a} !== ${b}`);
+test('cost is priced from reported usage at the published rates',()=>{
+  const muse=(id,title,input,output,cached=0)=>usageEvent(id,title,{token_usage:true,request_id:id,usage_stage:'x',input_tokens:input,output_tokens:output,total_tokens:input+output,cached_tokens:cached,reasoning_tokens:0});
+  const sam=(id,frames)=>usageEvent(id,'SAM request usage',{token_usage:true,request_id:id,model:'sam-3.1',video_frames_processed:frames,input_tokens:0,output_tokens:0,total_tokens:0,cached_tokens:0});
+  const events=[muse('a','Scene analysis usage',6584,1165),muse('b','Critic request usage',10000,100,4000),sam('c',150),sam('d',20)];
+  const cost=projectCost(events,RATES);
+  near(cost.lines[0].usd,(6584*1.25+1165*4.25)/1e6);                       // plain input + output
+  near(cost.lines[1].usd,(6000*1.25+4000*.15+100*4.25)/1e6);                // cached input has its own rate
+  near(cost.lines[2].usd,150*.2/1000);                                      // SAM per frame
+  near(cost.lines[3].usd,50*.2/1000);                                       // a short SAM request is billed for the 50-frame minimum
+  near(cost.total,cost.lines.reduce((a,l)=>a+l.usd,0));near(cost.sam,.03+.01);near(cost.muse,cost.total-cost.sam);
+  assert.deepEqual(cost.stages.map(s=>s.stage),['analysis','sam','critic']);   // pipeline order, only stages that cost something
+  near(cost.stages.reduce((a,s)=>a+s.share,0),1);
+  assert.equal(cost.unpriced,0);assert.equal(cost.priced,true);
+});
+test('usage that was not reported is never turned into a made-up price',()=>{
+  const started=usageEvent('s','Tracking subject with SAM',{request_id:'r'});             // SAM request began, no usage arrived
+  const partial=usageEvent('m','Muse request usage',{request_id:'m1',input_tokens:100,total_tokens:100});  // output missing
+  const cost=projectCost([started,partial],RATES);
+  assert.equal(cost.total,0);assert.equal(cost.unpriced,2);assert.ok(cost.lines.every(l=>l.usd===null));
+  assert.equal(projectCost([started],RATES,'segment_subject').pending,true);                // a running request is pending, not unpriced
+  assert.equal(projectCost([started],RATES,'segment_subject').unpriced,0);
+  const none=projectCost([usageEvent('a','Scene analysis usage',{token_usage:true,request_id:'a',input_tokens:1,output_tokens:1,total_tokens:2})],null);
+  assert.equal(none.priced,false);assert.equal(none.total,0);assert.equal(none.unpriced,1);   // no rates published: unknown, not free
+  assert.equal(priceRow({stage:'sam',processedFrames:0},RATES),0);
+  near(priceRow({stage:'analysis',input:10,output:0,cached:99},RATES),10*.15/1e6);            // cached can never exceed input
+});
+test('only a complete, sane price list is accepted, and money never rounds to free',()=>{
+  assert.equal(parsePricing(RATES),RATES);
+  for(const bad of [null,{},{...RATES,currency:'EUR'},{...RATES,muse:{...RATES.muse,output_per_million:-1}},{...RATES,sam:{...RATES.sam,per_thousand_frames:'0.2'}},{...RATES,muse:null}])assert.equal(parsePricing(bad),null);
+  assert.equal(formatUsd(null),'—');assert.equal(formatUsd(NaN),'—');assert.equal(formatUsd(0),'$0.00');
+  assert.equal(formatUsd(.0043),'$0.0043');assert.equal(formatUsd(.8),'$0.80');assert.equal(formatUsd(1234.5),'$1,234.50');
+});
+
+const PROTECTIONS=['Keep original media unchanged; grades must be reversible.','Do not alter identity, invent scene content or claim reconstruction of missing detail.',
+  'Do not recolor meaningful products or markings without authorization.','Do not sacrifice subject legibility or introduce temporal artifacts without approval.'];
+const ENVELOPE=['Source: 3840x2160, 24.695s; h264; yuv420p.','Analysis used the complete silent proxy; source/proxy timing is recorded.','Silent clip only; no audio information available.',
+  'Assessment is visual only without camera or exposure metadata.','No numerical exposure or color values measured; descriptions are qualitative.','Fine detail limited by distance, compression, and water reflections.',
+  'SDR Rec.709 luminance tone, black/white points, bounded brightness and OCIO CDL saturation/RGB balance are supported. These are not calibrated scene-exposure or Kelvin estimates.',
+  'Rotation metadata in quarter turns (portrait phone video) is applied before analysis, masks and rendering. Localized grading requires a verified frame-index/native-PTS mapping and complete unambiguous SAM masks. Irregular source timing uses a separate tracking proxy; source timing is preserved. No physical relighting, reconstruction or shot matching.'];
+test('the four default protections become icon cards that keep their full sentence',()=>{
+  const cards=safeguards(PROTECTIONS);
+  assert.deepEqual(cards.map(c=>c.icon),['undo','user','tag','eye']);
+  assert.deepEqual(cards.map(c=>c.text),PROTECTIONS);                       // nothing reworded or dropped
+  assert.equal(safeguards(['Never touch the watermark.'])[0].icon,'shield');  // unknown rules still get a card
+  assert.equal(safeguards(['Never touch the watermark.'])[0].title,'Never touch the watermark');
+  assert.deepEqual(safeguards(['','  ']),[]);
+});
+test('the technical envelope is sorted into facts, supported controls, limits and what will not be done',()=>{
+  const e=parseEnvelope(ENVELOPE);
+  assert.deepEqual(e.facts.map(f=>[f.label,f.value]),[['Resolution','3840 × 2160'],['Duration','24.7 s'],['Codec','H.264'],['Pixel format','yuv420p']]);
+  assert.equal(e.facts[0].note,'4K UHD');
+  assert.deepEqual(e.supported,['SDR Rec.709 luminance tone','Black/white points','Bounded brightness','OCIO CDL saturation/RGB balance']);
+  assert.equal(e.supportedNote,'These are not calibrated scene-exposure or Kelvin estimates.');
+  assert.deepEqual(e.wont,['physical relighting','reconstruction','shot matching']);
+  assert.equal(e.handling.length,3);assert.deepEqual(e.handling.map(h=>h.icon),['rotate','clock','clock']);
+  assert.equal(e.limits.length,5);
+  assert.deepEqual(e.limits.map(l=>l.icon),['mute','mute','eye','ruler','layers']);
+  assert.deepEqual([e.limits[1].lead,e.limits[1].rest],['Silent clip only','No audio information available.']);   // split at the semicolon, never mid-word
+  assert.deepEqual([e.limits[0].lead,e.limits[0].rest],['Analysis used the complete silent proxy','Source/proxy timing is recorded.']);
+  assert.deepEqual([e.limits[2].lead,e.limits[2].rest],['','Assessment is visual only without camera or exposure metadata.']);   // no semicolon: the whole sentence, untruncated
+  // Every original sentence is still present somewhere (nothing is lost by sorting).
+  const shown=[...e.limits.map(l=>l.lead+' '+l.rest),...e.handling.map(h=>h.text)].join(' ');
+  for(const needle of ['complete silent proxy','visual only','qualitative','water reflections','quarter turns','native-PTS','tracking proxy','exposure metadata'])assert.match(shown,new RegExp(needle));
+  assert.equal(e.notes.length,0);
+});
+test('an envelope in another shape degrades to plain rows instead of breaking',()=>{
+  const e=parseEnvelope(['Source: weird','Some single note.','HDR is unsupported.']);
+  assert.equal(e.facts.length,0);assert.equal(e.limits.length,3);assert.equal(e.limits[0].rest,'Source: weird.');
+  assert.deepEqual(parseEnvelope([]),{facts:[],supported:[],supportedNote:'',limits:[],handling:[],wont:[],notes:[]});
+  assert.deepEqual(parseEnvelope(['Source: 1080x1920, 5s; hevc; yuv420p10le.']).facts.map(f=>f.value),['1080 × 1920','5.0 s','HEVC (H.265)','yuv420p10le']);
+  assert.equal(parseEnvelope(['Source: 1080x1920, 5s; hevc; yuv420p10le.']).facts[0].note,'Full HD portrait');
+  assert.equal(headline('A very long first clause that keeps going well past the limit; second'),'A very long first clause that keeps going wel…');
+  assert.equal(codecName('prores'),'ProRes');assert.equal(codecName('weird'),'WEIRD');assert.equal(sizeName(7,7),'');
+  assert.equal(seconds(24.695),'24.7 s');assert.equal(seconds(125),'2 min 5 s');assert.equal(megabytes(477646151),'455.5 MB');
+});
+test('markdown becomes data: headings, bold, bullet lists and paragraphs, never markup',()=>{
+  const blocks=parseMarkdown('## Look\n\nDeep **steel-blue** shadows,\nsoft light.\n\n- one\n- **two**\n\n### Target\n**Final**');
+  assert.deepEqual(blocks.map(b=>b.kind),['heading','paragraph','list','heading','paragraph']);
+  assert.equal(blocks[0].level,2);assert.equal(blocks[3].level,3);
+  assert.deepEqual(blocks[1].inline,[{text:'Deep ',bold:false},{text:'steel-blue',bold:true},{text:' shadows, soft light.',bold:false}]);
+  assert.equal(blocks[2].items.length,2);assert.equal(blocks[2].items[1][0].bold,true);
+  assert.deepEqual(inline('<img src=x onerror=alert(1)>'),[{text:'<img src=x onerror=alert(1)>',bold:false}]);   // stays text
+  assert.deepEqual(parseMarkdown(''),[]);assert.deepEqual(parseMarkdown('  \n \n'),[]);
+  assert.equal(parseMarkdown('# a\r\ntext\r\n')[1].kind,'paragraph');
+});
+test('grade controls are measured against the backend bounds and neutral is marked, not painted',()=>{
+  const contrast=CONTROLS.find(c=>c.key==='contrast'),black=CONTROLS.find(c=>c.key==='black_point'),white=CONTROLS.find(c=>c.key==='white_point');
+  const c=cellFor(contrast,1.1);assert.ok(Math.abs(c.neutralAt-.5)<1e-9);assert.ok(Math.abs(c.at-.7)<1e-9);assert.equal(c.description,'+10% from neutral');assert.equal(c.text,'1.10');
+  assert.equal(cellFor(contrast,1).changed,false);assert.equal(cellFor(contrast,1).description,'unchanged');
+  assert.equal(cellFor(CONTROLS.find(k=>k.key==='saturation'),.7).description,'−30% from neutral');
+  assert.equal(cellFor(black,0).neutralAt,0);assert.equal(cellFor(white,1).neutralAt,1);        // neutral at an edge: the fill grows one way only
+  assert.equal(cellFor(black,.01).description,'+0.010 from neutral');
+  assert.equal(cellFor(contrast,9).at,1);assert.equal(cellFor(contrast,-9).at,0);                // out-of-bounds values never leave the track
+  assert.equal(cellFor(contrast,undefined),null);assert.equal(cellFor(contrast,NaN),null);
+});
+test('a recipe is split into the areas it grades separately, and rows nobody changes are left out',()=>{
+  const v=(extra={})=>({contrast:1,saturation:1,gamma:1,...extra});
+  const local={proposal:{mode:'localized',parameters:v(),local:{concept:'passenger boat',foreground:v({contrast:1.08}),background:v({saturation:.85}),
+    regions:[{concept:'sky',treatment:v({saturation:.7})},{concept:'water',treatment:v()}]}}};
+  const layers=layersOf(local);
+  assert.deepEqual(layers.map(l=>l.name),['Passenger boat','Sky','Water','Everything else']);
+  assert.deepEqual(layers.map(l=>l.role),['subject','region','region','background']);
+  assert.deepEqual(activeControls(layers).map(c=>c.key),['contrast','saturation']);
+  assert.deepEqual(layersOf({proposal:{parameters:v({gamma:.9})}}).map(l=>l.name),['Whole frame']);
+  for(const none of [null,undefined,{},{proposal:{}},{proposal:{local:{}}}])assert.deepEqual(layersOf(none),[]);
+});
+test('one stepper carries every step with the same phases and times the progress model derives',()=>{
+  const timing={byStep:{prepare:18000,inspect:13000},parts:{plan:2000,render:7000},visits:[{segment:'render',ms:3000}],running:true};
+  const state={status:'rendering',stage:'render_local_grade',source:{},preview:{},analysis:{},brief:{},events:[],candidates:[],id:'x'};
+  const pipeline={segments:[{id:'inspect',phase:'done'},{id:'clarify',phase:'done'},{id:'brief',phase:'done'},{id:'plan',phase:'done'},
+    {id:'masks',phase:'skipped'},{id:'render',phase:'active',fraction:.4},{id:'check',phase:'pending'},{id:'review',phase:'skipped'}],detail:'40% encoded'};
+  const rows=runSteps(state,pipeline,timing);
+  assert.deepEqual(rows.map(r=>r.id),['prepare','inspect','clarify','brief','plan','masks','render','check','review']);
+  assert.equal(rows[0].phase,'done');assert.equal(rows[0].ms,18000);
+  const render=rows.find(r=>r.id==='render');
+  assert.equal(render.phase,'active');assert.equal(render.ms,3000);assert.equal(render.fraction,.4);assert.equal(render.detail,'40% encoded');   // the running step shows its live visit clock
+  assert.equal(rows.find(r=>r.id==='plan').ms,2000);assert.equal(rows.find(r=>r.id==='masks').phase,'skipped');
+  assert.equal(rows.find(r=>r.id==='check').ms,null);
+  // Before anything has run, the whole path is still listed, so the person sees what is ahead.
+  const fresh=runSteps({status:'ready',stage:'ready',source:{},preview:{},id:'x',events:[]},null,{byStep:{},parts:{},visits:[],running:false});
+  assert.equal(fresh.length,9);assert.equal(fresh[0].phase,'done');assert.ok(fresh.slice(1).every(r=>r.phase==='pending'));
+  assert.equal(runSteps({status:'ingesting',stage:'prepare_preview',id:'x',events:[]},null,{byStep:{},parts:{},visits:[],running:true})[0].phase,'active');
+});
+
+test('the caption and overall bar count the same rows the list shows',()=>{
+  const row=(id,phase,extra={})=>({id,name:id,phase,ms:null,...extra});
+  const rows=[row('prepare','done'),row('inspect','done'),row('clarify','done'),row('brief','done'),row('plan','done'),row('masks','active',{fraction:.5,name:'Subject masks (SAM)'}),
+    row('render','pending'),row('check','pending'),row('review','skipped')];
+  const p=stepProgress(rows);
+  assert.equal(p.text,'Step 6 of 8: Subject masks (SAM)');assert.equal(p.total,8);assert.equal(p.value,5.5);   // prepare counts, the skipped review does not
+  assert.equal(stepProgress(rows.map(r=>r.phase==='skipped'?r:{...r,phase:'done',fraction:undefined})).text,'All steps complete');
+  assert.equal(stepProgress([row('prepare','done'),row('inspect','pending')]).text,'1 of 2 steps complete');
+  assert.equal(stepProgress([row('prepare','done'),row('clarify','waiting',{name:'Questions'})]).text,'Step 2 of 2: Questions (waiting for you)');
+  assert.equal(stepProgress([row('prepare','done'),row('render','failed',{name:'Render'})]).text,'Step 2 of 2: Render (stopped)');
+  assert.equal(stepProgress([row('prepare','active',{name:'Prepare source'})]).text,'Step 1 of 1: Prepare source');
 });

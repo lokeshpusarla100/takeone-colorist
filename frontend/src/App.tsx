@@ -15,15 +15,17 @@ import LooksPanel from './components/LooksPanel';
 import MemoryView from './components/MemoryView';
 import SamPanel from './components/SamPanel';
 import { mutationLocked } from './lib/workflow';
+import { loadAutoRender, saveAutoRender } from './lib/autoRender';
 
 export default function App() {
   const w=useWorkspace();
   const {project,busy,error,reportError}=w;
-  const consultation=useConsultation(project,w.update,reportError);
+  const [autoRender,setAutoRender]=useState(loadAutoRender);
+  const [direction,setDirection]=useState('');
+  const consultation=useConsultation(project,w.update,reportError,{enabled:autoRender,direction});
   const [sessions,setSessions]=useState(false);
   const [memoryOpen,setMemoryOpen]=useState(false);
   const [feedback,setFeedback]=useState('');
-  const [direction,setDirection]=useState('');
   const sourceInput=useRef<HTMLInputElement>(null);
   const renderInput=useRef<HTMLInputElement>(null);
   useEffect(()=>setDirection(project?.direction??''),[project?.id,project?.direction]);
@@ -111,9 +113,10 @@ export default function App() {
         </div>}
         <RubricPanel key={'rubric:'+project.id} state={project.backend} health={consultation.health} online={consultation.online} busy={busy||!!project.pendingBackend} error={error}
           sending={sending} hasSource={!!project.source} direction={direction} onDirection={setDirection}
+          autoRender={autoRender} onAutoRender={on=>{setAutoRender(on);saveAutoRender(on);}}
           onSaveDirection={()=>w.saveDirection(direction)}
           onStart={()=>{w.saveDirection(direction);w.clearError();void consultation.start(direction);}}
-          onAnswer={(id,type,response)=>{w.clearError();void consultation.answer(id,type,response);}}
+          onAnswer={answers=>{w.clearError();void consultation.answer(answers);}}
           onRetry={()=>{w.clearError();void consultation.retry();}} onCancel={()=>void consultation.cancel()}
           onPrepare={()=>void w.prepareExisting()} onDownload={()=>{
             try{downloadBlob(new Blob([JSON.stringify(project.backend?.brief,null,2)],{type:'application/json'}),'creative-brief.json');}
@@ -125,6 +128,7 @@ export default function App() {
           onSelect={lookId=>{w.clearError();void consultation.selectLook(lookId);}}/>
         <RenderPanel state={project.backend} health={consultation.health} online={consultation.online}
           sending={sending||busy||!!project.pendingBackend} direction={direction}
+          autoStarted={!!project.backend?.brief_sha256&&consultation.autoStarted===project.backend.id+':'+project.backend.brief_sha256}
           onGenerate={()=>{w.clearError();void consultation.generate();}}
           onRetry={()=>{w.clearError();void consultation.retry();}} onCancel={()=>void consultation.cancel()}
           viewCandidateId={selected?.candidateId} onReview={id=>{w.clearError();void consultation.review(id);}}

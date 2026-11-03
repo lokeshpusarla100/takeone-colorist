@@ -352,14 +352,14 @@ def _elapsed(profile,name,operation):
 
 
 def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
-           settings: Settings, cancel: threading.Event, *, on_stage=None,qc_mode='optimized',tier='full',after_encode=None):
+           settings: Settings, cancel: threading.Event, *, on_stage=None,qc_mode='optimized',tier='full',after_encode=None,on_progress=None):
     """after_encode(partial_master_path) is called once encoding finishes, before the integrity decode,
     so independent output checks can run alongside it."""
     if qc_mode not in {'optimized','reference'}:raise ValueError('Unknown render QC mode')
     started=time.monotonic();profile={'qc_mode':qc_mode,'tier':tier}
     draft=draft_size(original.width,original.height,settings.draft_long_side) if tier=='draft' else None
     try:
-        result=_render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,profile,draft,after_encode)
+        result=_render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,profile,draft,after_encode,on_progress)
         result['tier']='draft' if draft else 'full'
         profile['total_seconds']=time.monotonic()-started;result['performance']=dict(profile)
         return result
@@ -368,7 +368,7 @@ def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
         raise
 
 
-def _render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,profile,draft=None,after_encode=None):
+def _render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,profile,draft=None,after_encode=None,on_progress=None):
     source_meta = _elapsed(profile,'source_verify_seconds',lambda:verify_source(source,original,settings,cancel))
     directory.mkdir(exist_ok=True)
     policy=timing.encoding_policy(source_meta)
@@ -387,7 +387,7 @@ def _render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,pr
         if path.exists():path.rename(path.with_name(path.name+'.previous-'+uuid4().hex[:8]))
     args[1:1]=['-progress',str(progress_path),'-stats_period','1']
     _elapsed(profile,'encode_seconds',lambda:command(args,cancel,None,cwd=directory.resolve(),
-        progress_path=progress_path,stall_timeout=120))
+        progress_path=progress_path,stall_timeout=120,on_progress=on_progress))
     if on_stage:on_stage('check_output_quality')
     master = directory / "grade.partial.mp4"
     if after_encode:after_encode(master)

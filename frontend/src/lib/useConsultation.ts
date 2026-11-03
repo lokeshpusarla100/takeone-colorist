@@ -3,9 +3,10 @@ import type { Project } from './types';
 import { AppError } from './errors';
 import * as api from './api';
 import { withRenderedVersions } from './renderedVersions';
+import { autoRenderKey, consultationRunning, shouldAutoRender } from './autoRender';
 
 export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Project)=>void,
-  reportError:(cause:unknown,stage:string)=>void) {
+  reportError:(cause:unknown,stage:string)=>void,auto?:{enabled:boolean;direction:string}) {
   const [health,setHealth]=useState<api.Health|null>(null);
   const [online,setOnline]=useState(false);
   const [sending,setSending]=useState(false);
@@ -16,6 +17,9 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
   const selectionInFlight=useRef(false);
   const cancelInFlight=useRef(false);
   const reported=useRef('');
+  const armed=useRef<string|null>(null);              // project whose consultation this tab watched
+  const attempts=useRef(new Map<string,number>());    // automatic starts per brief
+  const [autoStarted,setAutoStarted]=useState<string|null>(null);
   const current=useRef(project);current.current=project;
   useEffect(()=>{
     let cancelled=false;
@@ -57,7 +61,7 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
     void poll();
     return()=>{aborter.abort();clearTimeout(timer);};
   },[project?.backend?.id,refresh,apply,online]);
-  const send=async(kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select'|'render-supported'|'use-all-matches'|'render-full',body:Record<string,unknown>)=>{
+  const send=async(kind:'analyze'|'answers'|'answers/round'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select'|'render-supported'|'use-all-matches'|'render-full',body:Record<string,unknown>)=>{
     const source=current.current;
     if(!source?.backend||inFlight.current||selectionInFlight.current||cancelInFlight.current||api.activeJob(source.backend))return false;
     if((kind==='looks'||kind==='looks/select')&&health?.look_previews_connected!==true){
@@ -75,6 +79,21 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
       return false;
     }finally{inFlight.current=false;setSending(false);setRefresh(n=>n+1);}
   };
+  // When the consultation hands over its brief, start the first grade by itself (see autoRender.ts for the rules).
+  useEffect(()=>{
+    const state=project?.backend;
+    if(!state)return;
+    if(consultationRunning(state))armed.current=state.id;
+    // The choice is made when the brief arrives: switched off then, this consultation never renders by itself,
+    // even if the switch is turned on afterwards.
+    else if(state.status==='brief_ready'&&armed.current===state.id&&!auto?.enabled)armed.current=null;
+    const key=state.brief_sha256?autoRenderKey(state):'';
+    const input={state,armed:armed.current===state.id,enabled:!!auto?.enabled,online,health,direction:auto?.direction??'',
+      attempts:attempts.current.get(key)??0,busy:sending||selecting||cancelling||inFlight.current};
+    if(!shouldAutoRender(input))return;
+    attempts.current.set(key,input.attempts+1);setAutoStarted(key);
+    void send('render',{}).then(started=>{if(started&&armed.current===state.id)armed.current=null;});
+  },[project?.backend,auto?.enabled,auto?.direction,online,health,sending,selecting,cancelling]);
   const stop=async()=>{
     const source=current.current;
     if(!source?.backend||!api.activeJob(source.backend)||cancelInFlight.current||source.backend.stage==='cancelling')return;
@@ -84,11 +103,9 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
     catch(cause){if(current.current?.backend?.id===id)reportError(cause,'backend.cancel');}
     finally{cancelInFlight.current=false;setCancelling(false);}
   };
-  return {health,online,sending,selecting,cancelling,
+  return {health,online,sending,selecting,cancelling,autoStarted,
     start:(request:string)=>send('analyze',{request}),
-    answer:(questionId:string,responseType:string,response:string)=>send('answers',{
-      answer:{question_id:questionId,response_type:responseType,response},
-    }),
+    answer:(answers:api.AnswerInput[])=>send('answers/round',{answers}),
     retry:()=>send('retry',{}),cancel:stop,
     generate:()=>send('render',{}),
     generateLooks:()=>send('looks',{}),

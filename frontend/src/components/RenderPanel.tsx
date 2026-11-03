@@ -1,8 +1,8 @@
 import type { BackendState, GradeValues, Health } from '../lib/api';
 import { activeJob, stageLabel } from '../lib/api';
 
-export default function RenderPanel({state,health,sending,online,direction,onGenerate,onRetry,onCancel,onReview,onRenderSupported,onUseAllMatches,onRenderFull,viewCandidateId}:{
-  state?:BackendState;health:Health|null;sending:boolean;online:boolean;direction:string;
+export default function RenderPanel({state,health,sending,online,direction,autoStarted=false,onGenerate,onRetry,onCancel,onReview,onRenderSupported,onUseAllMatches,onRenderFull,viewCandidateId}:{
+  state?:BackendState;health:Health|null;sending:boolean;online:boolean;direction:string;autoStarted?:boolean;
   onGenerate:()=>void;onRetry:()=>void;onCancel:()=>void;
   onReview:(id:string)=>void;onRenderSupported?:(id:string)=>void;onUseAllMatches?:(id:string)=>void;onRenderFull?:(id:string)=>void;viewCandidateId?:string;
 }) {
@@ -21,6 +21,7 @@ export default function RenderPanel({state,health,sending,online,direction,onGen
         {selected?'Generate another version':'Generate graded video'}</button>
     </div>
     <p className="inline-help">Muse plans from bounded adaptive visual evidence, measurements and the current brief. Localized plans obtain SAM masks automatically. Substantive candidates can receive a rendered-evidence critique and up to three render iterations. Model review is an opinion; final approval remains yours. Muse and SAM calls may incur usage.</p>
+    {autoStarted&&running&&<p className="inline-help">Grading started automatically when the questions finished. Cancel it below, or turn this off next to the direction.</p>}
     {changed&&<p className="inline-help">The direction has changed. Complete its updated brief before generating a grade.</p>}
     {running&&<div className="consultation-status" role="status"><span>{stageLabel(state.stage)}</span>
       <button disabled={sending||!online||state.stage==='cancelling'} onClick={onCancel}>Cancel render</button></div>}

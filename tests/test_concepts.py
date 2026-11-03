@@ -94,7 +94,9 @@ def test_region_phrases_fall_back_too(settings, scene):
         assert result['status'] == 'render_ready', result.get('error')
         region = result['candidates'][-1]['validation']['mask_validation']['regions'][0]
         assert region['concept'] == 'pale hazy sky above horizon' and region['concept_used'] == 'sky'
-        assert masks.calls == ['red subject', 'pale hazy sky above horizon', 'pale hazy sky', 'sky']
+        # Subject and region requests run concurrently (sam_parallel): only each area's own fallback order is fixed.
+        assert sorted(masks.calls) == sorted(['red subject', 'pale hazy sky above horizon', 'pale hazy sky', 'sky'])
+        assert [c for c in masks.calls if c != 'red subject'] == ['pale hazy sky above horizon', 'pale hazy sky', 'sky']
 
 
 def test_nothing_found_is_a_clear_error_and_a_retry_does_not_rebill(settings, scene):

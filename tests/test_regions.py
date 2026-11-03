@@ -77,7 +77,7 @@ def test_sky_region_gets_its_own_grade_while_subject_and_background_keep_theirs(
         assert after[sky][..., 0].mean() > after[sky][..., 2].mean() + 8  # BGR: blue above red, cool
         assert before[ground].mean() - 25 < after[ground].mean() < before[ground].mean() - 3  # background's gentler darkening
         assert np.abs(after[subject] - before[subject]).mean() < 4  # protected subject untouched
-        assert masks.calls == ['red subject', 'sky']
+        assert sorted(masks.calls) == ['red subject', 'sky']  # requested concurrently (sam_parallel)
         candidate = result['candidates'][-1]
         regions = candidate['validation']['mask_validation']['regions']
         assert [r['concept'] for r in regions] == ['sky'] and regions[0]['active_frames'] == 12

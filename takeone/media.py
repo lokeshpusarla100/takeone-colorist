@@ -11,15 +11,17 @@ from .contracts import Source, Preview
 from .errors import Problem
 
 
-def command(args: list[str], cancel: threading.Event, timeout: float | None = 180, *, binary=False,cwd=None,progress_path=None,stall_timeout=None):
-    """Run a cancellable tool. Timeouts bound inactivity, not productive work."""
+def command(args: list[str], cancel: threading.Event, timeout: float | None = 180, *, binary=False,cwd=None,progress_path=None,stall_timeout=None,on_progress=None):
+    """Run a cancellable tool. Timeouts bound inactivity, not productive work.
+    on_progress(values) receives ffmpeg's -progress fields (frame, out_time_us, speed...) whenever they change;
+    it only observes: an error in it never affects the tool run."""
     try:
         process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=not binary,cwd=cwd)
     except FileNotFoundError:
         raise Problem("MEDIA_TOOL_MISSING", "FFmpeg or FFprobe is not installed.",
                       "Set the tool paths or install the required media tools.", 503)
     start = time.monotonic()
-    last_advance=start;last_frame=-1;progress={};last_cpu=0
+    last_advance=start;last_frame=-1;progress={};last_cpu=0;reported=None
     while True:
         try:
             stdout, stderr = process.communicate(timeout=0.2)
@@ -34,6 +36,10 @@ def command(args: list[str], cancel: threading.Event, timeout: float | None = 18
                 try:frame=int(progress.get('frame','-1'))
                 except ValueError:frame=-1
                 if frame>last_frame:last_frame=frame;last_advance=time.monotonic()
+                if on_progress and (progress.get('frame'),progress.get('out_time_us'))!=reported:
+                    reported=(progress.get('frame'),progress.get('out_time_us'))
+                    try:on_progress(dict(progress))
+                    except Exception:on_progress=None
             if timeout is not None or stall_timeout is not None:
                 # Encoding can spend time on a frame or final muxing. On Linux,
                 # meaningful CPU work also proves that processing is advancing;

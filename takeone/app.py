@@ -33,6 +33,9 @@ class StartCommand(Command):
 class AnswerCommand(Command):
     answer: Answer
 
+class AnswersCommand(Command):
+    answers: list[Answer] = Field(min_length=1, max_length=5)
+
 class SegmentCommand(Command):
     concept: str = Field(min_length=1,max_length=120)
     duration_seconds: float | None = Field(default=None,ge=1,le=120)
@@ -167,6 +170,10 @@ def create_app(settings: Settings | None = None, provider=None, sam_provider=Non
     def get_state(project_id: UUID):
         return service().store.get(str(project_id)).public()
 
+    @application.get("/api/projects/{project_id}/progress")
+    def get_progress(project_id: UUID):
+        return {"live": service().live_progress(str(project_id))}
+
     @application.get("/api/projects/{project_id}/preview")
     def get_preview(project_id: UUID):
         state = service().store.get(str(project_id))
@@ -198,6 +205,10 @@ def create_app(settings: Settings | None = None, provider=None, sam_provider=Non
     @application.post("/api/projects/{project_id}/answers", status_code=202)
     def answer(project_id: UUID, body: AnswerCommand):
         return service().answer(str(project_id), body.answer, body.revision, str(body.command_id)).public()
+
+    @application.post("/api/projects/{project_id}/answers/round", status_code=202)
+    def answer_round(project_id: UUID, body: AnswersCommand):
+        return service().answer_all(str(project_id), body.answers, body.revision, str(body.command_id)).public()
 
     @application.post("/api/projects/{project_id}/retry", status_code=202)
     def retry(project_id: UUID, body: Command):

@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import type { BackendState, Health } from '../lib/api';
+import type { AnswerInput, BackendState, Health } from '../lib/api';
 import { activeJob, stageLabel } from '../lib/api';
 import RubricDialog from './RubricDialog';
 import type { AppError } from '../lib/errors';
 
-export default function RubricPanel({state,health,online,busy,sending,hasSource,direction,onDirection,onSaveDirection,
+export default function RubricPanel({state,health,online,busy,sending,hasSource,direction,onDirection,onSaveDirection,autoRender,onAutoRender,
   onStart,onAnswer,onRetry,onCancel,onPrepare,onDownload,error}:{
   state?:BackendState;health:Health|null;online:boolean;busy:boolean;sending:boolean;hasSource:boolean;
   direction:string;onDirection:(text:string)=>void;onSaveDirection:()=>void;onStart:()=>void;
-  onAnswer:(id:string,type:string,response:string)=>void;onRetry:()=>void;onCancel:()=>void;
+  autoRender:boolean;onAutoRender:(on:boolean)=>void;
+  onAnswer:(answers:AnswerInput[])=>void;onRetry:()=>void;onCancel:()=>void;
   onPrepare:()=>void;onDownload:()=>void;
   error?:AppError|null;
 }) {
@@ -18,9 +19,16 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
   const changed=!!state&&direction.trim()!==state.request;
   const disabled=busy||sending||working;
   const question=state?.status==='awaiting_answer'?state.question:null;
+  const round=question?Math.max(1,state?.pending_questions?.length??1):0;
   const brief=state?.brief;
   useEffect(()=>{if(question&&!changed)setOpen(true);},[state?.id,state?.request,question?.id,changed]);
   useEffect(()=>{if(!open)trigger.current?.focus();},[open]);
+  // The questions are done: with automatic grading the dialog gets out of the way so the progress is visible.
+  const asked=useRef(false);
+  useEffect(()=>{
+    if(question)asked.current=true;
+    else if(asked.current&&brief&&!changed){asked.current=false;if(autoRender)setOpen(false);}
+  },[question,brief,changed,autoRender]);
   const close=()=>setOpen(false);
   return <section className="direction rubric-panel" aria-label="Creative direction consultation">
     <label htmlFor="direction">Creative direction</label>
@@ -28,6 +36,8 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
       placeholder="Describe the changes you want and anything to preserve. Leave blank to delegate the direction."
       onChange={e=>onDirection(e.target.value)} onBlur={onSaveDirection}/>
     <p className="inline-help" role={direction.length>16000?'alert':undefined}>{direction.length.toLocaleString()} / 16,000 characters{direction.length>16000?' · Request is too long to submit. Your text is kept; shorten it to continue.':''}</p>
+    <label className="auto-render"><input type="checkbox" checked={autoRender} onChange={e=>onAutoRender(e.target.checked)}/>
+      <span>Start grading automatically when the questions are done <small>(uses Muse{' '}and SAM)</small></span></label>
     {!online&&<p className="inline-help">Backend unavailable. Start the Python server to prepare footage and run the consultation.</p>}
     {online&&!health?.muse_configured&&<p className="inline-help">Set MODEL_API_KEY in the root .env, then refresh this page to enable Muse.</p>}
     {hasSource&&!state&&<div className="consultation-actions"><span>This saved video needs backend preparation.</span>
@@ -44,8 +54,8 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
     </div>}
     {question&&changed&&<p className="inline-help">The request has changed. Start with the new direction to update the questions.</p>}
     {state&&(state.analysis||question||brief)&&<div className="consultation-actions">
-      <span>{question&&!changed?'Muse has a question for you.':`${state.answered_count} answers saved.`}</span>
-      <button ref={trigger} onClick={()=>setOpen(true)}>{question&&!changed?'Answer question':'Review Q&A'}</button></div>}
+      <span>{question&&!changed?(round>1?`Muse has ${round} questions for you.`:'Muse has a question for you.'):`${state.answered_count} answers saved.`}</span>
+      <button ref={trigger} onClick={()=>setOpen(true)}>{question&&!changed?(round>1?'Answer questions':'Answer question'):'Review Q&A'}</button></div>}
     <RubricDialog open={open} onClose={close} state={state} disabled={disabled} online={online} changed={changed}
       onAnswer={onAnswer} onRetry={onRetry} onCancel={onCancel} error={error}/>
     {brief&&<section className="creative-brief" aria-labelledby="brief-heading">

@@ -28,9 +28,9 @@ export default function SessionPanel({events,onExport,state,localBusy=false,loca
           setTab(next);document.getElementById('tab-'+next)?.focus();
         }}>{name==='progress'?'Progress':'Session log'}</button>)}
     </div>
-    <TokenUsage state={state}/>
     <div role="tabpanel" id="panel-progress" aria-labelledby="tab-progress" hidden={tab!=='progress'}>
       <ProgressPanel state={state} localBusy={localBusy} localProgress={localProgress} sending={sending} online={online}/>
+      <TokenUsage state={state}/>
     </div>
     <div role="tabpanel" id="panel-log" aria-labelledby="tab-log" hidden={tab!=='log'}>
     <div className="log-tools"><input type="search" aria-label="Search session log" placeholder="Search log" value={query} onChange={e=>setQuery(e.target.value)}/>

@@ -37,6 +37,15 @@ class Settings:
     # 'rows' (one object per frame, the verified default) or 'columns' (field names once, same facts):
     # columns needs ~29% fewer JSON tokens; enable only after scripts/critic_layout_ab.py shows equal reviews.
     critic_table_layout: str = 'rows'
+    # SAM requests for the subject and each region of one render run concurrently (their time is network
+    # latency); 1 restores strictly sequential requests.
+    sam_parallel: int = 3
+    # Consultation questions: 'batch' asks each round's independent questions together (one call per
+    # round); 'one_at_a_time' makes one call per question. Saved sessions keep the mode they started with.
+    rubric_mode: str = 'batch'
+    # Skip the round-closing call when Muse predicted no follow-up for the options chosen. Off until the
+    # recorded predictions (question_proposals) are shown to agree with the closing call.
+    rubric_skip_closing: bool = False
 
     @classmethod
     def from_env(cls):
@@ -65,4 +74,7 @@ class Settings:
             max_render_iterations=max(1,min(3,int(os.getenv('TAKEONE_MAX_RENDER_ITERATIONS','3')))),
             draft_long_side=max(0,int(os.getenv('TAKEONE_DRAFT_LONG_SIDE','1920'))),
             critic_table_layout='columns' if os.getenv('TAKEONE_CRITIC_TABLE_LAYOUT','rows').strip()=='columns' else 'rows',
+            sam_parallel=max(1,min(6,int(os.getenv('TAKEONE_SAM_PARALLEL','3')))),
+            rubric_mode='one_at_a_time' if os.getenv('TAKEONE_RUBRIC_MODE','batch').strip()=='one_at_a_time' else 'batch',
+            rubric_skip_closing=os.getenv('TAKEONE_RUBRIC_SKIP_CLOSING','').strip().lower() in {'1','true','yes'},
         )

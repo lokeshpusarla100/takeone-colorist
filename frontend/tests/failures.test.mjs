@@ -11,7 +11,9 @@ const {parseBackend,request,waitForSource,command,health,upload}=await load('api
 const {preparedSource}=await load('preparedSource');
 const {tokenUsage}=await load('tokenUsage');
 const {mutationLocked,runProgress}=await load('workflow');
-const {processingTimings,formatDuration}=await load('progressTiming');
+const {processingTimings,formatDuration,lastTime}=await load('progressTiming');
+const {runPipeline,parseLive,formatEta,segmentOfStage}=await load('progressModel');
+const {shouldAutoRender,consultationRunning,loadAutoRender,saveAutoRender,MAX_AUTO_ATTEMPTS}=await load('autoRender');
 const {validateRenderImport}=await load('renderImport');
 test('proportional playback previews can be compared without claiming master resolution',()=>{
   const source={width:3840,height:2160,duration:24.695222};
@@ -148,6 +150,7 @@ test('progress distinguishes waiting for a single answer from model processing a
   assert.equal(waiting.working,false);
   assert.equal(waiting.steps[2].phase,'waiting');
   assert.match(waiting.steps[2].detail,/answer 2/);
+  assert.match(runProgress({...state,pending_questions:[{},{},{}]}).steps[2].detail,/answers to 3 questions/);
   const processing=runProgress({...state,status:'analyzing',stage:'select_question'});
   assert.equal(processing.working,true);
   assert.equal(processing.steps[2].phase,'active');
@@ -455,4 +458,134 @@ test('look previews require a valid image reference and a selectable stored look
   assert.throws(()=>parseBackend({...withLooks,looks:[{...look,image_url:'https://untrusted.invalid/look.jpg'}]}),{code:'API_RESPONSE_INVALID'});
   assert.throws(()=>parseBackend({...withLooks,selected_look_id:crypto.randomUUID()}),{code:'API_RESPONSE_INVALID'});
   assert.throws(()=>parseBackend({...withLooks,looks:[{...look,proposal:{...look.proposal,parameters:{contrast:'x'}}}]}),{code:'API_RESPONSE_INVALID'});
+});
+
+// ---- Pipeline progress, continuous run time, automatic start ----------------------------------------------------
+const piece=(state,live)=>runPipeline({source:{},preview:{},analysis:{},brief:null,answered_count:0,max_questions:5,...state},live);
+const phases=pipeline=>pipeline.segments.map(s=>s.id+':'+s.phase).join(' ');
+test('the pipeline places the run by its backend stage and only fills what is measured',()=>{
+  const asking=piece({status:'analyzing',stage:'select_question'});
+  assert.equal(phases(asking),'inspect:done clarify:active brief:pending plan:pending masks:pending render:pending check:pending review:pending');
+  assert.equal(asking.text,'Step 2 of 8: Q&A');assert.equal(asking.measured,false);assert.equal(asking.value,1);
+  const waiting=piece({status:'awaiting_answer',stage:'awaiting_answer'});
+  assert.equal(waiting.segments[1].phase,'waiting');assert.match(waiting.text,/waiting for you/);
+  const planning=piece({status:'rendering',stage:'plan_grade',brief:{},candidates:[{status:'planning'}]});
+  assert.equal(phases(planning),'inspect:done clarify:done brief:done plan:active masks:pending render:pending check:pending review:pending');
+  const encoding=piece({status:'rendering',stage:'render_grade',brief:{},candidates:[{status:'rendering',recipe:{proposal:{mode:'global'}}}]},
+    {stage:'render_grade',kind:'encode',fraction:.42,speed:1.5,eta_seconds:90,encoded_seconds:8.4,total_seconds:20});
+  assert.equal(encoding.segments.find(s=>s.id==='masks').phase,'skipped');  // a whole-frame grade needs no masks
+  assert.equal(encoding.total,7);assert.equal(encoding.text,'Step 5 of 7: Render, 42%');assert.equal(encoding.measured,true);
+  assert.equal(encoding.value,4.42);assert.match(encoding.detail,/42% encoded · 1\.5× real time · about 2 min left/);
+});
+test('a measurement from another stage never fills the bar',()=>{
+  const state={status:'rendering',stage:'render_grade',brief:{},candidates:[{status:'rendering',recipe:{proposal:{mode:'global'}}}]};
+  assert.equal(piece(state,{stage:'render_local_grade',kind:'encode',fraction:.9,speed:1,eta_seconds:1,encoded_seconds:1,total_seconds:1}).measured,false);
+  assert.equal(piece({...state,stage:'check_output_quality'},{stage:'render_grade',kind:'encode',fraction:.9,speed:1,eta_seconds:1,encoded_seconds:1,total_seconds:1}).measured,false);
+  assert.equal(piece(state,null).measured,false);
+});
+test('tracked frames fill the masks segment and a revision pass restarts the later steps',()=>{
+  const tracking=piece({status:'rendering',stage:'segment_subject',brief:{},candidates:[{status:'rendering',recipe:{proposal:{mode:'localized'}}}],
+    segmentations:[{status:'streaming',frame_count:200,received_frames:50,frames_with_masks:0}]});
+  assert.equal(tracking.segments.find(s=>s.id==='masks').fraction,.25);assert.match(tracking.detail,/50 frames of 200 tracked/);
+  const revising=piece({status:'rendering',stage:'plan_revision',brief:{},candidates:[{status:'ready',creative_review:{},recipe:{proposal:{mode:'localized'}}},{status:'planning'}]});
+  assert.equal(phases(revising),'inspect:done clarify:done brief:done plan:active masks:pending render:pending check:pending review:pending');
+});
+test('finished, failed and unreviewed runs are described without inventing progress',()=>{
+  const done=piece({status:'render_ready',stage:'render_ready',brief:{},candidates:[{status:'ready',creative_review:{},recipe:{proposal:{mode:'global'}}}]});
+  assert.equal(done.text,'All steps complete');assert.equal(done.segments.find(s=>s.id==='review').phase,'done');
+  const unreviewed=piece({status:'render_ready',stage:'render_ready',brief:{},candidates:[{status:'ready',recipe:{proposal:{mode:'global'}}}]});
+  assert.equal(unreviewed.segments.find(s=>s.id==='review').phase,'skipped');
+  const failed=piece({status:'failed',stage:'validate_local_masks',brief:{},candidates:[{status:'failed',recipe:{proposal:{mode:'localized'}}}]});
+  assert.equal(failed.segments.find(s=>s.id==='masks').phase,'failed');assert.match(failed.text,/stopped/);
+  assert.equal(runPipeline(undefined),null);assert.equal(runPipeline({status:'ingesting',stage:'inspect_source',source:null,preview:null}),null);
+});
+test('live measurements are validated and clamped; unknown stages map to no segment',()=>{
+  assert.equal(parseLive(null),null);assert.equal(parseLive({kind:'encode',stage:'x',fraction:'1'}),null);
+  assert.equal(parseLive({kind:'encode',stage:'render_grade',fraction:1.7,encoded_seconds:1,total_seconds:2}).fraction,1);
+  assert.equal(parseLive({kind:'encode',stage:'render_grade',fraction:.5,encoded_seconds:1,total_seconds:2,speed:null,eta_seconds:null}).speed,null);
+  assert.equal(segmentOfStage('select_looks'),null);assert.equal(segmentOfStage('render_final'),'render');
+  assert.equal(formatEta(20),'under a minute left');assert.equal(formatEta(200),'about 3 min left');assert.equal(formatEta(NaN),'');
+});
+test('active time runs across the consultation and the render but not across waits or an earlier direction',()=>{
+  const events=[timingEvent('a',0,'inspect_source',true,{progress_job:'src'}),timingEvent('b',5,'ready',false),
+    timingEvent('c',100,'select_question',true,{progress_job:'old'}),timingEvent('d',110,'brief_ready',false),   // an earlier direction
+    timingEvent('e',200,'analyze_scene',true,{progress_job:'q'}),timingEvent('f',210,'awaiting_answer',false),
+    timingEvent('g',400,'select_question',true,{progress_job:'q2'}),timingEvent('h',405,'plan_grade',true,{progress_job:'q2'}),
+    timingEvent('i',425,'render_grade',true,{progress_job:'q2'}),timingEvent('j',445,'check_output_quality',true,{progress_job:'q2'}),timingEvent('k',450,'render_ready',false)];
+  const state={status:'render_ready',request:'x',request_started_at:new Date(timingNow(150)).toISOString(),events};
+  const result=processingTimings(state,timingNow(900));
+  assert.equal(result.run,60000);                  // 10 + 5 + 20 + 20 + 5: the earlier direction and the answer wait are excluded
+  assert.equal(result.total,50000);                // the legacy per-attempt total is unchanged
+  assert.equal(processingTimings({...state,request_started_at:null,request:''},timingNow(900)).run,null);   // nothing submitted yet
+  assert.equal(processingTimings({...state,request_started_at:null},timingNow(900)).run,result.lifetimeTotal);  // legacy session: all timed work
+  assert.equal(processingTimings({status:'ready',events:[]}).run,null);
+});
+test('last time is the previous finished visit to a step, including an earlier revision pass',()=>{
+  const events=[timingEvent('a',0,'plan_grade',true,{progress_job:'j'}),timingEvent('b',10,'preflight_grade',true,{progress_job:'j'}),
+    timingEvent('c',15,'render_grade',true,{progress_job:'j'}),timingEvent('d',75,'check_output_quality',true,{progress_job:'j'}),
+    timingEvent('e',85,'creative_review',true,{progress_job:'j'}),timingEvent('f',95,'plan_revision',true,{progress_job:'j'}),
+    timingEvent('g',100,'render_grade',true,{progress_job:'j'})];
+  const running={status:'rendering',request_started_at:new Date(timingNow(-5)).toISOString(),events};
+  const t=processingTimings(running,timingNow(110));
+  assert.deepEqual(t.visits.map(v=>[v.segment,v.ms]),[['plan',15000],['render',60000],['check',10000],['review',10000],['plan',5000],['render',10000]]);
+  assert.equal(lastTime(t.visits,'render',t.running),60000);   // pass 1; the visit running now is not "last time"
+  assert.equal(lastTime(t.visits,'plan',t.running),5000);
+  assert.equal(lastTime(t.visits,'masks',t.running),null);
+  const answered=processingTimings({status:'analyzing',events:[timingEvent('a',0,'select_question',true,{progress_job:'1'}),timingEvent('b',4,'awaiting_answer',false),
+    timingEvent('c',50,'select_question',true,{progress_job:'2'}),timingEvent('d',59,'save_brief',true,{progress_job:'2'})]},timingNow(60));
+  assert.deepEqual(answered.visits.map(v=>[v.segment,v.ms]),[['clarify',4000],['clarify',9000],['brief',1000]]);  // a wait splits visits
+});
+const auto=(changes={},state={})=>({state:{id:'p',status:'brief_ready',request:'make it moody',brief:{},brief_sha256:'abc',candidates:[],...state},armed:true,enabled:true,online:true,
+  health:{muse_configured:true,grading_connected:true},direction:' make it moody ',attempts:0,busy:false,...changes});
+test('grading starts by itself only for a brief this tab watched being made, once, when Generate would be usable',()=>{
+  assert.equal(shouldAutoRender(auto()),true);
+  assert.equal(shouldAutoRender(auto({armed:false})),false);                       // a session merely opened at "brief ready"
+  assert.equal(shouldAutoRender(auto({enabled:false})),false);
+  assert.equal(shouldAutoRender(auto({online:false})),false);
+  assert.equal(shouldAutoRender(auto({busy:true})),false);
+  assert.equal(shouldAutoRender(auto({health:null})),false);
+  assert.equal(shouldAutoRender(auto({health:{muse_configured:false,grading_connected:true}})),false);
+  assert.equal(shouldAutoRender(auto({health:{muse_configured:true,grading_connected:false}})),false);
+  assert.equal(shouldAutoRender(auto({direction:'something else'})),false);          // direction edited after the brief
+  assert.equal(shouldAutoRender(auto({attempts:MAX_AUTO_ATTEMPTS})),false);          // no retry loop
+  assert.equal(shouldAutoRender(auto({attempts:MAX_AUTO_ATTEMPTS-1})),true);
+  for(const status of ['analyzing','awaiting_answer','rendering','render_ready','failed','cancelled','reviewing'])assert.equal(shouldAutoRender(auto({},{status})),false,status);
+  assert.equal(shouldAutoRender(auto({},{brief:null})),false);
+  assert.equal(shouldAutoRender(auto({},{brief_sha256:null})),false);
+  assert.equal(shouldAutoRender(auto({},{candidates:[{brief_sha256:'abc',status:'failed'}]})),false);   // this brief already has a version
+  assert.equal(shouldAutoRender(auto({},{candidates:[{brief_sha256:'older',status:'ready'}]})),true);
+  assert.equal(shouldAutoRender({...auto(),state:undefined}),false);
+});
+test('only a running or answer-waiting consultation arms the automatic start',()=>{
+  for(const status of ['analyzing','awaiting_answer'])assert.equal(consultationRunning({status}),true);
+  for(const status of ['ready','brief_ready','rendering','render_ready','failed','reviewing','segmenting'])assert.equal(consultationRunning({status}),false);
+  assert.equal(consultationRunning(undefined),false);
+});
+test('the automatic-start choice is remembered, defaults on, and survives unavailable storage',t=>{
+  const original=globalThis.localStorage;t.after(()=>{Object.defineProperty(globalThis,'localStorage',{value:original,configurable:true});});
+  const memory=new Map();
+  Object.defineProperty(globalThis,'localStorage',{value:{getItem:k=>memory.get(k)??null,setItem:(k,v)=>memory.set(k,v)},configurable:true});
+  assert.equal(loadAutoRender(),true);saveAutoRender(false);assert.equal(loadAutoRender(),false);saveAutoRender(true);assert.equal(loadAutoRender(),true);
+  Object.defineProperty(globalThis,'localStorage',{get(){throw new Error('blocked');},configurable:true});
+  assert.equal(loadAutoRender(),true);assert.doesNotThrow(()=>saveAutoRender(false));
+});
+test('step copy matches how the consultation and render actually run',()=>{
+  const base={source:{},preview:{},analysis:{},brief:{},answered_count:2,max_questions:5};
+  assert.match(runProgress({...base,status:'rendering',stage:'render_grade',candidates:[{status:'rendering'}]}).note,/Encoding/);
+  assert.doesNotMatch(runProgress({...base,status:'rendering',stage:'render_grade',candidates:[{status:'rendering'}]}).note,/separate action/);
+  assert.doesNotMatch(runProgress({...base,status:'render_ready',stage:'render_ready',candidates:[{status:'ready'}]}).note,/separate action/);
+  assert.doesNotMatch(runProgress({...base,status:'brief_ready',stage:'brief_ready'}).steps[4].name,/optional/);
+  const global=runProgress({...base,status:'render_ready',stage:'render_ready',candidates:[{status:'ready',recipe:{proposal:{mode:'global'}}}]});
+  assert.equal(global.steps[5].phase,'skipped');
+});
+test('a cancelled or cancelling run keeps its place from the last timing marker',()=>{
+  const events=[timingEvent('a',0,'plan_grade',true,{progress_job:'j'}),timingEvent('b',5,'render_grade',true,{progress_job:'j'}),
+    timingEvent('c',8,'cancelling',true,{progress_job:'j'}),timingEvent('d',9,'cancelling',false)];
+  const recipe={proposal:{mode:'global'}};
+  const stopped=piece({status:'cancelled',stage:'cancelling',brief:{},candidates:[{status:'cancelled',recipe}],events});
+  assert.equal(stopped.segments.find(s=>s.id==='render').phase,'failed');
+  assert.equal(stopped.segments.find(s=>s.id==='plan').phase,'done');assert.match(stopped.text,/Render \(stopped\)/);
+  const stopping=piece({status:'rendering',stage:'cancelling',brief:{},candidates:[{status:'rendering',recipe}],events:events.slice(0,3)});
+  assert.equal(stopping.segments.find(s=>s.id==='render').phase,'active');   // still the render until it has actually stopped
+  assert.equal(piece({status:'cancelled',stage:'cancelling',brief:{},candidates:[],events:[]}).segments.every(s=>s.phase!=='failed'),true);  // unknown place: nothing is blamed
 });

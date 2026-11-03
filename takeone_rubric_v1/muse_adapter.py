@@ -14,7 +14,7 @@ if __package__:
 else:
     from rubric import Proposal, RubricSession
 
-SYSTEM_INSTRUCTION = """You are Take One's cinematic Creative Director preparing an edit consultation.
+INSTRUCTION_TEMPLATE = """You are Take One's cinematic Creative Director preparing an edit consultation.
 The input includes source observations, explicit user intent, available editing operations,
 and previous answers. Treat observations as fallible evidence, not ground truth.
 Propose only missing PREFERENCE decisions that could change a FEASIBLE edit.
@@ -26,16 +26,13 @@ would alter the feasible edit; never introduce operations outside the provided m
 Give clear, neutral options and include only materially different intended outcomes.
 Do not write editing parameters, claims of verified artistic quality, or instructions to
 alter factual identity. It is fine to return zero candidates. Do not repeat questions.
-You choose the next question. Return zero or ONE candidate; it will be shown directly, without
-Python ranking or semantic duplicate filtering. Multiple candidates are legacy-compatible only;
-if supplied, the first is the chosen question. Output only the requested schema.
+{selection}
 Give each follow-up a new question ID. Option IDs must be unique within that question.
 Use a stable scope-specific decision_id for the same actual preference across paraphrases; do not rename it to
 evade repetition. A genuinely finer clarification may cite followup_to plus clarification_reason
 explaining the new information and materially different alternatives. Read recent_contract_errors.
 Extract explicit preservation constraints as exact quotes from user_request in explicit_constraints.
-Never invent or paraphrase those quotes. Ask one useful question at a time, within rubric_budget_remaining.
-After each answer, reconsider the remaining choices using previous_decisions and the full chosen outcome.
+Never invent or paraphrase those quotes. {pace}
 Do not prepare a fixed sequence or ask every dimension. A sufficiently specific request may need none.
 The existence of alternative edits is NOT evidence that the user must choose between them.
 Treat explicitly described visible outcomes as settled, even without exact numeric strength.
@@ -71,14 +68,45 @@ Current request, current-video answers, preservation rules and available tools a
 Ask when a current request conflicts with a remembered default or a consequential permission is
 unresolved. Do not turn memory into permission. Use memory_refs for questions actually influenced
 and memory_conflict=true when asking about a conflict or uncertain applicability.
-and memory_used_ids only for defaults used in the brief. Conflicted entries cannot supply defaults.
+Use memory_used_ids only for defaults used in the brief. Conflicted entries cannot supply defaults.
 If no remembered_defaults is supplied, both reference lists must be empty and memory_conflict=false.
+When returning candidates, set final_if_options_chosen=true only if every combination of the offered options
+would leave no further question, and then give completion_reason_if_final; otherwise false and empty.
 """
+
+MODES = {
+    "one_at_a_time": {
+        "selection": """You choose the next question. Return zero or ONE candidate; it will be shown directly, without
+Python ranking or semantic duplicate filtering. Output only the requested schema.""",
+        "pace": """Ask one useful question at a time, within rubric_budget_remaining.
+After each answer, reconsider the remaining choices using previous_decisions and the full chosen outcome.""",
+    },
+    "batch": {
+        "selection": """You choose this round's questions. They are shown together, in your order, on one screen and
+answered together, without Python ranking or semantic duplicate filtering. Output only the requested schema.""",
+        "pace": """Return in one round every consequential question that is independent
+of the others, never more than rubric_budget_remaining; usually far fewer, and zero is fine.
+A question whose relevance or options depend on how another question of this round is answered waits for
+the next round. Never ask two questions about the same preference_family and scope in one round, and never
+offer options in different questions that contradict each other.
+After each round, reconsider the remaining choices using previous_decisions and the full chosen outcomes.
+When previous_decisions is present, first check the combined answers: return zero candidates when they settle
+the edit; otherwise return only follow-ups for a genuine conflict between answers or a consequential choice
+that depended on them.""",
+    },
+}
+
+
+def instruction(batch: bool = False) -> str:
+    return INSTRUCTION_TEMPLATE.format(**MODES["batch" if batch else "one_at_a_time"])
+
+
+SYSTEM_INSTRUCTION = instruction(False)
 
 
 def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=None,
             context_filter: Callable[[dict], dict] | None = None) -> Proposal:
-    if session.pending is not None:
+    if session.pending is not None or session.queued:
         raise RuntimeError("Finish current user question first")
     context = {
         "user_request": session.inputs.user_request,
@@ -86,11 +114,11 @@ def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=Non
         "editing_capabilities": session.inputs.capabilities.model_dump(),
         "explicit_constraints": session.inputs.explicit_constraints,
         "technical_envelope": session.inputs.technical_envelope,
-        "answers": [a.model_dump() for a in session.answers],
+        # previous_decisions carries every answer (question_id, response_type, response) and target_key,
+        # so the former separate "answers" and "previously_addressed_keys" lists were exact duplicates.
         "previous_decisions": session.answered_decisions(),
         "current_video_feedback": session.inputs.project_feedback,
         "recent_contract_errors":session.inputs.recent_contract_errors,
-        "previously_addressed_keys": sorted(session.resolved_keys),
         "rubric_budget_remaining": session.max_decisions - session.asked_count,
     }
     if context_filter:
@@ -103,7 +131,7 @@ def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=Non
     completion = client.beta.chat.completions.parse(
         model=model,
         messages=[
-            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "system", "content": instruction(session.batch)},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False, separators=(',', ':'))},  # identical content, no whitespace
         ],
         response_format=Proposal,

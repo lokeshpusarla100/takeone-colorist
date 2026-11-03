@@ -27,7 +27,9 @@ from meta_sam_parser._types import SegmentationMask
 
 SUPPORTED_PARSER = '0.1.0'
 MIN_PARALLEL = 16  # below this, worker start-up costs more than it saves
-_results = {}
+KEEP_RUNS = 8      # results of this many most recent warm() calls are kept (concurrent SAM runs)
+_results = {}      # key -> (kind, value, run number)
+_runs = 0
 _lock = threading.Lock()
 _pool = None
 
@@ -93,9 +95,14 @@ def warm(text):
         # Purely an accelerator: on any failure fall back to the parser's inline decode (the old path).
         results = {}
         _discard_pool()
+    global _runs
     with _lock:
-        _results.clear()
-        _results.update(results)
+        # Never clear another run's results: SAM requests for several areas parse concurrently.
+        _runs += 1
+        for key, (kind, value) in results.items():
+            _results[key] = (kind, value, _runs)
+        for key in [k for k, (_, _, run) in _results.items() if run <= _runs - KEEP_RUNS]:
+            del _results[key]
     return len(results)
 
 
@@ -116,7 +123,7 @@ def decode(mask):
         hit = _results.get(_key(mask))
     if hit is None:
         return strict_decode(mask)
-    kind, value = hit
+    kind, value, _ = hit
     if kind == 'invalid':
         raise InvalidSegmentationMaskError(value)
     return value

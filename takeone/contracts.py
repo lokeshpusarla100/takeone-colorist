@@ -377,6 +377,7 @@ class State(StrictModel):
     preview: Preview | None = None
     analysis: SceneAnalysis | None = None
     question: Candidate | None = None
+    pending_questions: list[Candidate] = Field(default_factory=list)  # this round, in Muse's order; question is the first
     consultation: ConsultationSummary | None = None
     brief: CreativeBrief | None = None
     request: str = ""

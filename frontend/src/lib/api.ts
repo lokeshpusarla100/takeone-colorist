@@ -7,6 +7,7 @@ export type Question = {
   id:string; question:string; scope:string; decision_fork:string;unresolved_preference?:string;
   options:{id:string;label:string;intended_outcome:string}[];
 };
+export type AnswerInput = {question_id:string;response_type:'option'|'free_text'|'skip'|'delegate';response:string};
 export type Brief = {
   initial_request:string;
   directives:{dimension:string;scope:string;outcome:string;provenance:string}[];
@@ -50,8 +51,8 @@ export type BackendState = {
     video_codec:string;audio_codec:string|null;technical_notes:string[]};
   preview:null|{url:string;width:number;height:number;duration:number;bytes:number};
   analysis:null|{summary:string;caveats:string[]};
-  question:Question|null;brief:Brief|null;events:SessionEvent[];
-  brief_sha256?:string|null;
+  question:Question|null;pending_questions?:Question[];brief:Brief|null;events:SessionEvent[];
+  brief_sha256?:string|null;request_started_at?:string|null;
   consultation?:null|{reason:'question_selected'|'question_limit'|'no_candidates'|'no_valid_candidates';
     message:string;model_explanation:string;proposed_count:number;rejected_count:number};
   error:null|{code:string;message:string;action:string;details:ErrorDetails};
@@ -119,6 +120,9 @@ export function parseBackend(value:unknown):BackendState {
     ||!text(value.question.decision_fork)||!Array.isArray(value.question.options)
     ||value.question.options.length<2||value.question.options.length>3
     ||!value.question.options.every(o=>record(o)&&text(o.id)&&text(o.label)&&text(o.intended_outcome))))return invalidResponse();
+  if(value.pending_questions!==undefined&&(!Array.isArray(value.pending_questions)||value.pending_questions.length>5
+    ||!value.pending_questions.every(q=>record(q)&&text(q.id)&&text(q.question)&&text(q.decision_fork)&&Array.isArray(q.options)
+      &&q.options.length>=2&&q.options.length<=3&&q.options.every(o=>record(o)&&text(o.id)&&text(o.label)&&text(o.intended_outcome)))))return invalidResponse();
   if(value.updated_at!==undefined&&(!text(value.updated_at)||!Number.isFinite(Date.parse(value.updated_at as string))))return invalidResponse();
   if(value.rubric_history!==undefined&&(!Array.isArray(value.rubric_history)||!value.rubric_history.every(a=>record(a)
     &&['question_id','question','answer','response_type'].every(k=>text(a[k])))))return invalidResponse();
@@ -274,7 +278,7 @@ export async function upload(file:File,signal:AbortSignal) {
   form.append('profile_id',nextProfile());form.append('preference_context',JSON.stringify(nextContext()));
   return parseBackend(await request<unknown>('/api/projects',{method:'POST',body:form,signal},120000));
 }
-export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select'|'render-supported'|'use-all-matches'|'render-full',body:Record<string,unknown>) {
+export async function command(id:string,kind:'analyze'|'answers'|'answers/round'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select'|'render-supported'|'use-all-matches'|'render-full',body:Record<string,unknown>) {
   try{return parseBackend(await request<unknown>('/api/projects/'+id+'/'+kind,{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({...body,command_id:crypto.randomUUID()}),

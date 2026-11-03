@@ -58,6 +58,10 @@ class Service:
         self.settings = settings
         self._early_pool = None
         self._early_opinions = {}
+        self._gate_lock = threading.Lock()
+        self._uploads = {}        # (project, proxy sha) -> Event set once the shared SAM upload has a file id
+        self._concept_locks = {}  # (project, concept) -> Lock: one SAM request per concept at a time
+        self._live = {}           # project -> latest measurement of the running stage; never persisted
         self.store = Store(settings.workspace)
         self.process_lock = (self.store.root / ".backend.lock").open("a")
         try:
@@ -217,6 +221,17 @@ class Service:
             self.cancels.pop(state.id, None)
             raise
 
+    def live_progress(self, project_id):
+        """The running stage's latest measurement, or None when nothing is measured right now. Answered from memory
+        (polled every second): a measurement counts only while the job that made it is still running, and a new
+        stage or render pass clears it."""
+        live = self._live.get(project_id)
+        if live is None or self.cancels.get(project_id) is not live['cancel']:
+            if not (self.store.directory(project_id) / "state.json").is_file():
+                self.store.get(project_id)  # raises the usual PROJECT_NOT_FOUND
+            return None
+        return {key: value for key, value in live.items() if key != 'cancel'}
+
     def mutate(self, project_id, operation):
         with self.store.lock:
             state = self.store.get(project_id)
@@ -246,6 +261,7 @@ class Service:
             state.request_started_at=now()
             state.rubric = None
             state.question = None
+            state.pending_questions = []
             state.consultation = None
             state.brief = None
             state.looks = []
@@ -268,7 +284,13 @@ class Service:
             return state
 
     def answer(self, project_id, answer: Answer, revision: int, command_id: str):
-        fingerprint = self.fingerprint("answer", answer.model_dump())
+        return self.answer_all(project_id, [answer], revision, command_id, every=False)
+
+    def answer_all(self, project_id, answers: list[Answer], revision: int, command_id: str, every: bool = True):
+        """Record answers in the round's order. every=True: the answers must cover the whole pending round
+        (all questions shown together). Nothing is saved unless every answer is valid; the next model call
+        is made only once the round is complete."""
+        fingerprint = self.fingerprint("answer", [a.model_dump() for a in answers] if every else answers[0].model_dump())
         with self.store.lock:
             state = self.store.get(project_id)
             if self.receipt(state, command_id, fingerprint):
@@ -277,29 +299,37 @@ class Service:
             if state.status != "awaiting_answer" or not state.rubric:
                 raise Problem("NO_PENDING_QUESTION", "There is no pending question to answer.", "Refresh the consultation.", 409)
             session = RubricSession.restore(state.rubric)
+            if every and sorted(a.question_id for a in answers) != sorted(q.id for q in session.pending_questions()):
+                raise Problem("ANSWER_INVALID", "Answer every question shown in this round, once each.",
+                              "Refresh the consultation and answer each displayed question.", 422)
+            order = {q.id: i for i, q in enumerate(session.pending_questions())}
             try:
-                session.record_answer(answer)
+                for answer in sorted(answers, key=lambda a: order.get(a.question_id, len(order))):
+                    session.record_answer(answer)
             except ValueError as error:
                 raise Problem("ANSWER_INVALID", str(error), "Answer the displayed question using a valid option or free text.", 422)
             state.rubric = session.snapshot()
-            state.question = None
+            state.question = session.pending
+            state.pending_questions = session.pending_questions()
             state.consultation = None
             state.answered_count = len(session.answers)
             state.receipts[command_id] = fingerprint
-            event = self.event(state, "Answer saved", answer.response or answer.response_type, actor="user",
-                       question_id=answer.question_id, response_type=answer.response_type)
-            answered = next(q for q in session.questions if q.id == answer.question_id)
-            option = next((o for o in answered.options if o.id == answer.response), None) if answer.response_type == "option" else None
-            self.queue_memory(state, FeedbackEvidence(event_id=event.id,project_id=state.id,kind="rubric_answer",
-                original_wording=answer.response,dimension=answered.dimension,
-                preference_key=answered.preference_family.value if answered.preference_family.value!="other" else answered.target_key,
-                question_id=answered.id,context=state.preference_context,
-                details={"response_type":answer.response_type,"selected_label":option.label if option else "",
-                         "selected_outcome":option.intended_outcome if option else answer.response,"scope":answered.scope}))
-            # Commit the answer before making another billable model request.
+            for answer in answers:
+                event = self.event(state, "Answer saved", answer.response or answer.response_type, actor="user",
+                           question_id=answer.question_id, response_type=answer.response_type)
+                answered = next(q for q in session.questions if q.id == answer.question_id)
+                option = next((o for o in answered.options if o.id == answer.response), None) if answer.response_type == "option" else None
+                self.queue_memory(state, FeedbackEvidence(event_id=event.id,project_id=state.id,kind="rubric_answer",
+                    original_wording=answer.response,dimension=answered.dimension,
+                    preference_key=answered.preference_family.value if answered.preference_family.value!="other" else answered.target_key,
+                    question_id=answered.id,context=state.preference_context,
+                    details={"response_type":answer.response_type,"selected_label":option.label if option else "",
+                             "selected_outcome":option.intended_outcome if option else answer.response,"scope":answered.scope}))
+            # Commit the answers before making another billable model request.
             self.store.save(state)
             self.drain_memory(state)
-            self.submit(state, "analysis")
+            if session.pending is None:  # round complete: Muse reconsiders with every answer
+                self.submit(state, "analysis")
             return state
 
     def feedback_event(self, project_id, evidence: FeedbackEvidence, revision:int, command_id:str):
@@ -769,8 +799,13 @@ class Service:
         else:
             upload=state.sam_upload or {}
             remote=upload.get('file_id') if upload.get('sha256')==frame_map['proxy_sha256'] else None
+            gate=None
+            if remote is None:
+                # Concurrent requests for one render share an input: one uploads it, the rest reuse its file id.
+                remote,gate=self.claim_upload(project_id,frame_map['proxy_sha256'],cancel)
             def remember(file_id):
                 self.mutate(project_id,lambda s:setattr(s,'sam_upload',{'file_id':file_id,'sha256':frame_map['proxy_sha256']}))
+                if gate:self.release_upload(project_id,frame_map['proxy_sha256'],gate)
             def progress(snapshot):
                 if snapshot is None:
                     update('preparing','decode_segmentation_masks');return
@@ -792,15 +827,18 @@ class Service:
                 self.mutate(project_id,lambda s:self.event(s,'SAM request usage',actor='muse',
                     model=self.settings.sam_model,request_id=request_id,video_frames_processed=value.get('video_frames_processed'),
                     token_usage=True,**usage_details(value)))
-            if target.object_prompt:
-                method=getattr(self.sam_provider,'segment_prompted',None)
-                if method is None:raise Problem('SAM_PROMPTING_UNAVAILABLE','This SAM provider cannot perform instance-prompted tracking.',
-                    'Use the hosted SAM provider with box/point prompting support.',503)
-                result=method(input_path,target.concept,remote,remember,cancel,progress,output/'raw.txt',usage,requested,
-                    object_prompt=target.object_prompt,propagation_direction=target.propagation_direction)
-            else:
-                result=self.sam_provider.segment(input_path,target.concept,remote,remember,cancel,progress,
-                    output/'raw.txt',usage,requested)
+            try:
+                if target.object_prompt:
+                    method=getattr(self.sam_provider,'segment_prompted',None)
+                    if method is None:raise Problem('SAM_PROMPTING_UNAVAILABLE','This SAM provider cannot perform instance-prompted tracking.',
+                        'Use the hosted SAM provider with box/point prompting support.',503)
+                    result=method(input_path,target.concept,remote,remember,cancel,progress,output/'raw.txt',usage,requested,
+                        object_prompt=target.object_prompt,propagation_direction=target.propagation_direction)
+                else:
+                    result=self.sam_provider.segment(input_path,target.concept,remote,remember,cancel,progress,
+                        output/'raw.txt',usage,requested)
+            finally:
+                if gate:self.release_upload(project_id,frame_map['proxy_sha256'],gate)
             manifest=sam.persist_result(result,frame_map,output,cancel)
             manifest['processing_config']=sam.processing_config(target.model)
             sam.atomic(output/'manifest.json',manifest)
@@ -825,6 +863,42 @@ class Service:
         self.mutate(project_id,ready)
         return manifest,output
 
+    def claim_upload(self,project_id,sha,cancel):
+        """(remote file id, None) if another request already uploaded this input, else (None, gate): the caller
+        uploads and must release the gate. Waiters re-read the saved upload once the owner is done."""
+        key=(project_id,sha)
+        while True:
+            with self._gate_lock:
+                event=self._uploads.get(key)
+                if event is None:
+                    event=threading.Event();self._uploads[key]=event
+                    return None,event
+            while not event.wait(.2):self.check_cancel(cancel)
+            upload=self.store.get(project_id).sam_upload or {}
+            if upload.get('sha256')==sha and upload.get('file_id'):return upload['file_id'],None
+
+    def release_upload(self,project_id,sha,gate):
+        with self._gate_lock:
+            if self._uploads.get((project_id,sha)) is gate:del self._uploads[(project_id,sha)]
+        gate.set()
+
+    def masks_for(self,project_id,candidate_id,evidence,plans,cancel):
+        """local_masks for each plan (subject first, then regions). SAM time is network latency, so the
+        requests run concurrently; results, and the error reported if any fails, are in plan order exactly
+        as when run one by one. sam_parallel=1 (or a single plan) keeps the strictly sequential path."""
+        if len(plans)==1 or self.settings.sam_parallel<=1:
+            return [self.local_masks(project_id,candidate_id,evidence,p,cancel) for p in plans]
+        from concurrent.futures import ThreadPoolExecutor as Pool
+        with Pool(max_workers=min(len(plans),self.settings.sam_parallel),thread_name_prefix='takeone-sam') as pool:
+            futures=[pool.submit(self.local_masks,project_id,candidate_id,evidence,p,cancel) for p in plans]
+            outcomes=[]
+            for future in futures:
+                try:outcomes.append((True,future.result()))
+                except BaseException as error:outcomes.append((False,error))
+        for ok,value in outcomes:
+            if not ok:raise value
+        return [value for _,value in outcomes]
+
     def local_masks(self,project_id,candidate_id,evidence,plan,cancel):
         """Masks for plan.concept, falling back to simpler phrases only when SAM finds nothing at all.
 
@@ -837,8 +911,11 @@ class Service:
         for number,phrase in enumerate(phrases):
             selection=('all_matches' if plan.selection=='single_instance' and sam_concepts.names_a_class(phrase) else plan.selection)
             attempt=plan.model_copy(update={'concept':phrase,'selection':selection})
+            with self._gate_lock:
+                concept_lock=self._concept_locks.setdefault((project_id,phrase.strip().casefold()),threading.Lock())
             try:
-                records,ranges=self._local_masks(project_id,candidate_id,evidence,attempt,cancel)
+                with concept_lock: # two areas falling back to one phrase share one SAM request
+                    records,ranges=self._local_masks(project_id,candidate_id,evidence,attempt,cancel)
                 if phrase!=plan.concept:
                     self.mutate(project_id,lambda s:self.event(s,'Using a simpler SAM phrase',
                         f'SAM found nothing for "{plan.concept}"; "{phrase}" matched.',planned_concept=plan.concept,concept=phrase))
@@ -1142,6 +1219,25 @@ class Service:
             self.event(state, "Preview ready", "VP9 display preview and a silent analysis proxy were prepared. No media has been sent to Meta.")
         self.mutate(project_id, ready)
 
+    @staticmethod
+    def predicted_close(state, session):
+        """The closing proposal Muse wrote in advance, if its last round predicted that the options the user
+        then chose leave no further question; None otherwise (any free-text, skipped or delegated answer, or
+        no prediction). Gaps and constraints carry over from that proposal."""
+        from takeone_rubric_v1.rubric import Proposal
+        if not session.answers or session.pending is not None or not state.question_proposals:
+            return None
+        last = state.question_proposals[-1]
+        prediction = Proposal.model_validate(last.get("proposal") or {})
+        asked = last.get("selected_ids") or ([last["selected_id"]] if last.get("selected_id") else [])
+        answered = {a.question_id: a for a in session.answers}
+        if (last.get("direction_epoch") != state.request_started_at or not prediction.final_if_options_chosen
+                or not prediction.completion_reason_if_final.strip() or not asked
+                or any(answered.get(i) is None or answered[i].response_type != "option" for i in asked)):
+            return None
+        return Proposal(completion_reason=prediction.completion_reason_if_final,
+                        observation_gap=prediction.observation_gap, knowledge_gap=prediction.knowledge_gap)
+
     def analyze(self, project_id, cancel):
         state = self.store.get(project_id)
         if not state.source or not state.preview:
@@ -1178,7 +1274,7 @@ class Service:
                     "Analysis used the complete silent proxy; source/proxy timing is recorded.",
                     *state.analysis.caveats,
                 ],
-            ), max_decisions=state.max_questions)
+            ), max_decisions=state.max_questions, batch=self.settings.rubric_mode == "batch")
         session.inputs.project_id = state.id
         session.inputs.project_feedback = [f for f in current_feedback(state) if f.get("text")]
         session.inputs.recent_contract_errors=[p['error'] for p in state.question_proposals[-3:]
@@ -1188,9 +1284,14 @@ class Service:
         proposal_usage = None
         proposal_call = None
         proposal_request_id = None
+        from takeone_rubric_v1.rubric import Proposal
+        closing = self.predicted_close(state, session)
         if session.asked_count >= session.max_decisions:
-            from takeone_rubric_v1.rubric import Proposal
             proposal = Proposal()
+        elif closing is not None and self.settings.rubric_skip_closing:
+            proposal = closing
+            self.mutate(project_id, lambda s: self.event(s, "Consultation closed without another call",
+                "Muse said in advance that the chosen options leave no further question.", actor="app"))
         else:
             request_id = self.count_call(project_id, "Selecting a useful clarification")
             proposal_request_id = request_id
@@ -1202,7 +1303,9 @@ class Service:
             self.record_usage(project_id,request_id,"rubric",proposal_usage,proposal_call)
             self.mutate(project_id,lambda s:s.question_proposals.append({
                 "request_id":request_id,"proposal":proposal.model_dump(mode="json"),
-                "selection_policy":"muse_order","selected_id":None,"error":None,"direction_epoch":state.request_started_at}))
+                "selection_policy":"muse_order","selected_id":None,"error":None,"direction_epoch":state.request_started_at,
+                **({"closing_prediction":{"predicted_final":closing is not None,"actual_final":not proposal.candidates}}
+                   if session.answers else {})}))
         self.check_cancel(cancel)
         rejection_start = len(session.rejected)
         try:
@@ -1233,27 +1336,32 @@ class Service:
                 brief.unresolved.append("Knowledge gap: " + proposal.knowledge_gap)
             self.mutate(project_id,lambda s:setattr(s,'stage','save_brief'))
             self.store.artifact(project_id, "brief.json", brief.model_dump(mode="json"))
+        round_questions = session.pending_questions()
         def selected(state):
             state.rubric = session.snapshot()
             state.question = question
+            state.pending_questions = round_questions
             if proposal_request_id:
-                next(p for p in state.question_proposals if p['request_id']==proposal_request_id)['selected_id']=question.id if question else None
+                record = next(p for p in state.question_proposals if p['request_id']==proposal_request_id)
+                record['selected_id'] = question.id if question else None
+                record['selected_ids'] = [q.id for q in round_questions]
             state.consultation = summary
             state.brief = brief
             if brief:
                 state.brief_revision += 1
                 state.memory_influences += brief.memory_influences
-            if question:
+            for asked in round_questions:
                 for memory in session.inputs.memory_defaults:
-                    if memory.id in question.memory_refs:
+                    if memory.id in asked.memory_refs:
                         state.memory_influences.append({"entry_id":memory.id,"revision":memory.revision,
-                                                        "stage":"question","target":question.id})
+                                                        "stage":"question","target":asked.id})
             state.answered_count = len(session.answers)
             state.status = "awaiting_answer" if question else "brief_ready"
             state.stage = state.status
             state.active_job = None
             if question:
-                self.event(state, question.question, question.decision_fork, actor="muse", kind="decision", question_id=question.id)
+                for asked in round_questions:
+                    self.event(state, asked.question, asked.decision_fork, actor="muse", kind="decision", question_id=asked.id)
             else:
                 self.event(state, "Creative brief ready", "The original request, answers, boundaries and limitations have been saved.", actor="muse")
                 self.event(state,"Consultation completed",summary.message,stop_reason=summary.reason,
@@ -1517,7 +1625,10 @@ class Service:
             if evidence is None or recipe.timeline['key']!=evidence['key']:
                 raise Problem('LOCAL_TIMELINE_CHANGED','The cached recipe has a different local source mapping.','Create a new candidate.',409)
             self.mutate(project_id,lambda s:setattr(s,'stage','verify_segmentation_input'))
-            records,ranges,subject_concept,subject_selection=self.local_masks(project_id,candidate.id,evidence,recipe.proposal.local,cancel)
+            region_plans=[recipe.proposal.local.model_copy(update={'concept':r.concept,'selection':r.selection,'regions':[],
+                'concept_alternatives':r.concept_alternatives}) for r in recipe.proposal.local.regions]
+            all_masks=self.masks_for(project_id,candidate.id,evidence,[recipe.proposal.local,*region_plans],cancel)
+            records,ranges,subject_concept,subject_selection=all_masks[0]
             # Frame-derived interval boundaries, never guessed request timestamps.
             step=float(1/Fraction(evidence['frame_map']['proxy']['rate']))
             recipe.timeline['active_ranges']=[[evidence['frame_map']['frames'][a]['time'],
@@ -1537,9 +1648,8 @@ class Service:
             mask_qa['regions']=[]
             for k,region in enumerate(recipe.proposal.local.regions):
                 self.check_cancel(cancel)
-                region_plan=recipe.proposal.local.model_copy(update={'concept':region.concept,'selection':region.selection,'regions':[],
-                    'concept_alternatives':region.concept_alternatives})
-                region_records,region_ranges,region_concept,region_selection=self.local_masks(project_id,candidate.id,evidence,region_plan,cancel)
+                region_plan=region_plans[k]
+                region_records,region_ranges,region_concept,region_selection=all_masks[1+k]
                 if region_ranges!=ranges:
                     raise Problem('LOCAL_REGION_RANGES','A region does not cover the same frame ranges as the subject.',
                                   'Inspect the region masks; no partial regional grade was rendered.',422,concept=region.concept)
@@ -1554,6 +1664,20 @@ class Service:
             self.mutate(project_id,compositing)
         def render_stage(stage):
             self.mutate(project_id,lambda s:setattr(s,'stage',stage))
+            running['stage']=stage
+            self._live.pop(project_id,None)  # a new stage (or another render pass) starts with no measurement
+        running={'stage':None}
+        def encoding(values):
+            """Measured encode position (ffmpeg -progress), for the live progress bar only."""
+            try:encoded=int(values['out_time_us'])/1e6
+            except (KeyError,TypeError,ValueError):return
+            total=state.source.duration
+            if not running['stage'] or not total or total<=0:return
+            try:speed=float(str(values.get('speed','')).strip().rstrip('x'))
+            except ValueError:speed=None
+            self._live[project_id]={'cancel':cancel,'stage':running['stage'],'kind':'encode',
+                'fraction':max(0.,min(.99,encoded/total)),'encoded_seconds':max(0.,encoded),'total_seconds':total,
+                'speed':speed,'eta_seconds':(max(0.,total-encoded)/speed if speed and speed>0 else None)}
         pending_check=[]
         def after_encode(master):
             # Start measuring protected areas while the render runs its own integrity decode.
@@ -1562,7 +1686,7 @@ class Service:
                     recipe.proposal.execution_limits,recipe.tone_operator=='luminance_ocio_v3'))
         try:
             result = rendering.render(original, output, recipe, state.source, self.settings, cancel,on_stage=render_stage,tier=candidate.tier,
-                                      after_encode=after_encode)
+                                      after_encode=after_encode,on_progress=encoding)
         except BaseException as failure:
             for check in pending_check:check.abort()
             if not isinstance(failure,Problem):raise

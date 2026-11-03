@@ -73,7 +73,34 @@ Muse may return zero candidates. Observation gaps require more visual/signal ins
 
 When proposing zero candidates, Muse is asked for completion_reason: a concise user-facing explanation of why no supported preference fork remains. It is an outcome summary, not private reasoning, and never becomes an editing directive or preference-memory event. Questioning can also stop at the configured limit. Invalid data/tool contracts fail explicitly instead of becoming a completed consultation. Historical validation-rejection stops remain readable.
 
-Broad adjectives alone do not necessarily settle treatment strength, saturation, readability or preservation tradeoffs. Muse considers those choices and the six coverage areas against actual capabilities and prior answers, and is asked to return zero or one question. Legacy multi-candidate lists use its first item. The next call happens after the answer, not as a fixed sequence.
+Broad adjectives alone do not necessarily settle treatment strength, saturation, readability or preservation tradeoffs. Muse considers those choices and the six coverage areas against actual capabilities and prior answers, and is asked to return zero or one question (one_at_a_time) or one round of independent questions (batch). The next call happens after the answer or round, not as a fixed sequence.
+
+### Question modes (`TAKEONE_RUBRIC_MODE`)
+
+- **`batch` (default for new consultations).** Muse returns, in one round, every consequential question that
+  is independent of the others (never more than the remaining budget; zero is fine). The UI shows the round
+  on one screen and submits all answers together (`POST /answers/round`, all or nothing). Muse then makes one
+  call with every answer: it returns zero questions when they settle the edit, or only follow-ups for a
+  conflict between answers or a choice that depended on them. A question whose relevance depends on another
+  answer waits for that next round, so adaptivity is kept while calls drop from one per question to one per
+  round. The round is cut only by the budget, in Muse's order. Round mates follow the same data rules as
+  answered questions (unique IDs and decision IDs, no exact repeats).
+- **`one_at_a_time`.** One question per call (the earlier behaviour). Sessions saved before batching restore
+  in this mode.
+
+The single-answer route `/answers` still works in both modes; inside a batch round it records the answer and
+shows the next question of the round without a model call.
+
+**Closing-call prediction.** Each proposal with questions also states `final_if_options_chosen` (whichever
+offered options are chosen, no follow-up is needed) and `completion_reason_if_final`. The service records
+`closing_prediction: {predicted_final, actual_final}` on every closing call. With
+`TAKEONE_RUBRIC_SKIP_CLOSING=1` the closing call is skipped when the prediction holds and every answer of the
+round was an offered option (free text, skip or delegate always get the call). Leave it off until
+`scripts/rubric_replay.py` reports that predictions agree with the closing calls.
+
+**Request content.** `previous_decisions` carries every answer (question ID, response type, response,
+target key, question, alternatives, chosen outcome); the former separate `answers` and
+`previously_addressed_keys` lists were exact duplicates and are no longer sent.
 
 ### Controller: `RubricSession`
 

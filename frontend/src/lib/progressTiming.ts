@@ -1,7 +1,12 @@
 import { activeJob } from './api';
 import type { BackendState } from './api';
 
+import { segmentOfStage } from './progressModel';
+import type { SegmentId } from './progressModel';
+
 export type StepId='prepare'|'inspect'|'clarify'|'brief'|'grade'|'masks'|'review';
+/** One uninterrupted stretch of active work in a pipeline segment (a retry, answer round or revision pass starts a new one). */
+export type Visit={segment:SegmentId;ms:number};
 type Part='plan'|'render'|'qc'|'track'|'validate_masks';
 const stages:Record<string,[StepId,Part?]>={
   inspect_source:['prepare'],prepare_preview:['prepare'],analyze_scene:['inspect'],select_question:['clarify'],save_brief:['brief'],
@@ -19,19 +24,29 @@ export function processingTimings(state:BackendState|undefined,now=Date.now(),on
   }).sort((a,b)=>Date.parse(a.timestamp)-Date.parse(b.timestamp));
   let previous:typeof markers[number]|undefined;let group:[StepId,Part?]|undefined;let interrupted=false;
   let attemptTotal=0;let lifetimeTotal=0;const jobs=new Set<string>();
+  // Active time since this direction was submitted; spans the consultation, the render and any review passes.
+  const runStart=Date.parse(state?.request_started_at??'');let runTotal=0;
+  const visits:Visit[]=[];let open:SegmentId|null=null;
   const add=(end:number)=>{
     if(!previous?.details?.progress_active||!group)return;
     const elapsed=Math.max(0,end-Date.parse(previous.timestamp));
     attemptTotal+=elapsed;lifetimeTotal+=elapsed;
+    if(!Number.isFinite(runStart)||Date.parse(previous.timestamp)>=runStart-1)runTotal+=elapsed;
+    const segment=segmentOfStage(String(previous.details.progress_stage??''));
+    if(segment){
+      if(open===segment&&visits.length)visits[visits.length-1].ms+=elapsed;else visits.push({segment,ms:elapsed});
+      open=segment;
+    }
     byStep[group[0]]=(byStep[group[0]]??0)+elapsed;
     if(group[1])parts[group[1]]=(parts[group[1]]??0)+elapsed;
   };
   for(const marker of markers){
     add(Date.parse(marker.timestamp));
+    if(!marker.details?.progress_active)open=null;
     const stage=String(marker.details?.progress_stage??'');
     const job=marker.details?.progress_job;
     if(marker.details?.progress_active&&typeof job==='string'&&!jobs.has(job)){
-      jobs.add(job);attemptTotal=0;interrupted=false;
+      jobs.add(job);attemptTotal=0;interrupted=false;open=null;
       const reset:StepId[]=stage==='plan_grade'?['grade','masks','review']:stage==='inspect_source'?['prepare']:
         stage==='analyze_scene'?['inspect','clarify','brief']:stage==='creative_review'?['review']:
         stage==='verify_segmentation_input'?['masks']:marker.details?.progress_retry?['clarify','brief']:[];
@@ -46,7 +61,19 @@ export function processingTimings(state:BackendState|undefined,now=Date.now(),on
   const lastSaved=Date.parse(state?.updated_at??previous?.timestamp??'');
   add(running&&online?now:Math.min(now,Number.isFinite(lastSaved)?lastSaved:now));
   return {byStep,parts,total:markers.length?attemptTotal:null,lifetimeTotal:markers.length?lifetimeTotal:null,
+    // No submitted direction yet: nothing to count. Sessions from before request_started_at was saved fall back to all timed work.
+    run:markers.length?(Number.isFinite(runStart)?runTotal:state?.request?lifetimeTotal:null):null,visits,
     running:running&&online,interrupted,recorded:markers.length>0};
+}
+
+/** How long the most recent finished visit to a segment took (the visit still running is not "last time"). */
+export function lastTime(visits:Visit[],segment:SegmentId,running:boolean){
+  for(let i=visits.length-1;i>=0;i--){
+    if(visits[i].segment!==segment)continue;
+    if(running&&i===visits.length-1)continue;
+    return visits[i].ms;
+  }
+  return null;
 }
 
 export function formatDuration(milliseconds:number|null|undefined){

@@ -108,13 +108,19 @@ class Candidate(StrictModel):
     unresolved_preference: str = Field(default='',max_length=1200)
 
 
+MAX_BATCH = 5
+
+
 class Proposal(StrictModel):
-    candidates: list[Candidate] = Field(default_factory=list, max_length=3)
+    candidates: list[Candidate] = Field(default_factory=list, max_length=MAX_BATCH)
     explicit_constraints: list[str] = Field(default_factory=list)
     observation_gap: str = ""  # Requires more inspection, not a user question.
     knowledge_gap: str = ""  # May justify skill/retrieval, not a user question.
     memory_used_ids: list[str] = Field(default_factory=list, max_length=10)
     completion_reason: str = Field(default="", max_length=1200)
+    # Prediction recorded for measurement: whichever offered options the user picks, no follow-up is needed.
+    final_if_options_chosen: bool = False
+    completion_reason_if_final: str = Field(default="", max_length=1200)
 
 
 class Answer(StrictModel):
@@ -169,11 +175,15 @@ DEFAULT_PROTECTIONS = [
 class RubricSession:
     """One-question session and provenance. Creative selection belongs to Muse."""
 
-    def __init__(self, inputs: RubricInput, max_decisions: int = 5):
+    def __init__(self, inputs: RubricInput, max_decisions: int = 5, batch: bool = False):
         if not 0 <= max_decisions <= 5:
             raise ValueError("max_decisions must be between 0 and 5")
         self.inputs = inputs
         self.max_decisions = max_decisions
+        # batch: Muse proposes every independent question of a round together; they are answered together
+        # (one model call per round instead of per question). False: one question per call.
+        self.batch = batch
+        self.queued: list[Candidate] = []  # rest of the current round, after `pending`
         self.answers: list[Answer] = []
         self.directives: list[Directive] = []
         self.resolved_keys: set[str] = set()
@@ -212,8 +222,16 @@ class RubricSession:
             })
         return decisions
 
-    def _check_question_contract(self, c: Candidate) -> None:
+    def pending_questions(self) -> list[Candidate]:
+        return ([self.pending] if self.pending else []) + list(self.queued)
+
+    def _check_question_contract(self, c: Candidate, round_mates: list[Candidate] = ()) -> None:
         """Data/tool boundary only; never infer creative overlap, relevance or priority."""
+        for mate in round_mates:  # earlier questions of the same round: the same data rules as answered ones
+            if c.id == mate.id:
+                raise ValueError("question IDs in one round must be unique")
+            if c.decision_id and c.decision_id == mate.decision_id:
+                raise ValueError("Decision ID asked twice in one round")
         if c.id in {a.question_id for a in self.answers}:
             raise ValueError("question ID already used; a follow-up needs a unique ID")
         def wording(q):
@@ -229,6 +247,8 @@ class RubricSession:
                     raise ValueError('Decision ID already addressed; a genuine clarification needs followup_to and new-information reason')
                 if {o.intended_outcome.strip().casefold() for o in c.options}=={o.intended_outcome.strip().casefold() for o in previous.options}:
                     raise ValueError('Clarification repeats the same outcome alternatives')
+        if any(wording(c) == wording(mate) for mate in round_mates):
+            raise ValueError("Question and alternatives exactly repeat another question in this round")
         if len({o.id for o in c.options}) != len(c.options):
             raise ValueError("option IDs must be unique")
         if any(not value.strip() for value in [c.id,c.question,c.scope,c.target_key,c.decision_fork,
@@ -247,10 +267,11 @@ class RubricSession:
 
     def next_question(self, proposal: Proposal) -> Candidate | None:
         """Choose at most one *consequential* question per cycle; never batch ask."""
-        if self.pending is not None:
+        if self.pending is not None or self.queued:
             raise RuntimeError("answer/skip the pending question before proposing another")
         allowed_memories = {m.id for m in self.inputs.memory_defaults if not m.conflicted}
-        self.blocked_memory_ids.update(ref for c in proposal.candidates[:1] if c.memory_conflict for ref in c.memory_refs
+        shown = proposal.candidates if self.batch else proposal.candidates[:1]
+        self.blocked_memory_ids.update(ref for c in shown if c.memory_conflict for ref in c.memory_refs
                                        if ref in {m.id for m in self.inputs.memory_defaults})
         allowed_memories -= self.blocked_memory_ids
         self.used_memory_ids.update(set(proposal.memory_used_ids) & allowed_memories)
@@ -270,14 +291,17 @@ class RubricSession:
                                 "explanation":proposal.completion_reason})
             return None
         # Muse owns selection/order. No Python ranking, topic inference or semantic rejection.
-        selected = proposal.candidates[0]
-        self._check_question_contract(selected)
-        self.pending = selected
-        self.questions.append(selected.model_copy(deep=True))
-        self.asked_count += 1
-        self.events.append({"event": "question_selected", "id": selected.id,
-                            "reason": selected.decision_fork, "memory_refs": selected.memory_refs})
-        return selected
+        # A batch is cut only by the remaining budget, in Muse's order.
+        selected = list(shown[:self.max_decisions - self.asked_count])
+        for index, candidate in enumerate(selected):
+            self._check_question_contract(candidate, selected[:index])
+        for candidate in selected:
+            self.questions.append(candidate.model_copy(deep=True))
+            self.asked_count += 1
+            self.events.append({"event": "question_selected", "id": candidate.id,
+                                "reason": candidate.decision_fork, "memory_refs": candidate.memory_refs})
+        self.pending, self.queued = selected[0], selected[1:]
+        return selected[0]
 
     def record_answer(self, answer: Answer) -> None:
         if self.pending is None or answer.question_id != self.pending.id:
@@ -310,10 +334,10 @@ class RubricSession:
         self.resolved_keys.add(c.target_key)
         self.answers.append(answer)
         self.events.append({"event": "answer", "id": c.id, "kind": answer.response_type})
-        self.pending = None
+        self.pending = self.queued.pop(0) if self.queued else None
 
     def brief(self) -> CreativeBrief:
-        if self.pending is not None:
+        if self.pending is not None or self.queued:
             raise RuntimeError("cannot finalize with an unanswered question")
         unresolved = [
             "Skipped or delegated question: " + a.question_id
@@ -363,13 +387,14 @@ class RubricSession:
             questions=self.questions,
             used_memory_ids=sorted(self.used_memory_ids),
             blocked_memory_ids=sorted(self.blocked_memory_ids),
+            batch=self.batch, queued=self.queued,
         ).model_dump(mode="json")
 
     @classmethod
     def restore(cls, value: dict):
         state = RubricSnapshot.model_validate(value)
-        session = cls(state.inputs, state.max_decisions)
-        for name in ("answers", "directives", "pending", "asked_count", "events", "rejected", "questions"):
+        session = cls(state.inputs, state.max_decisions, batch=state.batch)
+        for name in ("answers", "directives", "pending", "asked_count", "events", "rejected", "questions", "queued"):
             setattr(session, name, getattr(state, name))
         session.resolved_keys = set(state.resolved_keys)
         session.used_memory_ids = set(state.used_memory_ids)
@@ -390,3 +415,5 @@ class RubricSnapshot(StrictModel):
     questions: list[Candidate] = Field(default_factory=list)
     used_memory_ids: list[str] = Field(default_factory=list)
     blocked_memory_ids: list[str] = Field(default_factory=list)
+    batch: bool = False  # sessions saved before batching restore as one-question-per-call
+    queued: list[Candidate] = Field(default_factory=list)

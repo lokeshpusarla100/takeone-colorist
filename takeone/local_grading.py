@@ -1,5 +1,8 @@
 """Frame-bound SAM mattes and technical QA for the existing FFmpeg renderer."""
+import collections
+from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
+import os
 from pathlib import Path
 import json
 import re
@@ -110,14 +113,61 @@ def raster(records,width,height):
     return result,ids
 
 
+MATTE_VERSION=1
+
+
+def matte_key(proxy,source,evidence,records,plan,adaptive):
+    """Everything a matte depends on: masks (and their files), feather, timeline, geometry and code version."""
+    from .evidence import digest
+    frames=[]
+    for index in sorted(records):
+        rows=[]
+        for r in records[index]:
+            path=Path(r['directory'])/r['mask'];stat=path.stat()
+            rows.append([r['mask'],r['directory'],list(r['bounds']),r['object_id'],r['proxy'],stat.st_size,stat.st_mtime_ns])
+        frames.append([index,rows])
+    return digest({'frames':frames,'feather':plan.feather_px,'adaptive':adaptive,'timeline':evidence['key'],
+                   'cuts':evidence['cut_frames'],'proxy':str(Path(proxy).name),'size':[source.width,source.height],'version':MATTE_VERSION})
+
+
 def prepare_matte(proxy,output,source,evidence,records,plan,settings,cancel,*,adaptive=False,name='matte'):
-    """Encode and validate one lossless matte; name separates the subject matte from region mattes."""
+    """Encode and validate one lossless matte; name separates the subject matte from region mattes.
+
+    A matte depends only on its masks, feather, timeline and geometry, so revisions that keep them (the
+    usual critic revision changes colour, not masks) reuse the validated matte instead of rebuilding it.
+    """
+    output.mkdir(parents=True,exist_ok=True)
+    try:key=matte_key(proxy,source,evidence,records,plan,adaptive)
+    except OSError:key=None # a mask file is unreadable: build normally, which reports it
+    cache=Path(proxy).parent/'matte-cache'
+    if key and (cache/f'{key[:32]}.mkv').is_file() and (cache/f'{key[:32]}.json').is_file():
+        try:
+            qa=json.loads((cache/f'{key[:32]}.json').read_text())
+            target=output/f'{name}.mkv';target.unlink(missing_ok=True)
+            try:os.link(cache/f'{key[:32]}.mkv',target)
+            except OSError:import shutil;shutil.copyfile(cache/f'{key[:32]}.mkv',target)
+            sam.atomic(output/('mask-validation.json' if name=='matte' else f'{name}-validation.json'),qa)
+            return dict(qa,matte_cache_hit=True)
+        except (OSError,ValueError):pass # unusable cache entry: rebuild
+    qa=_build_matte(proxy,output,source,evidence,records,plan,settings,cancel,adaptive=adaptive,name=name)
+    if key:
+        try:
+            cache.mkdir(exist_ok=True);temporary=cache/f'.{key[:32]}.{os.getpid()}.mkv'
+            try:os.link(output/f'{name}.mkv',temporary)
+            except OSError:import shutil;shutil.copyfile(output/f'{name}.mkv',temporary)
+            os.replace(temporary,cache/f'{key[:32]}.mkv');sam.atomic(cache/f'{key[:32]}.json',qa)
+        except OSError:pass # caching is best effort
+    return qa
+
+
+def _build_matte(proxy,output,source,evidence,records,plan,settings,cancel,*,adaptive=False,name='matte'):
     mapping=evidence['frame_map'];w,h=mapping['proxy']['width'],mapping['proxy']['height']
     capture=cv2.VideoCapture(str(proxy));last_gray=last_mask=last_ids=None
     cuts=set(evidence['cut_frames']);unstable=[];warnings=[];active=0;uncertain_flow=[]
     flow_scale=min(160/w,160/h,1);fw,fh=max(8,int(w*flow_scale)),max(8,int(h*flow_scale))
     args=[settings.ffmpeg,'-v','error','-y','-f','rawvideo','-pixel_format','gray16le','-video_size',f'{source.width}x{source.height}',
-          '-framerate',mapping['proxy']['rate'],'-i','-','-an','-c:v','ffv1','-threads','2','-pix_fmt','gray16le',str(output/f'{name}.partial.mkv')]
+          '-framerate',mapping['proxy']['rate'],'-i','-','-an','-c:v','ffv1','-level','3','-slices','24','-threads','0', # lossless; slices let FFV1 use all cores
+          '-pix_fmt','gray16le',str(output/f'{name}.partial.mkv')]
     output.mkdir(parents=True,exist_ok=True)
     with (output/f'{name}-encode.log').open('wb') as log:
         process=subprocess.Popen(args,stdin=subprocess.PIPE,stderr=log)
@@ -193,6 +243,47 @@ def prepare_matte(proxy,output,source,evidence,records,plan,settings,cancel,*,ad
     return qa
 
 
+QC_WORKERS=max(1,min(12,(os.cpu_count() or 2)-1))
+_QC_POOL=None
+
+
+def _qc_pool():
+    """Shared worker pool for per-frame output statistics (NumPy releases the GIL in this work)."""
+    global _QC_POOL
+    if _QC_POOL is None:
+        _QC_POOL=ThreadPoolExecutor(max_workers=QC_WORKERS,thread_name_prefix='takeone-qc')
+    return _QC_POOL
+
+
+def frame_statistics(x,y,mask):
+    """Per-frame subject/background measurements, unchanged maths from the former sequential loop.
+
+    x, y: source/output frames already resized to the proxy (uint8 BGR); mask: proxy uint8 0/1.
+    Returns {layer: (shadow_increase, luma_ratio, chroma, highlight_chroma, mean_change, near_black_increase) | None}.
+    """
+    cores={'subject':cv2.erode(mask,np.ones((5,5),np.uint8))>0,
+           'background':cv2.erode(1-mask,np.ones((5,5),np.uint8))>0}
+    x=x.astype(np.float32)/255;y=y.astype(np.float32)/255
+    old=x@np.array([.0722,.7152,.2126]);new=y@np.array([.0722,.7152,.2126])
+    result={}
+    for name,core in cores.items():
+        if core.sum()<4:result[name]=None;continue
+        increase=float(np.mean(new[core]<=.01)-np.mean(old[core]<=.01))
+        # A 0.005 encoded-luma allowance avoids treating one-code quantization as lost legibility.
+        ratio=float((np.median(new[core])+.005)/max(.005,np.median(old[core])))
+        valid=core&(x.sum(axis=2)>.15)&(y.sum(axis=2)>.15)
+        difference=np.zeros(core.shape,np.float32)
+        if valid.any():
+            difference[valid]=np.abs(x[valid]/x[valid].sum(axis=1,keepdims=True)-y[valid]/y[valid].sum(axis=1,keepdims=True)).mean(axis=1)
+        chroma=float(np.median(difference[valid])) if valid.any() else 0
+        highlights=valid&(x.max(axis=2)>.75)
+        light_chroma=float(np.quantile(difference[highlights],.95)) if highlights.any() else 0
+        change=float(np.abs(y[core]-x[core]).mean())
+        black=float(np.mean(new[core]<=.02)-np.mean(old[core]<=.02)) if name=='background' else 0.
+        result[name]=(increase,ratio,chroma,light_chroma,change,black)
+    return result
+
+
 def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,limits=None,adaptive=False):
     mapping=evidence['frame_map'];timing=sam.frame_info(graded,settings,cancel,require_cfr=mapping.get('schema_version')!=3)
     if len(timing['pts'])!=mapping['frame_count'] or any(abs(t-f['time'])>.002 for t,f in zip(timing['normalized'],mapping['frames'])):
@@ -203,39 +294,40 @@ def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,
                 [('contrast',1),('gamma',1),('saturation',1),('brightness_gain',1),('cooling',0),('highlight_ceiling',1)])
     def empty():return {'shadow_increase':0.,'subject_luma_ratio':1.,'chroma_change':0.,'highlight_chroma_change':0.}
     worst={'subject':empty(),'background':empty()};counts={'subject':0,'background':0};background_black=0.;pixel_change={'subject':0.,'background':0.};worst_frames={}
+    # Frames are read in order here; each frame's statistics are independent, so they run on all cores
+    # and are folded back strictly in frame order, giving exactly the sequential results (including which
+    # frame is reported as worst and which frame raises first).
+    pending=collections.deque();window=max(4,4*QC_WORKERS)
+    def fold(i,future):
+        nonlocal background_black
+        stats=future.result()
+        for name in ['subject','background']:
+            value=stats[name]
+            if value is None:
+                if name=='subject':raise Problem('LOCAL_MASK_CORE','The selected subject has no measurable interior.','Inspect the mask geometry.',422)
+                continue
+            increase,ratio,chroma,light_chroma,change,black=value
+            metrics=worst[name]
+            pixel_change[name]=max(pixel_change[name],change)
+            metrics['shadow_increase']=max(metrics['shadow_increase'],increase)
+            if ratio<metrics['subject_luma_ratio']:worst_frames[name]=i
+            metrics['subject_luma_ratio']=min(metrics['subject_luma_ratio'],ratio)
+            metrics['chroma_change']=max(metrics['chroma_change'],chroma)
+            metrics['highlight_chroma_change']=max(metrics['highlight_chroma_change'],light_chroma);counts[name]+=1
+            if name=='background':background_black=max(background_black,black)
+    pool=_qc_pool()
     try:
         for i in range(mapping['frame_count']):
             sam.check(cancel);oka,x=a.read();okb,y=b.read()
             if not oka or not okb:raise Problem('LOCAL_OUTPUT_DECODE','Source/output decode ended before the mapped frames.','Candidate was not accepted.',422)
             if i not in records:continue
             mask,_=raster(records[i],w,h)
-            cores={'subject':cv2.erode(mask,np.ones((5,5),np.uint8))>0,
-                   'background':cv2.erode(1-mask,np.ones((5,5),np.uint8))>0}
-            x=cv2.resize(x,(w,h)).astype(np.float32)/255;y=cv2.resize(y,(w,h)).astype(np.float32)/255
-            old=x@np.array([.0722,.7152,.2126]);new=y@np.array([.0722,.7152,.2126])
-            for name,core in cores.items():
-                if core.sum()<4:
-                    if name=='subject':raise Problem('LOCAL_MASK_CORE','The selected subject has no measurable interior.','Inspect the mask geometry.',422)
-                    continue
-                increase=float(np.mean(new[core]<=.01)-np.mean(old[core]<=.01))
-                # A 0.005 encoded-luma allowance avoids treating one-code quantization as lost legibility.
-                ratio=float((np.median(new[core])+.005)/max(.005,np.median(old[core])))
-                valid=core&(x.sum(axis=2)>.15)&(y.sum(axis=2)>.15)
-                difference=np.zeros(core.shape,np.float32)
-                if valid.any():
-                    difference[valid]=np.abs(x[valid]/x[valid].sum(axis=1,keepdims=True)-y[valid]/y[valid].sum(axis=1,keepdims=True)).mean(axis=1)
-                chroma=float(np.median(difference[valid])) if valid.any() else 0
-                highlights=valid&(x.max(axis=2)>.75)
-                light_chroma=float(np.quantile(difference[highlights],.95)) if highlights.any() else 0
-                metrics=worst[name]
-                pixel_change[name]=max(pixel_change[name],float(np.abs(y[core]-x[core]).mean()))
-                metrics['shadow_increase']=max(metrics['shadow_increase'],increase)
-                if ratio<metrics['subject_luma_ratio']:worst_frames[name]=i
-                metrics['subject_luma_ratio']=min(metrics['subject_luma_ratio'],ratio)
-                metrics['chroma_change']=max(metrics['chroma_change'],chroma)
-                metrics['highlight_chroma_change']=max(metrics['highlight_chroma_change'],light_chroma);counts[name]+=1
-                if name=='background':background_black=max(background_black,float(np.mean(new[core]<=.02)-np.mean(old[core]<=.02)))
-    finally:a.release();b.release()
+            pending.append((i,pool.submit(frame_statistics,cv2.resize(x,(w,h)),cv2.resize(y,(w,h)),mask)))
+            while len(pending)>window:fold(*pending.popleft())
+        while pending:fold(*pending.popleft())
+    finally:
+        for _,future in pending:future.cancel()
+        a.release();b.release()
     result={'checked_subject_frames':counts['subject'],'worst_measured':worst['subject'],
             'background_checked_frames':counts['background'],'background_worst_measured':worst['background'],
             'background_near_black_increase_max':background_black,'review_status':'needs_user_review',

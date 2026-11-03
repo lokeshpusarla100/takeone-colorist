@@ -18,6 +18,8 @@ import cv2
 import numpy as np
 from openai import AsyncOpenAI, APIError
 from meta_sam_parser import parse_responses_stream, video_segmentation_format, decode_mask_to_raster
+from . import mask_decode
+mask_decode.install()
 
 from .errors import Problem
 from .media import command, display_size, probe, rotation_supported
@@ -199,6 +201,9 @@ class SamProvider:
             else:
                 await download()
             check(cancel);progress(None)
+            # Decode every mask payload once, in parallel, before the parser validates them one by one.
+            await asyncio.to_thread(mask_decode.warm_from_events,events_path)
+            check(cancel)
             async def replay():
                 with events_path.open() as stored:
                     for row in stored:
@@ -295,7 +300,7 @@ def persist_result(result,frame_map,directory,cancel):
         x,y,x2,y2=[int(getattr(record.bounds,k)) for k in ['left','top','right','bottom']]
         if not(0<=x<x2<=w and 0<=y<y2<=h) or record.mask.width*record.mask.height>w*h:
             raise Problem('SAM_MASK_GEOMETRY','Mask bounds exceed the proxy frame.','Inspect the returned geometry.',422)
-        raster=np.frombuffer(decode_mask_to_raster(record.mask),np.uint8).reshape(record.mask.height,record.mask.width)
+        raster=np.frombuffer(mask_decode.take(record.mask),np.uint8).reshape(record.mask.height,record.mask.width)
         name=f'masks/f{i:05d}-o{record.object_id}.png'
         if not cv2.imwrite(str(directory/name),raster*255):
             raise Problem('SAM_MASK_WRITE_FAILED','A decoded mask could not be saved.','Check storage, then retry local decoding.',507)

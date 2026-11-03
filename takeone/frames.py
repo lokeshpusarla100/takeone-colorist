@@ -64,3 +64,46 @@ def probe_frames(path, settings, cancel, timeout=90):
     with _lock:
         _memory[resolved] = (current, raw)
     return raw
+
+
+def remember_decoded(path, metadata, manifest):
+    """Record a decode the caller already performed (e.g. the render's strict full-output decode) as this
+    file's probe, so no second full decode is needed for its timestamps.
+
+    `manifest` is evidence._decode_manifest output (integer decoded PTS in the stream time base, frame
+    durations); `metadata` is the file's ffprobe -show_streams/-show_format JSON. Times are formatted as
+    ffprobe does (ts * time_base as a double, six decimals). tests/test_render_timing.py checks the result
+    is identical to a real probe of a rendered file.
+    """
+    from fractions import Fraction
+    video = next(s for s in metadata['streams'] if s['codec_type'] == 'video')
+    tick = Fraction(manifest['time_base'])
+    if tick != Fraction(video['time_base']) or len(manifest['pts']) != len(manifest['durations']):
+        return False
+    seconds = tick.numerator / tick.denominator
+    stream = {k: video[k] for k in ['width', 'height', 'r_frame_rate', 'avg_frame_rate', 'time_base'] if k in video}
+    # Same filtering as the real probe's ENTRIES: only the rotate tag and rotation side data.
+    if 'tags' in video:
+        stream['tags'] = {k: v for k, v in video['tags'].items() if k == 'rotate'}
+    rotation = [{'rotation': item['rotation']} for item in video.get('side_data_list') or [] if 'rotation' in item]
+    if rotation:
+        stream['side_data_list'] = rotation
+    raw = {'frames': [{'best_effort_timestamp': pts, 'best_effort_timestamp_time': f'{pts * seconds:.6f}', 'duration': duration}
+                      for pts, duration in zip(manifest['pts'], manifest['durations'])],
+           'streams': [stream], 'format': {'start_time': metadata.get('format', {}).get('start_time', '0.000000')}}
+    path = Path(path)
+    try:
+        current = identity(path)
+    except OSError:
+        return False
+    cache = path.with_name(path.name + f'.frames-v{VERSION}.json')
+    temporary = cache.with_name('.' + cache.name + '.' + uuid4().hex)
+    try:
+        temporary.write_text(json.dumps({'identity': current, 'raw': raw, 'source': 'render_decode'}))
+        os.replace(temporary, cache)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        return False
+    with _lock:
+        _memory[str(path.resolve())] = (current, raw)
+    return True

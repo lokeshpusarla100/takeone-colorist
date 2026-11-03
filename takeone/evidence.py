@@ -48,11 +48,13 @@ def _decode_manifest(raw,metadata):
                       'The output was not accepted. Inspect decoder/timestamp diagnostics.',422)
 
 
-def decoded_evidence(path,settings,cancel,metadata,selection):
+def decoded_evidence(path,settings,cancel,metadata,selection,*,also=()):
     """Strict full-resolution decode/timing and bounded sample RGB in one pass.
 
-    Only the sparse evidence branch is scaled. All original video frames and
+    Only the sparse evidence branches are scaled. All original video frames and
     audio packets still traverse the independent full-resolution integrity path.
+    ``also``: extra (indices, size_limit) frame sets decoded in the same pass (the review's scan
+    frames), returned as a third value {size_limit: {index: frame}}; each costs no extra decode.
     """
     video=next(s for s in metadata['streams'] if s['codec_type']=='video')
     shown_width,shown_height=display_size(video) # FFmpeg auto-rotates before the scaled evidence branch
@@ -66,21 +68,39 @@ def decoded_evidence(path,settings,cancel,metadata,selection):
         raise Problem('EVIDENCE_MEMORY_BUDGET','Requested visual evidence exceeds the configured memory budget.',
                       'Reduce sample count or dimensions.',422)
     selected='+'.join(fr'eq(n\,{i})' for i in indices)
-    graph=f'[0:v:0]split=2[full][samplein];[samplein]select={selected},scale={width}:{height}[samples]'
+    extra=[]
+    for frame_set,limit in also:
+        frame_set=sorted(set(frame_set));w,h=sample_size(shown_width,shown_height,limit)
+        if frame_set and frame_set[-1]<len(selection['manifest']['times']) and len(frame_set)*w*h*3<=settings.sample_memory_bytes:
+            extra.append((frame_set,limit,w,h))
+    graph=(f'[0:v:0]split={2+len(extra)}[full][samplein]'+''.join(f'[extra{k}]' for k in range(len(extra)))
+           +f';[samplein]select={selected},scale={width}:{height}[samples]'
+           +''.join(f";[extra{k}]select={'+'.join(fr'eq(n,{i})' for i in s)},scale={w}:{h}[extraout{k}]".replace('eq(n,',r'eq(n\,')
+                    for k,(s,_l,w,h) in enumerate(extra)))
     with tempfile.TemporaryDirectory(prefix='takeone-qc-') as directory:
         sample_path=Path(directory)/'selected.rgb'
+        extra_outputs=[]
+        for k,_ in enumerate(extra):
+            extra_outputs+=['-map',f'[extraout{k}]','-an','-c:v','rawvideo','-threads:v','1','-pix_fmt','rgb24','-enc_time_base:v',video['time_base'],
+                            '-fps_mode','passthrough','-f','rawvideo',str(Path(directory)/f'extra{k}.rgb')]
         raw=command([settings.ffmpeg,'-v','error','-xerror','-nostdin','-copyts','-filter_complex_threads','2',
             '-threads','4','-i',str(path),'-filter_complex',graph,
             '-map','[full]','-map','0:a:0?','-c:v','rawvideo','-threads:v','1','-pix_fmt:v',video['pix_fmt'],
             '-enc_time_base:v',video['time_base'],'-fps_mode','passthrough','-c:a','pcm_s16le','-f','framecrc','-',
             '-map','[samples]','-an','-c:v','rawvideo','-threads:v','1','-pix_fmt','rgb24','-enc_time_base:v',video['time_base'],
-            '-fps_mode','passthrough','-f','rawvideo',str(sample_path)],cancel,120)
+            '-fps_mode','passthrough','-f','rawvideo',str(sample_path),*extra_outputs],cancel,120)
         manifest=_decode_manifest(raw,metadata)
         if sample_path.stat().st_size!=expected:
             raise Problem('EVIDENCE_DECODE_FAILED','Decoded evidence does not match the selected frame identities.',
                           'Inspect frame timing/decoder diagnostics; no model input was accepted.',422)
         pixels=np.frombuffer(sample_path.read_bytes(),np.uint8).reshape(len(indices),height,width,3)
-    return manifest,{index:frame for index,frame in zip(indices,pixels)}
+        extras={}
+        for k,(frame_set,limit,w,h) in enumerate(extra):
+            data=(Path(directory)/f'extra{k}.rgb').read_bytes()
+            if len(data)==len(frame_set)*w*h*3: # otherwise simply not cached; the review decodes as before
+                extras[limit]=dict(zip(frame_set,np.frombuffer(data,np.uint8).reshape(len(frame_set),h,w,3)))
+    result={index:frame for index,frame in zip(indices,pixels)}
+    return (manifest,result,extras) if also else (manifest,result)
 
 
 def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -153,32 +173,59 @@ def extract(path,manifest,indices,settings,cancel,width=256):
     if expected>settings.sample_memory_bytes:
         raise Problem('EVIDENCE_MEMORY_BUDGET','Requested visual evidence exceeds the configured memory budget.',
                       'Reduce sample count or dimensions.',422)
-    # The same frames of the same file are requested by planning, preflight and review: decode once.
+    # The same frames of the same file are requested by planning, preflight, rendering and review:
+    # each frame is decoded at most once per file and size, then served from a per-frame store.
+    stored=load_frames(path,w,h)
+    missing=[i for i in indices if i not in stored]
+    if missing:
+        selection='+'.join(fr'eq(n\,{i})' for i in missing)
+        # -threads 0: all-core decode, byte-identical pixels to the previous fixed 4 threads, ~2.5x faster.
+        raw=command([settings.ffmpeg,'-v','error','-nostdin','-threads','0','-i',str(path),'-an','-vf',f'select={selection},scale={w}:{h}',
+            '-frames:v',str(len(missing)),'-fps_mode','passthrough','-pix_fmt','rgb24','-f','rawvideo','-'],cancel,60,binary=True)
+        if len(raw)!=len(missing)*w*h*3:raise Problem('EVIDENCE_DECODE_FAILED','Decoded evidence does not match the selected frame identities.',
+                                           'Inspect frame timing/decoder diagnostics; no model input was accepted.',422)
+        decoded=dict(zip(missing,np.frombuffer(raw,np.uint8).reshape(len(missing),h,w,3)))
+        remember_frames(path,decoded)
+        stored={**stored,**decoded}
+    return {i:stored[i].copy() for i in indices}
+
+
+def _store_path(path,width,height):
+    return Path(path).with_name(Path(path).name+f'.frames-{width}x{height}.npz')
+
+
+def load_frames(path,width,height):
+    """Frames of this exact file already decoded at this size, {index: HxWx3 uint8}; empty when unknown."""
     from .frames import identity
-    try:file_identity=identity(path)
-    except OSError:file_identity=None # the decode below reports the problem as before
-    key=digest({'file':file_identity,'indices':indices,'width':w,'height':h,'version':1})
-    cache=Path(path).with_name(Path(path).name+f'.samples-{key[:20]}.npz')
     try:
-        if file_identity is None:raise OSError()
-        with np.load(cache,allow_pickle=False) as saved:
-            if str(saved['key'])==key and saved['pixels'].shape==(len(indices),h,w,3) and saved['pixels'].dtype==np.uint8:
-                return {i:frame for i,frame in zip(indices,saved['pixels'].copy())}
-    except (OSError,ValueError,KeyError):pass
-    selection='+'.join(fr'eq(n\,{i})' for i in indices)
-    # -threads 0: all-core decode, byte-identical pixels to the previous fixed 4 threads, ~2.5x faster.
-    raw=command([settings.ffmpeg,'-v','error','-nostdin','-threads','0','-i',str(path),'-an','-vf',f'select={selection},scale={w}:{h}',
-        '-frames:v',str(len(indices)),'-fps_mode','passthrough','-pix_fmt','rgb24','-f','rawvideo','-'],cancel,60,binary=True)
-    if len(raw)!=expected:raise Problem('EVIDENCE_DECODE_FAILED','Decoded evidence does not match the selected frame identities.',
-                                       'Inspect frame timing/decoder diagnostics; no model input was accepted.',422)
-    pixels=np.frombuffer(raw,np.uint8).reshape(len(indices),h,w,3)
-    temporary=cache.with_name('.'+cache.name+'.'+str(time.monotonic_ns())+'.npz')
+        current=json.dumps(identity(path),sort_keys=True)
+        with np.load(_store_path(path,width,height),allow_pickle=False) as saved:
+            if str(saved['identity'])!=current or saved['pixels'].shape[1:]!=(height,width,3) or saved['pixels'].dtype!=np.uint8:return {}
+            return {int(i):frame for i,frame in zip(saved['indices'],saved['pixels'])}
+    except (OSError,ValueError,KeyError):return {}
+
+
+def remember_frames(path,frames):
+    """Add decoded frames (all the same size) to the file's per-frame store; best effort, never required."""
+    from .frames import identity
+    if not frames:return
+    sample=next(iter(frames.values()));height,width=sample.shape[:2]
+    try:current=json.dumps(identity(path),sort_keys=True)
+    except OSError:return
+    merged={**load_frames(path,width,height),**{int(i):np.asarray(f,np.uint8) for i,f in frames.items()}}
+    order=sorted(merged);target=_store_path(path,width,height)
+    temporary=target.with_name('.'+target.name+'.'+str(time.monotonic_ns())+'.npz')
     try:
-        if file_identity is None:raise OSError()
-        with temporary.open('wb') as stream:np.savez(stream,key=np.array(key),pixels=pixels)
-        temporary.replace(cache)
+        with temporary.open('wb') as stream:
+            np.savez(stream,identity=np.array(current),indices=np.array(order,np.int64),pixels=np.stack([merged[i] for i in order]))
+        temporary.replace(target)
     except OSError:temporary.unlink(missing_ok=True)
-    return {i:frame for i,frame in zip(indices,pixels)}
+
+
+def sample_size(width,height,limit=256):
+    """Evidence frame size for a display geometry, exactly as extract() computes it."""
+    scale=min(limit/width,limit/height,1)
+    return max(2,int(width*scale)//2*2),max(2,int(height*scale)//2*2)
 
 
 def measure(pixels):
@@ -224,6 +271,22 @@ def select(features,shots,focus,max_count):
     return selected
 
 
+def scan_indices(times,shots,focus,settings,width,height):
+    """Frames plan() scans for features, in plan() order. Rendering decodes these in advance for the review."""
+    count=len(times)
+    nearest=lambda t:min(range(count),key=lambda i:abs(times[i]-t))
+    desired=[nearest((s['start']+s['end'])/2) for s in shots]
+    desired+=[nearest(t) for a,b in focus for t in [a,(a+b)/2,max(a,b-.001)]]
+    desired+=[int(v) for v in np.linspace(0,count-1,settings.sample_scan_frames)]
+    scan=[]
+    bytes_per_frame=min(settings.sample_width,width)*min(settings.sample_width,height)*3
+    limit=min(settings.sample_scan_frames,max(1,settings.sample_memory_bytes//max(1,bytes_per_frame)))
+    for i in desired:
+        if i not in scan:scan.append(i)
+        if len(scan)>=limit:break
+    return scan
+
+
 def plan(path,source,settings,cancel,*,proxy=None,shots=None,focus=(),cache=None):
     started=time.monotonic()
     scan_path=Path(proxy) if proxy and Path(proxy).exists() else Path(path)
@@ -239,17 +302,8 @@ def plan(path,source,settings,cancel,*,proxy=None,shots=None,focus=(),cache=None
     if len(manifest['times'])!=len(scan_manifest['times']) or any(abs(a-b)>.002 for a,b in zip(manifest['times'],scan_manifest['times'])):
         scan_path=Path(path);scan_manifest=manifest
     shots=shots or [{'start':0.,'end':source.duration,'first_frame':0,'last_frame':len(manifest['times'])-1}]
-    times=manifest['times'];count=len(times)
-    nearest=lambda t:min(range(count),key=lambda i:abs(times[i]-t))
-    desired=[nearest((s['start']+s['end'])/2) for s in shots]
-    desired+=[nearest(t) for a,b in focus for t in [a,(a+b)/2,max(a,b-.001)]]
-    desired+=[int(v) for v in np.linspace(0,count-1,settings.sample_scan_frames)]
-    scan=[]
-    bytes_per_frame=min(settings.sample_width,scan_manifest['width'])*min(settings.sample_width,scan_manifest['height'])*3
-    limit=min(settings.sample_scan_frames,max(1,settings.sample_memory_bytes//max(1,bytes_per_frame)))
-    for i in desired:
-        if i not in scan:scan.append(i)
-        if len(scan)>=limit:break
+    times=manifest['times']
+    scan=scan_indices(times,shots,focus,settings,scan_manifest['width'],scan_manifest['height'])
     pixels=extract(scan_path,scan_manifest,scan,settings,cancel,width=settings.sample_width)
     features=[];previous=None
     for i in sorted(pixels):

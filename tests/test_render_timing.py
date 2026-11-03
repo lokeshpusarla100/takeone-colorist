@@ -196,7 +196,7 @@ def test_extract_is_cached_per_file_and_frames_and_matches_a_fresh_decode(tmp_pa
     cancel = th.Event()
     manifest = ev.frame_manifest(clip, settings, cancel)
     first = ev.extract(clip, manifest, [0, 5, 11], settings, cancel)
-    assert list(clip.parent.glob('clip.mp4.samples-*.npz'))
+    assert list(clip.parent.glob('clip.mp4.frames-*x*.npz'))  # per-frame store
     second = ev.extract(clip, manifest, [0, 5, 11], settings, cancel)
     other = ev.extract(clip, manifest, [3], settings, cancel)  # different frames: not served from the first entry
     assert all(np.array_equal(first[i], second[i]) for i in [0, 5, 11]) and not np.array_equal(other[3], first[0])

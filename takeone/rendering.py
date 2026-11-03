@@ -390,12 +390,22 @@ def _render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,pr
             command([settings.ffmpeg,'-v','error','-xerror','-i',str(master),'-f','null','-'],cancel,120)
             return evidence.frame_manifest(master,settings,cancel),evidence.frame_manifest(view,settings,cancel),None
         with ThreadPoolExecutor(max_workers=2,thread_name_prefix='takeone-decode') as pool:
-            a=(pool.submit(evidence.decoded_evidence,master,settings,cancel,metadata,recipe.evidence_selection)
+            a=(pool.submit(evidence.decoded_evidence,master,settings,cancel,metadata,recipe.evidence_selection,also=review_frames)
                if recipe.evidence_selection else pool.submit(evidence.decoded_manifest,master,settings,cancel,metadata))
             b=pool.submit(evidence.decoded_manifest,view,settings,cancel,preview_meta)
             decoded=a.result()
-            manifest,frames=decoded if recipe.evidence_selection else (decoded,None)
+            manifest,frames,extras=decoded if recipe.evidence_selection else (decoded,None,{})
+            review_cache.update(extras)
             return manifest,b.result(),frames
+    # The creative review scans this output at exactly these frames; decode them in the same pass.
+    review_frames=()
+    if recipe.evidence_selection and 'times' in source_manifest:
+        count=len(source_manifest['times'])
+        shots=recipe.timeline['shots'] if recipe.timeline else [{'start':0.,'end':original.duration,'first_frame':0,'last_frame':count-1}]
+        focus=[(i.start,i.end) for i in recipe.proposal.local.intervals] if recipe.proposal.local else []
+        scan=evidence.scan_indices(source_manifest['times'],shots,focus,settings,original.width,original.height)
+        review_frames=[(scan,settings.sample_width),(scan,256)]
+    review_cache={}
     output_manifest,preview_manifest,output_pixels=_elapsed(profile,'decode_and_timing_seconds',decode_pair)
     video = next(s for s in metadata["streams"] if s["codec_type"] == "video")
     preview_video = next(s for s in preview_meta["streams"] if s["codec_type"] == "video")
@@ -439,6 +449,13 @@ def _render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,pr
             warnings.append(f'New encoded-black pixels near {before["requested_time"]:.2f}s; inspect lost detail.')
     master.replace(directory / "grade.mp4")
     view.replace(directory / "preview.webm")
+    if qc_mode=='optimized':
+        # Record what this decode already produced against the final file (rename keeps its identity):
+        # its frame timing and the review's frames, so the review and later revisions never re-decode it.
+        from . import frames as frame_probe
+        frame_probe.remember_decoded(directory/'grade.mp4',metadata,output_manifest)
+        for frames_at_size in review_cache.values():evidence.remember_frames(directory/'grade.mp4',frames_at_size)
+        if output_pixels:evidence.remember_frames(directory/'grade.mp4',output_pixels)
     version = command([settings.ffmpeg, "-version"], cancel, 10).splitlines()[0]
     return {
         "width": video["width"], "height": video["height"], "duration": duration,

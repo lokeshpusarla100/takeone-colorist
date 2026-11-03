@@ -43,13 +43,13 @@ def test_critic_starts_before_the_output_check_has_finished(settings, scene):
 
 
 def test_output_check_warnings_cause_a_re_review_with_the_full_results(settings, scene, monkeypatch):
-    original = local_grading.check_output
+    original = local_grading._judge_output  # shared by check_output and the early-started check
 
     def warned(*args, **kwargs):
         result = original(*args, **kwargs)
         result['warnings'] = result['warnings'] + ['Fixture: inspect dark background detail.']
         return result
-    monkeypatch.setattr(local_grading, 'check_output', warned)
+    monkeypatch.setattr(local_grading, '_judge_output', warned)
     planner = Recording(gains=[.7], decisions=['sufficient', 'sufficient'], local=True)
     with TestClient(create_app(settings, planner, Masks()), base_url='http://127.0.0.1') as client:
         result = generate(client, start(client, upload(client, scene), 'explicit dark background, keep red subject'))
@@ -80,7 +80,7 @@ def test_no_early_call_for_a_revision_the_convergence_rule_will_stop(settings, s
 def test_a_failed_output_check_never_stores_the_early_opinion(settings, scene, monkeypatch):
     def failing(*args, **kwargs):
         raise Problem('LOCAL_PROTECTION_FAILED', 'Fixture protection failure.', 'Fixture.', 422)
-    monkeypatch.setattr(local_grading, 'check_output', failing)
+    monkeypatch.setattr(local_grading, '_judge_output', failing)
     planner = Recording(gains=[.7], decisions=['sufficient'], local=True)
     with TestClient(create_app(settings, planner, Masks()), base_url='http://127.0.0.1') as client:
         result = generate(client, start(client, upload(client, scene), 'explicit dark background, keep red subject'))

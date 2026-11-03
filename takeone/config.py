@@ -34,6 +34,9 @@ class Settings:
     # Critic revisions of sources larger than this (long side, px) render as drafts at this size;
     # the version finally chosen is rendered once in full resolution. 0 disables drafts.
     draft_long_side: int = 1920
+    # 'rows' (one object per frame, the verified default) or 'columns' (field names once, same facts):
+    # columns needs ~29% fewer JSON tokens; enable only after scripts/critic_layout_ab.py shows equal reviews.
+    critic_table_layout: str = 'rows'
 
     @classmethod
     def from_env(cls):
@@ -61,4 +64,5 @@ class Settings:
             sample_image_bytes=max(64,min(2048,int(os.getenv('TAKEONE_SAMPLE_IMAGE_KB','1024'))))*1024,
             max_render_iterations=max(1,min(3,int(os.getenv('TAKEONE_MAX_RENDER_ITERATIONS','3')))),
             draft_long_side=max(0,int(os.getenv('TAKEONE_DRAFT_LONG_SIDE','1920'))),
+            critic_table_layout='columns' if os.getenv('TAKEONE_CRITIC_TABLE_LAYOUT','rows').strip()=='columns' else 'rows',
         )

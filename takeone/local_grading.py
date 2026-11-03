@@ -3,6 +3,7 @@ import collections
 from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 import os
+import threading
 from pathlib import Path
 import json
 import re
@@ -284,14 +285,15 @@ def frame_statistics(x,y,mask):
     return result
 
 
-def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,limits=None,adaptive=False):
-    mapping=evidence['frame_map'];timing=sam.frame_info(graded,settings,cancel,require_cfr=mapping.get('schema_version')!=3)
+def _output_timing(graded,mapping,settings,cancel):
+    timing=sam.frame_info(graded,settings,cancel,require_cfr=mapping.get('schema_version')!=3)
     if len(timing['pts'])!=mapping['frame_count'] or any(abs(t-f['time'])>.002 for t,f in zip(timing['normalized'],mapping['frames'])):
         raise Problem('LOCAL_OUTPUT_TIMING','Rendered frames no longer match source timing.','The candidate was not accepted.',422)
-    a,b=cv2.VideoCapture(str(original)),cv2.VideoCapture(str(graded))
+
+
+def _measure_output(a,b,mapping,records,cancel,stop=None):
+    """Per-frame protected-area statistics of two open captures, folded in frame order; releases both."""
     w,h=mapping['proxy']['width'],mapping['proxy']['height']
-    neutral=all(abs(getattr(plan.background,k)-v)<1e-8 for k,v in
-                [('contrast',1),('gamma',1),('saturation',1),('brightness_gain',1),('cooling',0),('highlight_ceiling',1)])
     def empty():return {'shadow_increase':0.,'subject_luma_ratio':1.,'chroma_change':0.,'highlight_chroma_change':0.}
     worst={'subject':empty(),'background':empty()};counts={'subject':0,'background':0};background_black=0.;pixel_change={'subject':0.,'background':0.};worst_frames={}
     # Frames are read in order here; each frame's statistics are independent, so they run on all cores
@@ -318,7 +320,9 @@ def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,
     pool=_qc_pool()
     try:
         for i in range(mapping['frame_count']):
-            sam.check(cancel);oka,x=a.read();okb,y=b.read()
+            sam.check(cancel)
+            if stop is not None and stop.is_set():raise Problem('JOB_CANCELLED','The output check was abandoned.','The render did not complete.',409)
+            oka,x=a.read();okb,y=b.read()
             if not oka or not okb:raise Problem('LOCAL_OUTPUT_DECODE','Source/output decode ended before the mapped frames.','Candidate was not accepted.',422)
             if i not in records:continue
             mask,_=raster(records[i],w,h)
@@ -328,6 +332,13 @@ def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,
     finally:
         for _,future in pending:future.cancel()
         a.release();b.release()
+    return worst,counts,background_black,pixel_change,worst_frames
+
+
+def _judge_output(measured,plan,limits,adaptive):
+    worst,counts,background_black,pixel_change,worst_frames=measured
+    neutral=all(abs(getattr(plan.background,k)-v)<1e-8 for k,v in
+                [('contrast',1),('gamma',1),('saturation',1),('brightness_gain',1),('cooling',0),('highlight_ceiling',1)])
     result={'checked_subject_frames':counts['subject'],'worst_measured':worst['subject'],
             'background_checked_frames':counts['background'],'background_worst_measured':worst['background'],
             'background_near_black_increase_max':background_black,'review_status':'needs_user_review',
@@ -350,3 +361,44 @@ def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,
         raise Problem('LOCAL_NO_VISIBLE_EFFECT','The localized recipe produced no measurable change beyond encoding noise.',
                       'Revise the supported treatment; the candidate was not labeled a successful selective edit.',422)
     return result
+
+
+def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,limits=None,adaptive=False):
+    mapping=evidence['frame_map'];_output_timing(graded,mapping,settings,cancel)
+    a,b=cv2.VideoCapture(str(original)),cv2.VideoCapture(str(graded))
+    return _judge_output(_measure_output(a,b,mapping,records,cancel),plan,limits,adaptive)
+
+
+_CHECK_RUNNER=None
+
+
+class PendingOutputCheck:
+    """The output check's measurement, started right after encoding so it overlaps the render's own
+    integrity decode. finish() then runs the same timing check, measurement and judgement, in the same
+    order of precedence as check_output, so results and errors are identical; abort() stops it early."""
+
+    def __init__(self,original,graded,evidence,records,plan,settings,cancel,limits,adaptive):
+        global _CHECK_RUNNER
+        self.mapping=evidence['frame_map'];self.plan,self.settings,self.cancel=plan,settings,cancel
+        self.limits,self.adaptive=limits,adaptive;self.stop=threading.Event()
+        # Opened now: the open files survive the render's later rename of the partial output.
+        a,b=cv2.VideoCapture(str(original)),cv2.VideoCapture(str(graded))
+        if not a.isOpened() or not b.isOpened():
+            a.release();b.release();self.future=None;return
+        if _CHECK_RUNNER is None:_CHECK_RUNNER=ThreadPoolExecutor(max_workers=1,thread_name_prefix='takeone-output-check')
+        self.future=_CHECK_RUNNER.submit(_measure_output,a,b,self.mapping,records,cancel,self.stop)
+
+    def finish(self,graded):
+        """Judge the finished output (the final, renamed file) exactly as check_output would."""
+        try:
+            _output_timing(graded,self.mapping,self.settings,self.cancel)
+        except BaseException:
+            self.abort();raise
+        if self.future is None:raise Problem('LOCAL_OUTPUT_DECODE','Source/output decode ended before the mapped frames.','Candidate was not accepted.',422)
+        return _judge_output(self.future.result(),self.plan,self.limits,self.adaptive)
+
+    def abort(self):
+        self.stop.set()
+        if self.future is not None:
+            try:self.future.result()
+            except BaseException:pass

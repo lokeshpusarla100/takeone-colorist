@@ -12,6 +12,7 @@ from .contracts import SceneAnalysis, GradeProposal, CreativeReview
 from .errors import Problem
 from .preferences import PromptMemoryGate
 from .usage import usage_details
+from . import model_payload
 
 
 # What each control does in the shipped v3 operator (color_processing.apply_rgb). Pinned by tests/test_tone_semantics.py:
@@ -126,7 +127,7 @@ class MuseProvider:
             "brief": brief.model_dump(mode="json"),
             "scene_analysis": analysis.model_dump(mode="json"),
             "source": source.model_dump(mode="json"),
-            "sample_statistics": sample_stats,
+            "sample_statistics": model_payload.rounded(sample_stats),
             "allowed_source_ids": references,
             "controls": CONTROL_SEMANTICS,
             "highlight_handling": HIGHLIGHT_HANDLING,
@@ -135,7 +136,7 @@ class MuseProvider:
         context['execution_capabilities']=technical_context or {'operations':['global_grade'],
             'limitations':['Localized execution not verified for this request.']}
         context = self.prompt_context("colorist", context, brief.project_id)
-        content = [{"type": "text", "text": json.dumps(context)}]
+        content = [{"type": "text", "text": json.dumps(context, separators=(',', ':'))}]  # no whitespace: identical content
         for image in images:
             content += [{"type": "text", "text": f'Source sample requested at {image["time"]:.3f}s.'},
                         {"type": "image_url", "image_url": {"url": image["url"], "detail": "low"}}]
@@ -241,9 +242,12 @@ class MuseProvider:
         """Creative opinion from paired real rendered pixels, never plan-only approval."""
         import json
         context={'brief':brief.model_dump(mode='json'),'candidate_id':candidate.id,
-            'plan':candidate.recipe.proposal.model_dump(mode='json'),'technical_result':candidate.validation,
-            'paired_diagnostics':evidence_data['measurements'],'detail_retention':evidence_data['detail_retention'],
-            'tonal_levels':evidence_data.get('tonal_levels'),
+            # Each fact once: the version's record without statistics re-sent below, measurements rounded.
+            'plan':candidate.recipe.proposal.model_dump(mode='json'),'technical_result':model_payload.technical_result(candidate.validation),
+            'paired_diagnostics':model_payload.rounded(evidence_data['measurements']),
+            'detail_retention':model_payload.rounded(evidence_data['detail_retention']),
+            'tonal_levels':model_payload.rounded(evidence_data.get('tonal_levels')),
+            'table_layout':self.settings.critic_table_layout,
             'mask_concepts':sorted({o['concept'] for o in evidence_data.get('mask_overlay_images',[])}),
             'current_video_feedback':list(feedback),'uncertainty':evidence_data['uncertainty'],
             'execution_capabilities':candidate.validation.get('execution_capabilities',{}),'highlight_handling':HIGHLIGHT_HANDLING,'control_semantics':CONTROL_SEMANTICS,
@@ -262,8 +266,13 @@ class MuseProvider:
                          f'"{frame["concept"]}" tinted and outlined ({frame["coverage"]:.1%} of the frame)'},
                         {'type':'image_url','image_url':{'url':frame['url'],'detail':'low'}}]
         context['allowed_evidence_ids']=sorted(allowed)
+        if self.settings.critic_table_layout=='columns':
+            context=model_payload.as_columns(context)
+            context['table_layout']=('columns: tonal_levels, detail_retention and paired_diagnostics tables are '
+                                     '{"columns":[field names],"rows":[[values in that order],...]}, one row per frame')
+        else:context.pop('table_layout')
         context=self.prompt_context('critic',context,brief.project_id)
-        content.insert(0,{'type':'text','text':json.dumps(context)})
+        content.insert(0,{'type':'text','text':json.dumps(context,separators=(',',':'))}) # no whitespace: identical content
         with self.client() as client:
             result=self.call(lambda:client.beta.chat.completions.parse(model=self.settings.model,
                 messages=[{'role':'system','content':

@@ -178,3 +178,82 @@ def test_matte_is_reused_only_when_everything_it_depends_on_is_unchanged(tmp_pat
     before = key()
     cv2.imwrite(str(masks / 'a.png'), 255 - mask)  # a rewritten mask file is a different matte
     assert key() != before
+
+
+# ---- output check overlapping the render's integrity decode ----------------------------------
+
+def _square_check_setup(tmp_path, settings):
+    import cv2
+    source = clip(tmp_path, 1, 'source.mp4')
+    graded = clip(tmp_path, 1, 'graded.mp4')
+    info = local_grading.sam.frame_info(source, settings, threading.Event())
+    mapping = {'frame_count': len(info['pts']), 'proxy': {'width': 192, 'height': 108, 'rate': info['rate']},
+               'frames': [{'index': i, 'time': t} for i, t in enumerate(info['normalized'])], 'schema_version': 2}
+    masks = tmp_path / 'm'
+    masks.mkdir(exist_ok=True)
+    mask = np.zeros((40, 40), np.uint8)
+    mask[5:35, 5:35] = 255
+    cv2.imwrite(str(masks / 'm.png'), mask)
+    records = {i: [{'bounds': [40, 30, 80, 70], 'mask': 'm.png', 'directory': str(masks), 'object_id': '0',
+                    'proxy': {'width': 192, 'height': 108}}] for i in range(mapping['frame_count'])}
+    plan = SimpleNamespace(background=SimpleNamespace(contrast=1.2, gamma=1, saturation=1, brightness_gain=1, cooling=0, highlight_ceiling=1),
+                           preserve_subject_color=False)
+    return source, graded, {'frame_map': mapping}, records, plan
+
+
+def test_early_started_output_check_equals_the_normal_one_even_after_a_rename(tmp_path, settings):
+    source, graded, evidence_map, records, plan = _square_check_setup(tmp_path, settings)
+    expected = local_grading.check_output(source, graded, None, evidence_map, records, plan, settings, threading.Event(), adaptive=True)
+    partial = graded.with_name('graded.partial.mp4')
+    graded.rename(partial)
+    pending = local_grading.PendingOutputCheck(source, partial, evidence_map, records, plan, settings, threading.Event(), None, True)
+    partial.rename(graded)  # the render renames its output while the check is running
+    assert pending.finish(graded) == expected
+
+
+def test_timing_errors_still_take_precedence_and_abort_stops_the_measurement(tmp_path, settings):
+    from takeone.errors import Problem
+    source, graded, evidence_map, records, plan = _square_check_setup(tmp_path, settings)
+    broken = {'frame_map': {**evidence_map['frame_map'], 'frame_count': evidence_map['frame_map']['frame_count'] + 1}}
+    pending = local_grading.PendingOutputCheck(source, graded, broken, records, plan, settings, threading.Event(), None, True)
+    with pytest.raises(Problem) as caught:
+        pending.finish(graded)
+    assert caught.value.code == 'LOCAL_OUTPUT_TIMING'  # same error check_output reports first
+    aborted = local_grading.PendingOutputCheck(source, graded, evidence_map, records, plan, settings, threading.Event(), None, True)
+    aborted.abort()
+    assert aborted.future.done()
+
+
+def test_render_starts_the_output_check_before_its_integrity_decode(settings, monkeypatch):
+    from fastapi.testclient import TestClient
+    from takeone import evidence as ev
+    from takeone.app import create_app
+    from tests.test_backend import start, upload
+    from tests.test_local_grading import Masks, Planner, generate
+    import tests.test_local_grading as fixtures
+    order = []
+    original_pending, original_decoded = local_grading.PendingOutputCheck.__init__, ev.decoded_evidence
+    def pending(self, *a, **k):
+        order.append('output check started')
+        original_pending(self, *a, **k)
+    def decoded(*a, **k):
+        order.append('integrity decode')
+        return original_decoded(*a, **k)
+    monkeypatch.setattr(local_grading.PendingOutputCheck, '__init__', pending)
+    monkeypatch.setattr(ev, 'decoded_evidence', decoded)
+    import subprocess
+    path = settings.workspace.parent / 'scene.mp4'
+    frames = []
+    for _ in range(12):
+        f = np.full((108, 192, 3), 120, np.uint8)
+        f[24:84, 60:132] = [25, 35, 190]
+        frames.append(f)
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pixel_format', 'bgr24', '-video_size', '192x108', '-framerate', '12', '-i', '-',
+                    '-an', '-vf', 'setparams=range=full:color_primaries=bt709:color_trc=bt709:colorspace=bt709,scale=in_range=pc:out_range=tv',
+                    '-c:v', 'libx264', '-crf', '14', '-pix_fmt', 'yuv420p', '-color_range', 'tv', '-colorspace', 'bt709', '-color_primaries', 'bt709',
+                    '-color_trc', 'bt709', str(path)], input=b''.join(f.tobytes() for f in frames), check=True)
+    with TestClient(create_app(settings, Planner(local=True), Masks()), base_url='http://127.0.0.1') as client:
+        result = generate(client, start(client, upload(client, path), 'explicit dark cool background, keep red subject'))
+        assert result['status'] == 'render_ready', result.get('error')
+        assert result['candidates'][0]['validation']['subject_protection']['checked_subject_frames'] == 12
+    assert order[:2] == ['output check started', 'integrity decode']

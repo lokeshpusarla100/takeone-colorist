@@ -28,6 +28,7 @@ from . import grade_guard
 from . import render_preflight
 from . import convergence
 from . import concepts as sam_concepts
+from . import model_payload
 
 
 def attempts(state,brief_hash):
@@ -1401,11 +1402,8 @@ class Service:
                    'limitations':[] if evidence else [local_limitation or 'No verified local timeline.'],
                    'shots':evidence['shots'] if evidence else [],
                    'current_video_feedback':[f for f in current_feedback(state) if f.get('text')],
-                   'previous_candidates':[{'id':c.id,'brief_sha256':c.brief_sha256,'plan':c.recipe.proposal.model_dump(mode='json') if c.recipe else None,
-                       'technical_result':c.validation,'creative_opinion':c.creative_review.model_dump(mode='json') if c.creative_review else None,
-                       'execution_error':{'code':c.error.get('code'),'message':c.error.get('message'),
-                           'observed_clipping':c.error.get('details',{}).get('observed_clipping')} if c.error else None}
-                       for c in state.candidates[-3:] if c.status in {'ready','failed'}]}
+                   # Compact: what was tried, its measured effect, the opinion and any error (model_payload.py).
+                   'previous_candidates':model_payload.previous_versions(state.candidates)}
         technical['available_masks']=[]
         for run in state.segmentations:
             manifest_path=directory/'segmentations'/run.id/'manifest.json'
@@ -1556,9 +1554,18 @@ class Service:
             self.mutate(project_id,compositing)
         def render_stage(stage):
             self.mutate(project_id,lambda s:setattr(s,'stage',stage))
+        pending_check=[]
+        def after_encode(master):
+            # Start measuring protected areas while the render runs its own integrity decode.
+            if records is not None:
+                pending_check.append(local_grading.PendingOutputCheck(original,master,evidence,records,recipe.proposal.local,self.settings,cancel,
+                    recipe.proposal.execution_limits,recipe.tone_operator=='luminance_ocio_v3'))
         try:
-            result = rendering.render(original, output, recipe, state.source, self.settings, cancel,on_stage=render_stage,tier=candidate.tier)
-        except Problem as failure:
+            result = rendering.render(original, output, recipe, state.source, self.settings, cancel,on_stage=render_stage,tier=candidate.tier,
+                                      after_encode=after_encode)
+        except BaseException as failure:
+            for check in pending_check:check.abort()
+            if not isinstance(failure,Problem):raise
             if failure.code!='GRADE_EXECUTION_LIMIT':raise
             # Encoding context can differ from sparse probes. Preserve the failed
             # attempt and permit one bounded level-only fallback, never a limit
@@ -1585,9 +1592,10 @@ class Service:
                 except Problem as error:
                     if error.code=='JOB_CANCELLED':raise
             try:
-                result['subject_protection']=local_grading.check_output(original,output/'grade.mp4',state.source,evidence,records,
+                result['subject_protection']=(pending_check[0].finish(output/'grade.mp4') if pending_check else
+                    local_grading.check_output(original,output/'grade.mp4',state.source,evidence,records,
                     recipe.proposal.local,self.settings,cancel,limits=recipe.proposal.execution_limits,
-                    adaptive=recipe.tone_operator=='luminance_ocio_v3')
+                    adaptive=recipe.tone_operator=='luminance_ocio_v3'))
                 result['mask_validation']=mask_qa;result['warnings']+=mask_qa['warnings']
                 result['warnings']+=result['subject_protection']['warnings']
             except Problem as failure:

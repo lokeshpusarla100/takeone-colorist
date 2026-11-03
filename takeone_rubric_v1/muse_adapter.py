@@ -104,7 +104,7 @@ def propose(session: RubricSession, model: str = "muse-spark-1.3", *, client=Non
         model=model,
         messages=[
             {"role": "system", "content": SYSTEM_INSTRUCTION},
-            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False, separators=(',', ':'))},  # identical content, no whitespace
         ],
         response_format=Proposal,
         reasoning_effort="low",

@@ -61,3 +61,17 @@ request, simply means no live fill.
   question at a time"; the masks step said "Not started" for grades that need no masks.
 - Token usage sat above the progress and pushed it below the fold; it is now below the steps.
 - A second render pass briefly showed the first pass's final percentage (cleared on every new stage).
+
+## Source preparation time
+
+The exact frame-timestamp probe of the original (`frames.probe_frames`, needed later by mask tracking and
+rendering) is a full second decode of the file. It used to run *during* preparation, alongside the preview
+encode. Both are CPU-bound on every core, so overlapping them saved almost nothing and added the probe's time to
+what the user waits for: a 4K, 154 Mbps, 25 s clip went from ~18-20 s to ~25 s.
+
+It now starts in the background when the source becomes ready (`Service.prefetch_frames`), while the user writes the
+direction and answers questions: the same clip is ready in ~19 s and the probe finishes ~9 s later. `probe_frames`
+is single-flight: a stage that needs the timing before the background run has finished waits for that run (honouring
+its own cancel) instead of decoding again; if that run failed or was cancelled the stage probes for itself, exactly
+as before. The background run is stopped by `Service.close()`, and a failure in it is never fatal. Output and cache
+file are unchanged. The remaining cost is the single 4K decode (~9 s wall, 74 CPU-seconds) inside the preview encode.

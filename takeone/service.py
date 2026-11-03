@@ -62,6 +62,8 @@ class Service:
         self._uploads = {}        # (project, proxy sha) -> Event set once the shared SAM upload has a file id
         self._concept_locks = {}  # (project, concept) -> Lock: one SAM request per concept at a time
         self._live = {}           # project -> latest measurement of the running stage; never persisted
+        self._background = threading.Event()  # stops background work (the frame-timestamp prefetch) on close
+        self._probe_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='takeone-frame-probe')
         self.store = Store(settings.workspace)
         self.process_lock = (self.store.root / ".backend.lock").open("a")
         try:
@@ -112,7 +114,9 @@ class Service:
         self.closed = True
         for event in list(self.cancels.values()):
             event.set()
+        self._background.set()
         self.worker.shutdown(wait=True, cancel_futures=False)
+        self._probe_pool.shutdown(wait=True, cancel_futures=True)
         if self._early_pool is not None:
             self._early_pool.shutdown(wait=True, cancel_futures=True)
         fcntl.flock(self.process_lock, fcntl.LOCK_UN)
@@ -1200,24 +1204,32 @@ class Service:
             state.stage = "prepare_preview"
             self.event(state, "Source inspected", video_codec=source.video_codec, duration=source.duration, sha256=source.sha256)
         self.mutate(project_id, preparing)
-        # The exact frame-timestamp probe of the original (needed by masks, evidence and rendering) runs
-        # while the previews encode, so later stages read it from cache instead of decoding again.
-        from .frames import probe_frames
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix='takeone-frame-probe') as pool:
-            probe = pool.submit(probe_frames, directory / "source.bin", self.settings, cancel)
-            preview = make_previews(directory, source, project_id, self.settings, cancel)
-            try:
-                probe.result()
-            except Problem as error:
-                if error.code == "JOB_CANCELLED":
-                    raise
-                # Not fatal here: the same probe runs (and reports) where frame timing is actually required.
+        preview = make_previews(directory, source, project_id, self.settings, cancel)
         self.check_cancel(cancel)
         def ready(state):
             state.preview = preview
             state.status, state.stage, state.active_job = "ready", "ready", None
             self.event(state, "Preview ready", "VP9 display preview and a silent analysis proxy were prepared. No media has been sent to Meta.")
         self.mutate(project_id, ready)
+        self.prefetch_frames(directory / "source.bin")
+
+    def prefetch_frames(self, path):
+        """Start the exact frame-timestamp probe of the original (masks, evidence and rendering need it) in the
+        background once the source is ready. It is a second full decode that competes with the preview encode for
+        every core, so running it during preparation made the user wait for it; running it now, while the user writes
+        the direction and answers questions, costs nothing on the visible path. A stage that needs it sooner waits
+        for this same run (frames.probe_frames is single-flight) instead of decoding again. Never fatal: a failure
+        here only means the stage that needs the timing probes (and reports) for itself."""
+        from .frames import probe_frames
+        def run():
+            try:
+                probe_frames(path, self.settings, self._background)
+            except Exception:
+                pass
+        try:
+            self._probe_pool.submit(run)
+        except RuntimeError:  # shut down
+            pass
 
     @staticmethod
     def predicted_close(state, session):

@@ -15,6 +15,7 @@ from pathlib import Path
 import threading
 from uuid import uuid4
 
+from .errors import Problem
 from .media import command
 
 ENTRIES = ('frame=best_effort_timestamp,best_effort_timestamp_time,duration,pkt_duration'
@@ -23,6 +24,13 @@ ENTRIES = ('frame=best_effort_timestamp,best_effort_timestamp_time,duration,pkt_
 VERSION = 1
 _memory = {}
 _lock = threading.Lock()
+_inflight = {}  # (resolved path, identity) -> _Flight: the one probe currently running for that file
+
+
+class _Flight:
+    def __init__(self):
+        self.done = threading.Event()
+        self.raw = None
 
 
 def identity(path):
@@ -53,14 +61,35 @@ def probe_frames(path, settings, cancel, timeout=90):
     except (OSError, ValueError, KeyError):
         pass
     if raw is None:
-        raw = json.loads(command([settings.ffprobe, '-v', 'error', '-threads', '0', '-select_streams', 'v:0', '-show_frames',
-                                  '-show_entries', ENTRIES, '-of', 'json', str(path)], cancel, timeout))
-        temporary = cache.with_name('.' + cache.name + '.' + uuid4().hex)
+        key = (resolved, json.dumps(current, sort_keys=True))
+        with _lock:
+            flight = _inflight.get(key)
+            leader = flight is None
+            if leader:
+                flight = _inflight[key] = _Flight()
+        if not leader:
+            # The same probe is already running (the background one started when the source became ready, or
+            # another stage's): wait for it instead of decoding the whole file a second time.
+            while not flight.done.wait(0.2):
+                if cancel.is_set():
+                    raise Problem("JOB_CANCELLED", "The operation was cancelled.", "You can retry the saved step.", 409)
+            if flight.raw is not None:
+                return flight.raw
+            return probe_frames(path, settings, cancel, timeout)  # that probe failed or was cancelled: probe for ourselves
         try:
-            temporary.write_text(json.dumps({'identity': current, 'raw': raw}))
-            os.replace(temporary, cache)
-        except OSError:
-            temporary.unlink(missing_ok=True)  # a read-only location just means no persistent cache
+            raw = json.loads(command([settings.ffprobe, '-v', 'error', '-threads', '0', '-select_streams', 'v:0', '-show_frames',
+                                      '-show_entries', ENTRIES, '-of', 'json', str(path)], cancel, timeout))
+            temporary = cache.with_name('.' + cache.name + '.' + uuid4().hex)
+            try:
+                temporary.write_text(json.dumps({'identity': current, 'raw': raw}))
+                os.replace(temporary, cache)
+            except OSError:
+                temporary.unlink(missing_ok=True)  # a read-only location just means no persistent cache
+            flight.raw = raw
+        finally:
+            with _lock:
+                _inflight.pop(key, None)
+            flight.done.set()
     with _lock:
         _memory[resolved] = (current, raw)
     return raw

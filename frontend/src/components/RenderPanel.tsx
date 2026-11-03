@@ -1,10 +1,10 @@
 import type { BackendState, GradeValues, Health } from '../lib/api';
 import { activeJob, stageLabel } from '../lib/api';
 
-export default function RenderPanel({state,health,sending,online,direction,onGenerate,onRetry,onCancel,onReview,onRenderSupported,onUseAllMatches,viewCandidateId}:{
+export default function RenderPanel({state,health,sending,online,direction,onGenerate,onRetry,onCancel,onReview,onRenderSupported,onUseAllMatches,onRenderFull,viewCandidateId}:{
   state?:BackendState;health:Health|null;sending:boolean;online:boolean;direction:string;
   onGenerate:()=>void;onRetry:()=>void;onCancel:()=>void;
-  onReview:(id:string)=>void;onRenderSupported?:(id:string)=>void;onUseAllMatches?:(id:string)=>void;viewCandidateId?:string;
+  onReview:(id:string)=>void;onRenderSupported?:(id:string)=>void;onUseAllMatches?:(id:string)=>void;onRenderFull?:(id:string)=>void;viewCandidateId?:string;
 }) {
   if(!state?.brief)return null;
   const running=state.status==='rendering'||state.status==='reviewing';
@@ -43,6 +43,12 @@ export default function RenderPanel({state,health,sending,online,direction,onGen
     :latest&&(latest.status==='failed'||latest.status==='cancelled')&&state.status!=='render_ready'&&
       <div className="consultation-actions"><span>{latest.name}: {latest.error?.message??latest.status}</span>
         <button disabled={busy||!online} onClick={onRetry}>Retry render</button></div>}
+    {selected?.tier==='draft'&&selected.status==='ready'&&<div className="consultation-actions">
+      <span>{selected.name} is a fast {selected.width}×{selected.height} draft used for review. The version Take One delivers is rendered at full resolution.</span>
+      {!state.candidates?.some(c=>c.promoted_from===selected.id&&c.status==='ready')&&
+        <button disabled={busy||!online||!onRenderFull} onClick={()=>onRenderFull?.(selected.id)}>Render this version at full resolution</button>}
+    </div>}
+    {selected?.promoted_from&&<p className="inline-help">{selected.name} is the full-resolution render of draft {state.candidates?.find(c=>c.id===selected.promoted_from)?.name}, using the same plan.</p>}
     {selected?.approved_omissions?.length?<p className="inline-help">{selected.name} was rendered without: {selected.approved_omissions.join('; ')}.</p>:null}
     {latest&&selected&&latest.id!==selected.id&&['failed','cancelled'].includes(latest.status)&&
       <p className="inline-help">The latest attempt did not produce an accepted candidate. The displayed render is an earlier version.</p>}

@@ -131,11 +131,21 @@ def treatment_filter(parameters: GradeParameters, *, operator='bounded_sigmoid_v
     return "lutrgb=r='"+tone+"':g='"+tone+"':b='"+tone+"',colorchannelmixer="+matrix+','+balance+',format=gbrp16le'
 
 
-def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,first_frame_offset=0.,fast_local=True,native_time_base=None) -> str:
+def draft_size(width,height,long_side=1920):
+    """Draft frame size for a source, or None when the source is no larger than the draft size."""
+    if not long_side or max(width,height)<=long_side:return None
+    scale=long_side/max(width,height)
+    return max(2,round(width*scale/2)*2),max(2,round(height*scale/2)*2)
+
+
+def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,first_frame_offset=0.,fast_local=True,native_time_base=None,draft=None) -> str:
+    """draft=(w,h): scale the source and every matte to w x h first, then grade exactly as at full size."""
     operator=recipe.tone_operator if recipe else 'bounded_sigmoid_v2'
+    scaled=f'scale={draft[0]}:{draft[1]}:flags=bicubic,' if draft else ''
+    matte_scaled=f'scale={draft[0]}:{draft[1]}:flags=bilinear,' if draft else ''
     def treatment(p,protected=False):
         return color_processing.lut(directory,p,protected) if operator=='luminance_ocio_v3' else treatment_filter(p,operator=operator,protected=protected)
-    start='[0:v]format=gbrp16le,setparams=range=full'
+    start='[0:v]'+scaled+'format=gbrp16le,setparams=range=full'
     if recipe and recipe.proposal.mode=='localized':
         local=recipe.proposal.local
         ranges=recipe.timeline['active_frame_ranges']
@@ -207,9 +217,9 @@ def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,firs
                     if hi-lo==1:return str(ticks[lo]-origin-lead)
                     middle=(lo+hi)//2
                     return f'if(lt(N,{middle}),{lookup(lo,middle)},{lookup(middle,hi)})'
-                return f"[{stream}:v]settb=expr={tick},setpts='{lookup(0,len(ticks))}',format=gbrp16le,setparams=range=full[{label}];"
+                return f"[{stream}:v]settb=expr={tick},setpts='{lookup(0,len(ticks))}',{matte_scaled}format=gbrp16le,setparams=range=full[{label}];"
             offset_ticks=round((float(first_frame_offset)-float(1/rate)/2)*90000)
-            return f'[{stream}:v]settb=expr=1/90000,setpts=(N*{90000*rate.denominator})/{rate.numerator}+{offset_ticks},format=gbrp16le,setparams=range=full[{label}];'
+            return f'[{stream}:v]settb=expr=1/90000,setpts=(N*{90000*rate.denominator})/{rate.numerator}+{offset_ticks},{matte_scaled}format=gbrp16le,setparams=range=full[{label}];'
         start+=mask_chain(1,'mask')
         # Region mattes are inputs 2.. in plan order, timed exactly like the subject matte.
         for k in range(len(regions)):start+=mask_chain(2+k,f'm{k}')
@@ -241,7 +251,7 @@ def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,firs
             "[view]scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[preview]")
 
 
-def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Settings, audio_codec: str | None, *, timing_policy,filter_threads=None,fast_local=True):
+def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Settings, audio_codec: str | None, *, timing_policy,filter_threads=None,fast_local=True,draft=None):
     source=source.resolve();directory=directory.resolve()
     audio = "copy" if audio_codec in {"aac", "mp3", "alac"} else "aac"
     inputs=['-i',str(source)]
@@ -258,7 +268,7 @@ def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Se
         if not (offset==offset and abs(offset)!=float('inf')):offset=0.
     args=[settings.ffmpeg, "-hide_banner", "-v", "error", "-nostdin", "-y",
             "-filter_complex_threads", str(filter_threads or min(4,max(1,(os.cpu_count() or 2)//3))), "-copyts", "-start_at_zero", *inputs,
-            "-filter_complex", filter_graph(recipe.proposal.parameters,recipe=recipe,directory=directory,first_frame_offset=offset,fast_local=fast_local,native_time_base=timing_policy['encoder_time_base']),
+            "-filter_complex", filter_graph(recipe.proposal.parameters,recipe=recipe,directory=directory,first_frame_offset=offset,fast_local=fast_local,native_time_base=timing_policy['encoder_time_base'],draft=draft),
             "-map", "[master]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "17",
             "-threads", "4", "-pix_fmt", "yuv420p", "-fps_mode", "passthrough",
             "-enc_time_base:v",timing_policy['encoder_time_base'],
@@ -342,11 +352,13 @@ def _elapsed(profile,name,operation):
 
 
 def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
-           settings: Settings, cancel: threading.Event, *, on_stage=None,qc_mode='optimized'):
+           settings: Settings, cancel: threading.Event, *, on_stage=None,qc_mode='optimized',tier='full'):
     if qc_mode not in {'optimized','reference'}:raise ValueError('Unknown render QC mode')
-    started=time.monotonic();profile={'qc_mode':qc_mode}
+    started=time.monotonic();profile={'qc_mode':qc_mode,'tier':tier}
+    draft=draft_size(original.width,original.height,settings.draft_long_side) if tier=='draft' else None
     try:
-        result=_render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,profile)
+        result=_render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,profile,draft)
+        result['tier']='draft' if draft else 'full'
         profile['total_seconds']=time.monotonic()-started;result['performance']=dict(profile)
         return result
     except Problem as error:
@@ -354,7 +366,7 @@ def render(source: Path, directory: Path, recipe: GradeRecipe, original: Source,
         raise
 
 
-def _render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,profile):
+def _render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,profile,draft=None):
     source_meta = _elapsed(profile,'source_verify_seconds',lambda:verify_source(source,original,settings,cancel))
     directory.mkdir(exist_ok=True)
     policy=timing.encoding_policy(source_meta)
@@ -365,7 +377,7 @@ def _render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,pr
     profile['filter_threads']=min(4,max(1,(os.cpu_count() or 2)//3)) if qc_mode=='optimized' else 2
     if on_stage:on_stage('render_local_grade' if recipe.proposal.mode=='localized' else 'render_grade')
     args=render_args(source,directory,recipe,settings,original.audio_codec,
-        timing_policy=policy,filter_threads=profile['filter_threads'],fast_local=qc_mode=='optimized')
+        timing_policy=policy,filter_threads=profile['filter_threads'],fast_local=qc_mode=='optimized',draft=draft)
     progress_path=directory.resolve()/'encode-progress.log'
     from uuid import uuid4
     for name in ['grade.partial.mp4','preview.partial.webm','grade.mp4','preview.webm','encode-progress.log']:
@@ -411,7 +423,7 @@ def _render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,pr
     preview_video = next(s for s in preview_meta["streams"] if s["codec_type"] == "video")
     audio = next((s for s in metadata["streams"] if s["codec_type"] == "audio"), None)
     duration = float(video.get("duration") or metadata["format"]["duration"])
-    if ((video["width"], video["height"]) != (original.width, original.height)
+    if ((video["width"], video["height"]) != (draft or (original.width, original.height))
             or not math.isfinite(duration) or abs(duration-original.duration) > 0.15
             or video.get("pix_fmt") != "yuv420p" or video.get("color_transfer") != "bt709"
             or video.get("color_primaries") != "bt709" or video.get("color_space") != "bt709"

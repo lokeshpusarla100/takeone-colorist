@@ -30,6 +30,11 @@ from . import convergence
 from . import concepts as sam_concepts
 
 
+def attempts(state,brief_hash):
+    """Render attempts counted against the per-brief budget; a draft's full-resolution re-render is not one."""
+    return sum(c.brief_sha256==brief_hash and not c.promoted_from for c in state.candidates)
+
+
 def display_oriented(selection,source):
     """Saved evidence whose frame geometry matches the source's display orientation. Evidence saved
     before rotated sources were measured in decoded (auto-rotated) geometry is not reused."""
@@ -50,6 +55,8 @@ HIGHLIGHT_REPLAN_INSTRUCTION=('Revise the executable plan using the actual image
 class Service:
     def __init__(self, settings: Settings, provider=None, sam_provider=None):
         self.settings = settings
+        self._early_pool = None
+        self._early_opinions = {}
         self.store = Store(settings.workspace)
         self.process_lock = (self.store.root / ".backend.lock").open("a")
         try:
@@ -101,6 +108,8 @@ class Service:
         for event in list(self.cancels.values()):
             event.set()
         self.worker.shutdown(wait=True, cancel_futures=False)
+        if self._early_pool is not None:
+            self._early_pool.shutdown(wait=True, cancel_futures=True)
         fcntl.flock(self.process_lock, fcntl.LOCK_UN)
         self.process_lock.close()
 
@@ -396,7 +405,7 @@ class Service:
                               "Use known 8-bit SDR Rec.709 footage.", 422)
             if not self.provider.available():
                 raise Problem("MUSE_NOT_CONFIGURED", "The Meta API key is not configured.", "Set MODEL_API_KEY in .env.", 503)
-            if sum(c.brief_sha256 == brief_hash for c in state.candidates) >= self.settings.max_render_iterations:
+            if attempts(state,brief_hash) >= self.settings.max_render_iterations:
                 raise Problem("RENDER_BUDGET", "Three candidates have already been attempted for this brief.",
                               "Review the saved candidates before changing the direction.", 409)
             candidate = RenderCandidate(id=str(uuid4()), name="V" + str(len(state.candidates) + 1),
@@ -432,7 +441,7 @@ class Service:
             if failed.brief_sha256 != brief_hash or not plan_path.is_file():
                 raise Problem("SUPPORTED_PLAN_STALE", "The brief changed since that plan was made.",
                               "Generate a new version from the current brief.", 409)
-            if sum(c.brief_sha256 == brief_hash for c in state.candidates) >= self.settings.max_render_iterations:
+            if attempts(state,brief_hash) >= self.settings.max_render_iterations:
                 raise Problem("RENDER_BUDGET", "Three candidates have already been attempted for this brief.",
                               "Review the saved candidates before changing the direction.", 409)
             from .contracts import GradeProposal
@@ -1254,7 +1263,7 @@ class Service:
         self.mutate(project_id, selected)
 
     def render_grade(self,project_id,cancel):
-        self._render_one(project_id,cancel,keep_active=True)
+        self._render_one(project_id,cancel,keep_active=True,review_follows='if_required')
         self.review_and_revise(project_id,cancel)
 
     def guard_grade(self,project_id,candidate,recipe,original,output,source,cancel,technical=None):
@@ -1276,7 +1285,7 @@ class Service:
             state=self.store.get(project_id)
             target=next(c for c in state.candidates if c.id==candidate.id)
             if target.preflight_replan_attempted:raise
-            if sum(c.brief_sha256==candidate.brief_sha256 for c in state.candidates)>=self.settings.max_render_iterations:raise
+            if attempts(state,candidate.brief_sha256)>=self.settings.max_render_iterations:raise
             # This is an executable-plan failure, not a rendered-image critique.
             # One Muse planning request may change creative controls; the tool
             # itself must not silently alter gamma/palette or relax constraints.
@@ -1317,7 +1326,8 @@ class Service:
             revised.timeline=(recipe.timeline or local_grading.timeline(self.store.directory(project_id),source,self.settings,cancel)) if proposal.local else None
             child=RenderCandidate(id=str(uuid4()),name='V'+str(len(state.candidates)+1),source_sha256=source.sha256,
                 brief_sha256=candidate.brief_sha256,generation_id=candidate.generation_id or str(uuid4()),
-                parent_id=candidate.id,iteration=candidate.iteration+1,recipe=revised,status='rendering',preflight_replan_attempted=True)
+                parent_id=candidate.id,iteration=candidate.iteration+1,recipe=revised,status='rendering',preflight_replan_attempted=True,
+                tier=candidate.tier,promoted_from=candidate.promoted_from)
             def replanned(s):
                 parent=next(c for c in s.candidates if c.id==candidate.id);parent.status='failed';parent.error=failure.public()
                 parent.revision_stop_reason='preflight_replanned_by_muse';s.candidates.append(child);s.render_target_id=child.id
@@ -1334,12 +1344,13 @@ class Service:
             return candidate,recipe,output
         if report.get('changes'):
             state=self.store.get(project_id)
-            if sum(c.brief_sha256==candidate.brief_sha256 for c in state.candidates)>=self.settings.max_render_iterations:
+            if attempts(state,candidate.brief_sha256)>=self.settings.max_render_iterations:
                 raise Problem('RENDER_BUDGET','A clipping correction is available, but this brief has reached its candidate limit.',
                               'Review or revise the brief before another attempt. No full encode was started.',409,preflight=report)
             child=RenderCandidate(id=str(uuid4()),name='V'+str(len(state.candidates)+1),source_sha256=source.sha256,
                 brief_sha256=candidate.brief_sha256,generation_id=candidate.generation_id or str(uuid4()),
-                parent_id=candidate.id,iteration=candidate.iteration+1,recipe=effective,status='rendering',preflight_replan_attempted=candidate.preflight_replan_attempted)
+                parent_id=candidate.id,iteration=candidate.iteration+1,recipe=effective,status='rendering',preflight_replan_attempted=candidate.preflight_replan_attempted,
+                tier=candidate.tier,promoted_from=candidate.promoted_from)
             def corrected(s):
                 parent=next(c for c in s.candidates if c.id==candidate.id)
                 parent.status='failed';parent.revision_stop_reason='input_levels_corrected_before_encoding'
@@ -1364,7 +1375,9 @@ class Service:
         self.mutate(project_id,lambda s:self.event(s,title,reason,
             candidate=candidate.name,elapsed_seconds=report['elapsed_seconds']))
 
-    def _render_one(self, project_id, cancel,keep_active=False):
+    def _render_one(self, project_id, cancel,keep_active=False,review_follows=None):
+        """review_follows: 'always' (critic revision), 'if_required' (first render) or None: whether a critic
+        review comes next, so it can start early while the output check runs."""
         state = self.store.get(project_id)
         candidate = next((c for c in state.candidates if c.id == state.render_target_id), None)
         if not candidate or not state.source or not state.analysis or not state.brief:
@@ -1544,7 +1557,7 @@ class Service:
         def render_stage(stage):
             self.mutate(project_id,lambda s:setattr(s,'stage',stage))
         try:
-            result = rendering.render(original, output, recipe, state.source, self.settings, cancel,on_stage=render_stage)
+            result = rendering.render(original, output, recipe, state.source, self.settings, cancel,on_stage=render_stage,tier=candidate.tier)
         except Problem as failure:
             if failure.code!='GRADE_EXECUTION_LIMIT':raise
             # Encoding context can differ from sparse probes. Preserve the failed
@@ -1558,8 +1571,8 @@ class Service:
             current=self.store.get(project_id)
             if (recipe.execution_preflight and recipe.proposal.mode=='global'
                 and (recipe.proposal.parameters.black_point>0 or recipe.proposal.parameters.white_point<1)
-                and sum(c.brief_sha256==candidate.brief_sha256 for c in current.candidates)<self.settings.max_render_iterations):
-                self._render_one(project_id,cancel,keep_active=keep_active);return
+                and attempts(current,candidate.brief_sha256)<self.settings.max_render_iterations):
+                self._render_one(project_id,cancel,keep_active=keep_active,review_follows=review_follows);return
             raise
         result['execution_capabilities']={k:technical[k] for k in ['operations','localized_available','limitations','shots']}
         self.check_cancel(cancel)
@@ -1567,6 +1580,10 @@ class Service:
             s.stage='check_output_quality';self.event(s,'Checking rendered output',candidate=candidate.name,mode=recipe.proposal.mode)
         self.mutate(project_id,checking)
         if records is not None:
+            if review_follows=='always' or review_follows=='if_required' and recipe.proposal.review_required:
+                try:self.start_early_opinion(project_id,candidate.model_copy(update={'recipe':recipe}),result,mask_qa,cancel)
+                except Problem as error:
+                    if error.code=='JOB_CANCELLED':raise
             try:
                 result['subject_protection']=local_grading.check_output(original,output/'grade.mp4',state.source,evidence,records,
                     recipe.proposal.local,self.settings,cancel,limits=recipe.proposal.execution_limits,
@@ -1628,6 +1645,52 @@ class Service:
         ranked=convergence.rank_candidates(pool,issues)
         return ranked[0] if ranked else None
 
+    def new_full_render(self,state,draft):
+        """A full-resolution candidate rendering exactly the draft's recipe (masks, matte and evidence are reused)."""
+        recipe=draft.recipe.model_copy(deep=True)
+        return RenderCandidate(id=str(uuid4()),name=draft.name+' 4K',source_sha256=draft.source_sha256,brief_sha256=draft.brief_sha256,
+            generation_id=draft.generation_id,parent_id=draft.id,iteration=draft.iteration,recipe=recipe,status='rendering',
+            tier='full',promoted_from=draft.id,preflight_replan_attempted=True)
+
+    def promote_if_draft(self,project_id,selected_id,cancel):
+        """If the version to deliver is a draft, render its plan once in full resolution and deliver that."""
+        state=self.store.get(project_id)
+        draft=next((c for c in state.candidates if c.id==selected_id),None)
+        if not draft or draft.tier!='draft' or draft.status!='ready' or not draft.recipe:return selected_id
+        done_already=next((c for c in state.candidates if c.promoted_from==draft.id and c.status=='ready'),None)
+        if done_already:return done_already.id
+        final=self.new_full_render(state,draft)
+        def queued(s):
+            s.candidates.append(final);s.render_target_id=final.id;s.status='rendering';s.stage='render_final'
+            self.event(s,'Rendering the chosen draft in full resolution',
+                f'{draft.name} was rendered as a fast draft for review; its exact plan is now rendered at full resolution.',
+                candidate=final.name,draft=draft.name)
+        self.mutate(project_id,queued)
+        self.store.candidate_artifact(project_id,final.id,'recipe.json',final.recipe.model_dump(mode='json'))
+        self._render_one(project_id,cancel,keep_active=True)
+        return final.id
+
+    def render_full(self,project_id,candidate_id,revision,command_id):
+        """User request: render a draft's plan at full resolution (or select the one already rendered)."""
+        with self.store.lock:
+            state=self.store.get(project_id)
+            fingerprint=self.fingerprint('render_full',candidate_id)
+            if self.receipt(state,command_id,fingerprint):return state
+            self.check_revision(state,revision)
+            if state.active_job:raise Problem('RENDER_NOT_READY','The project is busy.','Wait for the current operation to finish.',409)
+            draft=next((c for c in state.candidates if c.id==candidate_id),None)
+            if not draft or draft.tier!='draft' or draft.status!='ready' or not draft.recipe:
+                raise Problem('FULL_RENDER_UNAVAILABLE','Only a rendered draft can be rendered at full resolution.','Select a draft version.',409)
+            existing=next((c for c in state.candidates if c.promoted_from==draft.id and c.status=='ready'),None)
+            state.receipts[command_id]=fingerprint
+            if existing:
+                state.selected_candidate_id=existing.id;self.store.save(state);return state
+            final=self.new_full_render(state,draft)
+            state.candidates.append(final);state.render_target_id=final.id
+            self.event(state,'Full-resolution render requested',actor='user',candidate=final.name,draft=draft.name)
+            self.submit(state,'render')
+            return state
+
     def revision_highlight_block(self,project_id,state,candidate,proposal,cancel):
         """Preflight report if a critic revision would lift highlights while darkening, else None. Fails open:
         a revision that cannot be assessed here is still checked by guard_grade before it is rendered."""
@@ -1643,8 +1706,89 @@ class Service:
             return None
         return report if report.get('blocked_by')=='highlight_lift' else None
 
+    def critic_opinion(self,project_id,state,candidate,cancel,on_request=None):
+        """Collect paired evidence and ask the critic once; validates every reference it returns.
+
+        Used both by the review loop and by the early review that starts while the output check runs,
+        so the two paths are exactly the same call. Returns review, data, previous, summary, request_id.
+        """
+        path=self.store.directory(project_id)/'candidates'/candidate.id/'grade.mp4'
+        data,previous,summary=creative_review.collect(self,state,candidate,cancel)
+        review_candidate=candidate.model_copy(deep=True)
+        if not review_candidate.validation.get('execution_capabilities'):
+            operations=capabilities(state.source)['operations']
+            try:
+                current_timeline=local_grading.timeline(self.store.directory(project_id),state.source,self.settings,cancel)
+            except Problem as error:
+                if error.code in {'JOB_CANCELLED','SOURCE_CHANGED'}:raise
+                current_timeline=None
+            review_candidate.validation={**candidate.validation,'execution_capabilities':{
+                'operations':operations if current_timeline else [o for o in operations if o!='regional_grade'],
+                'localized_available':current_timeline is not None,'shots':current_timeline['shots'] if current_timeline else []}}
+        if not hasattr(self.provider,'review'):raise Problem('REVIEW_UNAVAILABLE','Creative review is unavailable for this provider.','The rendered candidate remains available for human review.',503)
+        request_id=self.count_call(project_id,'Muse is reviewing rendered evidence',kind='critic')
+        if on_request:on_request(request_id)
+        call=self.store.get(project_id).model_calls
+        review,usage=self.provider.review(state.brief,review_candidate,data,previous,current_feedback(state))
+        self.record_usage(project_id,request_id,'critic',usage,call)
+        if sam.checksum(path)!=data['rendered_sha256']:
+            raise Problem('REVIEW_OUTPUT_CHANGED','The rendered file changed during creative review.','Restore the frozen candidate.',409)
+        allowed={'source:'+str(f['frame_index']) for f in data['source_images']}|{'candidate:'+str(f['frame_index']) for f in data['candidate_images']}
+        allowed|={'source_region:'+str(f['frame_index']) for f in data.get('source_region_images',[])}|{'candidate_region:'+str(f['frame_index']) for f in data.get('candidate_region_images',[])}
+        if previous:allowed|={'previous:'+str(f['frame_index']) for f in previous['images']}
+        allowed|={f"mask_overlay_{f['overlay']}:{f['frame_index']}" for f in data.get('mask_overlay_images',[])}
+        if (any(set(i.evidence_ids)-allowed for i in review.issues) or any(set(m.evidence_ids)-allowed for m in review.mask_assessments)
+            or review.preferred_candidate_id not in {None,candidate.id,previous['id'] if previous else candidate.id}):
+            raise Problem('MUSE_INVALID_REVIEW','The review referenced unseen evidence or an unavailable candidate.','Review manually or retry explicitly.',502)
+        return {'review':review,'data':data,'previous':previous,'summary':summary,'request_id':request_id}
+
+    def start_early_opinion(self,project_id,candidate,result,mask_qa,cancel):
+        """Start the critic as soon as the render exists, while the output check runs.
+
+        The critic sees everything it normally sees except the output check's own measurements, which do
+        not exist yet. If that check then reports a warning, take_early_opinion discards this opinion and
+        the critic is asked again with the full results. Skipped when the measured convergence rule would
+        stop the loop before any critic call, so it never spends a call the loop would not make.
+        """
+        state=self.store.get(project_id)
+        if not hasattr(self.provider,'review') or not state.brief or candidate.promoted_from:return
+        brief_hash=rendering.fingerprint(state.brief.model_dump(mode='json'))
+        if candidate.brief_sha256!=brief_hash:return
+        # The live candidate (its mask runs are attached during the render), with this render's recipe.
+        current=next(c for c in state.candidates if c.id==candidate.id)
+        provisional=current.model_copy(deep=True);provisional.recipe=candidate.recipe
+        provisional.validation={**result,'mask_validation':mask_qa,'warnings':list(result['warnings'])+list(mask_qa['warnings'])}
+        provisional.status='ready'
+        provisional.output_sha256=sam.checksum(self.store.directory(project_id)/'candidates'/candidate.id/'grade.mp4')
+        ancestor=self.reviewed_ancestor(state,provisional)
+        if (ancestor and ancestor.creative_review.decision=='revise' and ancestor.review_brief_sha256==brief_hash and ancestor.validation
+                and convergence.revision_progress(provisional.validation.get('output_samples',[]),ancestor.validation.get('output_samples',[]),
+                                                  ancestor.creative_review.issues)['ineffective']):
+            return
+        if self._early_pool is None:
+            from concurrent.futures import ThreadPoolExecutor as Pool
+            self._early_pool=Pool(max_workers=1,thread_name_prefix='takeone-early-critic')
+        holder={'id':None}
+        future=self._early_pool.submit(self.critic_opinion,project_id,state,provisional,cancel,lambda r:holder.__setitem__('id',r))
+        self._early_opinions[candidate.id]={'future':future,'brief':brief_hash,'request':holder}
+
+    def take_early_opinion(self,project_id,candidate,brief_hash,request):
+        """The early opinion for this candidate if it is still valid, else None (the loop asks normally)."""
+        early=self._early_opinions.pop(candidate.id,None)
+        if not early or early['brief']!=brief_hash:return None
+        try:opinion=early['future'].result() # its errors are this review's errors, handled exactly as before
+        finally:request['id']=early['request']['id']
+        check=(candidate.validation or {}).get('subject_protection') or {}
+        if check.get('warnings'):
+            self.mutate(project_id,lambda s:self.event(s,'Re-reviewing with the output check results',
+                'The output check reported warnings after the early review started, so the critic is asked again with them.',
+                candidate=candidate.name,warnings='; '.join(check['warnings'])[:500]))
+            return None
+        return opinion
+
     def review_and_revise(self,project_id,cancel,force=False):
         def finish(selected,stage='render_ready'):
+            selected=self.promote_if_draft(project_id,selected,cancel) # the delivered version is always full resolution
             def done(s):s.selected_candidate_id=selected;s.status='render_ready';s.stage=stage;s.active_job=None
             self.mutate(project_id,done)
         while True:
@@ -1655,6 +1799,8 @@ class Service:
             path=self.store.directory(project_id)/'candidates'/candidate.id/'grade.mp4'
             if not path.exists() or candidate.output_sha256 and sam.checksum(path)!=candidate.output_sha256:
                 raise Problem('REVIEW_OUTPUT_CHANGED','The candidate file is missing or changed.','Restore or re-render; no creative opinion can validate corrupted media.',409)
+            if candidate.promoted_from:
+                finish(candidate.id);return # the full render of an already-reviewed draft: same plan, no new opinion
             if not force and not candidate.recipe.proposal.review_required:
                 finish(candidate.id);return
             brief_hash=rendering.fingerprint(state.brief.model_dump(mode='json'))
@@ -1682,7 +1828,7 @@ class Service:
                             selected=next(x.name for x in s.candidates if x.id==selected))
                     self.mutate(project_id,ineffective);finish(selected);return
                 self.mutate(project_id,lambda s:setattr(next(c for c in s.candidates if c.id==candidate.id),'revision_progress',progress))
-            request_id=None
+            request={'id':None}
             try:
                 if candidate.review_brief_sha256==brief_hash and candidate.review_attempts>=2:
                     raise Problem('REVIEW_CALL_LIMIT','Two creative review attempts were already made for this candidate and brief.',
@@ -1691,41 +1837,23 @@ class Service:
                     s.status='reviewing';s.stage='creative_review';s.job_kind='review'
                     self.event(s,'Preparing paired rendered evidence',candidate=candidate.name)
                 self.mutate(project_id,reviewing)
-                data,previous,summary=creative_review.collect(self,state,candidate,cancel)
-                review_candidate=candidate.model_copy(deep=True)
-                if not review_candidate.validation.get('execution_capabilities'):
-                    operations=capabilities(state.source)['operations']
-                    try:
-                        current_timeline=local_grading.timeline(self.store.directory(project_id),state.source,self.settings,cancel)
-                    except Problem as error:
-                        if error.code in {'JOB_CANCELLED','SOURCE_CHANGED'}:raise
-                        current_timeline=None
-                    review_candidate.validation={**candidate.validation,'execution_capabilities':{
-                        'operations':operations if current_timeline else [o for o in operations if o!='regional_grade'],
-                        'localized_available':current_timeline is not None,'shots':current_timeline['shots'] if current_timeline else []}}
-                if not hasattr(self.provider,'review'):raise Problem('REVIEW_UNAVAILABLE','Creative review is unavailable for this provider.','The rendered candidate remains available for human review.',503)
-                def attempt(s):
+                def attempted(s):
+                    # Counted before the call, as before: a failing call still uses one of the two attempts.
                     c=next(c for c in s.candidates if c.id==candidate.id)
                     c.review_attempts=(c.review_attempts if c.review_brief_sha256==brief_hash else 0)+1
-                    c.review_brief_sha256=brief_hash;c.review_evidence=summary
+                    c.review_brief_sha256=brief_hash
+                self.mutate(project_id,attempted)
+                opinion=self.take_early_opinion(project_id,candidate,brief_hash,request)
+                if opinion is None:opinion=self.critic_opinion(project_id,state,candidate,cancel,lambda r:request.__setitem__('id',r))
+                review,data,previous,summary,request_id=(opinion[k] for k in ['review','data','previous','summary','request_id'])
+                def attempt(s):
+                    c=next(c for c in s.candidates if c.id==candidate.id)
+                    c.review_evidence=summary
                     c.output_sha256=data['rendered_sha256']
                     if previous:
                         prior=next(c for c in s.candidates if c.id==previous['id'])
                         if not prior.output_sha256:prior.output_sha256=previous['output_sha256']
                 self.mutate(project_id,attempt)
-                request_id=self.count_call(project_id,'Muse is reviewing rendered evidence',kind='critic')
-                call=self.store.get(project_id).model_calls
-                review,usage=self.provider.review(state.brief,review_candidate,data,previous,current_feedback(state))
-                self.record_usage(project_id,request_id,'critic',usage,call)
-                if sam.checksum(path)!=data['rendered_sha256']:
-                    raise Problem('REVIEW_OUTPUT_CHANGED','The rendered file changed during creative review.','Restore the frozen candidate.',409)
-                allowed={'source:'+str(f['frame_index']) for f in data['source_images']}|{'candidate:'+str(f['frame_index']) for f in data['candidate_images']}
-                allowed|={'source_region:'+str(f['frame_index']) for f in data.get('source_region_images',[])}|{'candidate_region:'+str(f['frame_index']) for f in data.get('candidate_region_images',[])}
-                if previous:allowed|={'previous:'+str(f['frame_index']) for f in previous['images']}
-                allowed|={f"mask_overlay_{f['overlay']}:{f['frame_index']}" for f in data.get('mask_overlay_images',[])}
-                if (any(set(i.evidence_ids)-allowed for i in review.issues) or any(set(m.evidence_ids)-allowed for m in review.mask_assessments)
-                    or review.preferred_candidate_id not in {None,candidate.id,previous['id'] if previous else candidate.id}):
-                    raise Problem('MUSE_INVALID_REVIEW','The review referenced unseen evidence or an unavailable candidate.','Review manually or retry explicitly.',502)
                 def reviewed(s):
                     c=next(c for c in s.candidates if c.id==candidate.id)
                     c.creative_review=review;c.review_error=None
@@ -1736,11 +1864,11 @@ class Service:
             except Exception as error:
                 if isinstance(error,Problem) and error.code in {'JOB_CANCELLED','SOURCE_CHANGED',*creative_review.TECHNICAL_ERRORS}:raise
                 failure=safe_problem(error,'creative_review')
-                if request_id and failure.details.get('usage_reported'):
-                    self.record_usage(project_id,request_id,'critic',failure.details,self.store.get(project_id).model_calls)
+                if request['id'] and failure.details.get('usage_reported'):
+                    self.record_usage(project_id,request['id'],'critic',failure.details,self.store.get(project_id).model_calls)
                 def failed(s):
                     c=next(c for c in s.candidates if c.id==candidate.id);c.review_error=failure.public()
-                    c.review_history.append({'at':now(),'brief_sha256':brief_hash,'request_id':request_id,'error':failure.public()})
+                    c.review_history.append({'at':now(),'brief_sha256':brief_hash,'request_id':request['id'],'error':failure.public()})
                     c.revision_stop_reason='creative_review_failed';self.event(s,'Creative review unavailable',failure.message,kind='error',code=failure.code)
                 self.mutate(project_id,failed);self.check_cancel(cancel)
                 finish(state.selected_candidate_id or candidate.id,'creative_review_failed');return
@@ -1760,7 +1888,7 @@ class Service:
             elif preferred!=candidate.id:stop='previous_candidate_preferred'
             elif not proposal or not any(i.correctable for i in review.issues):stop='no_supported_targeted_revision'
             elif proposal.unfulfilled_requests:stop='revision_requires_unavailable_operation'
-            elif sum(c.brief_sha256==brief_hash for c in state.candidates)>=self.settings.max_render_iterations or candidate.iteration>=state.render_iteration_limit:
+            elif attempts(state,brief_hash)>=self.settings.max_render_iterations or candidate.iteration>=state.render_iteration_limit:
                 stop='render_iteration_limit'
             elif any(c.recipe and c.brief_sha256==brief_hash and creative_review.execution_identity(c.recipe.proposal,c.recipe.tone_operator,state.source.duration)==creative_review.execution_identity(proposal,duration=state.source.duration) for c in state.candidates):
                 stop='unchanged_or_repeated_execution_plan'
@@ -1790,7 +1918,9 @@ class Service:
                 self.mutate(project_id,stopped)
                 finish(preferred);return
             next_candidate=RenderCandidate(id=str(uuid4()),name='V'+str(len(state.candidates)+1),source_sha256=state.source.sha256,
-                brief_sha256=brief_hash,generation_id=candidate.generation_id or str(uuid4()),parent_id=candidate.id,iteration=candidate.iteration+1)
+                brief_sha256=brief_hash,generation_id=candidate.generation_id or str(uuid4()),parent_id=candidate.id,iteration=candidate.iteration+1,
+                # A critic revision is judged on stills; render it as a draft and only the chosen plan in full.
+                tier='draft' if rendering.draft_size(state.source.width,state.source.height,self.settings.draft_long_side) else 'full')
             # The critic's typed plan is executable, not another planner/model round-trip.
             next_candidate.recipe=GradeRecipe(schema_version='takeone-grade-v3',prompt_version='colorist-v3',tone_operator='luminance_ocio_v3',
                 source_sha256=state.source.sha256,brief_sha256=brief_hash,model=self.settings.model,proposal=proposal,
@@ -1804,5 +1934,5 @@ class Service:
             self.mutate(project_id,revising)
             self.store.candidate_artifact(project_id,next_candidate.id,'plan.json',proposal.model_dump(mode='json'))
             self.store.candidate_artifact(project_id,next_candidate.id,'recipe.json',next_candidate.recipe.model_dump(mode='json'))
-            self._render_one(project_id,cancel,keep_active=True)
+            self._render_one(project_id,cancel,keep_active=True,review_follows='always')
             force=True

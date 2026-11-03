@@ -305,6 +305,10 @@ class RenderCandidate(StrictModel):
     # execute (render_supported). Rendered verbatim, without another planner call.
     approved_proposal: GradeProposal | None = None
     approved_omissions: list[str] = Field(default_factory=list)
+    # draft: a critic revision rendered at reduced size (graded after scaling, then encoded); the chosen
+    # draft is re-rendered in full as a separate candidate whose promoted_from names the draft.
+    tier: Literal['full','draft'] = 'full'
+    promoted_from: str | None = None
 
 
 class LookPreview(StrictModel):

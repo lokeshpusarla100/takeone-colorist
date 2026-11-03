@@ -57,7 +57,7 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
     void poll();
     return()=>{aborter.abort();clearTimeout(timer);};
   },[project?.backend?.id,refresh,apply,online]);
-  const send=async(kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select'|'render-supported'|'use-all-matches',body:Record<string,unknown>)=>{
+  const send=async(kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select'|'render-supported'|'use-all-matches'|'render-full',body:Record<string,unknown>)=>{
     const source=current.current;
     if(!source?.backend||inFlight.current||selectionInFlight.current||cancelInFlight.current||api.activeJob(source.backend))return false;
     if((kind==='looks'||kind==='looks/select')&&health?.look_previews_connected!==true){
@@ -96,6 +96,7 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
     review:(candidateId:string)=>send('review',{candidate_id:candidateId}),
     renderSupported:(candidateId:string)=>send('render-supported',{candidate_id:candidateId}),
     useAllMatches:(candidateId:string)=>send('use-all-matches',{candidate_id:candidateId}),
+    renderFull:(candidateId:string)=>send('render-full',{candidate_id:candidateId}),
     segment:(concept:string,durationSeconds:number|null)=>send('segment',{concept,duration_seconds:durationSeconds}),
     feedback:(evidence:Record<string,unknown>)=>send('feedback',{evidence}),
     captureSelection:async(evidence:Record<string,unknown>)=>{

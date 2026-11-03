@@ -31,6 +31,9 @@ class Settings:
     sample_memory_bytes: int = 16 * 1024 * 1024
     sample_image_bytes: int = 1024 * 1024
     max_render_iterations: int = 3
+    # Critic revisions of sources larger than this (long side, px) render as drafts at this size;
+    # the version finally chosen is rendered once in full resolution. 0 disables drafts.
+    draft_long_side: int = 1920
 
     @classmethod
     def from_env(cls):
@@ -57,4 +60,5 @@ class Settings:
             sample_memory_bytes=max(1,min(64,int(os.getenv('TAKEONE_SAMPLE_MEMORY_MB','16'))))*1024*1024,
             sample_image_bytes=max(64,min(2048,int(os.getenv('TAKEONE_SAMPLE_IMAGE_KB','1024'))))*1024,
             max_render_iterations=max(1,min(3,int(os.getenv('TAKEONE_MAX_RENDER_ITERATIONS','3')))),
+            draft_long_side=max(0,int(os.getenv('TAKEONE_DRAFT_LONG_SIDE','1920'))),
         )

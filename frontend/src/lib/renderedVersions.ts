@@ -14,7 +14,8 @@ export function withRenderedVersions(project:Project,state:BackendState):Project
       assets.push(asset);
     }
     if(!versions.some(v=>v.id===id)){
-      const version:Version={id,name:candidate.name,kind:'rendered',createdAt:candidate.created_at,
+      // Drafts are fast reduced-size review renders; the chosen one is re-rendered at full size.
+      const version:Version={id,name:candidate.tier==='draft'?candidate.name+' (draft '+candidate.width+'×'+candidate.height+')':candidate.name,kind:'rendered',createdAt:candidate.created_at,
         assetId:id,recipe:null,candidateId:candidate.id,downloadUrl:candidate.download_url,
         parentId:versions.find(v=>v.kind==='source')?.id};
       versions.push(version);

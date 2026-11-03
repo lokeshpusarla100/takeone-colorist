@@ -129,7 +129,8 @@ export default function App() {
           onRetry={()=>{w.clearError();void consultation.retry();}} onCancel={()=>void consultation.cancel()}
           viewCandidateId={selected?.candidateId} onReview={id=>{w.clearError();void consultation.review(id);}}
           onRenderSupported={id=>{w.clearError();void consultation.renderSupported(id);}}
-          onUseAllMatches={id=>{w.clearError();void consultation.useAllMatches(id);}}/>
+          onUseAllMatches={id=>{w.clearError();void consultation.useAllMatches(id);}}
+          onRenderFull={id=>{w.clearError();void consultation.renderFull(id);}}/>
         <SamPanel key={project.id} state={project.backend} health={consultation.health} online={consultation.online}
           locked={locked} sending={sending} onTrack={(concept,durationSeconds)=>{w.clearError();void consultation.segment(concept,durationSeconds);}}
           onCancel={()=>void consultation.cancel()} onRetry={()=>{w.clearError();void consultation.retry();}}/>

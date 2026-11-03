@@ -31,6 +31,7 @@ export type RenderCandidate = {
   validation:null|{warnings:string[];limitations:string[];review_status:string;bytes:number;audio_mode:string};
   error:null|{code:string;message:string;action:string;details?:ErrorDetails};
   approved_omissions?:string[];
+  tier?:'full'|'draft';promoted_from?:string|null;
 };
 export type LookPreview = {
   id:string;name:string;description:string;created_at:string;schema_version?:number;
@@ -206,6 +207,7 @@ export function stageLabel(stage:string) {
     decode_segmentation_masks:'Validating and decoding saved SAM masks locally',
     validate_local_masks:'Validating alignment, mask edges and temporal stability',
     render_local_grade:'Rendering and compositing foreground/background adjustments',
+    render_final:'Rendering the chosen draft at full resolution',
     check_output_quality:'Checking frame timing, subject preservation and clipping',
     select_looks:'Generating eight graded look previews on one frame',looks_ready:'Look previews ready',
     creative_review:'Muse is reviewing actual rendered/source evidence',
@@ -272,7 +274,7 @@ export async function upload(file:File,signal:AbortSignal) {
   form.append('profile_id',nextProfile());form.append('preference_context',JSON.stringify(nextContext()));
   return parseBackend(await request<unknown>('/api/projects',{method:'POST',body:form,signal},120000));
 }
-export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select'|'render-supported'|'use-all-matches',body:Record<string,unknown>) {
+export async function command(id:string,kind:'analyze'|'answers'|'retry'|'render'|'feedback'|'segment'|'review'|'looks'|'looks/select'|'render-supported'|'use-all-matches'|'render-full',body:Record<string,unknown>) {
   try{return parseBackend(await request<unknown>('/api/projects/'+id+'/'+kind,{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({...body,command_id:crypto.randomUUID()}),

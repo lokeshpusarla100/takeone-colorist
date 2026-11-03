@@ -5,7 +5,7 @@ export type StepId='prepare'|'inspect'|'clarify'|'brief'|'grade'|'masks'|'review
 type Part='plan'|'render'|'qc'|'track'|'validate_masks';
 const stages:Record<string,[StepId,Part?]>={
   inspect_source:['prepare'],prepare_preview:['prepare'],analyze_scene:['inspect'],select_question:['clarify'],save_brief:['brief'],
-  plan_grade:['grade','plan'],plan_revision:['grade','plan'],preflight_grade:['grade','plan'],render_grade:['grade','render'],render_local_grade:['grade','render'],
+  plan_grade:['grade','plan'],plan_revision:['grade','plan'],preflight_grade:['grade','plan'],render_grade:['grade','render'],render_local_grade:['grade','render'],render_final:['grade','render'],
   check_output_quality:['grade','qc'],verify_segmentation_input:['masks','track'],segment_subject:['masks','track'],
   decode_segmentation_masks:['masks','track'],render_mask_overlay:['masks','track'],validate_local_masks:['masks','validate_masks'],
   creative_review:['review'],

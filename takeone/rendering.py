@@ -21,6 +21,8 @@ from .media import command, probe
 from . import evidence
 from . import color_processing
 from . import timing
+from . import color_domain
+from . import source_color
 
 
 _BUILD_IDENTITIES={}
@@ -52,11 +54,11 @@ def verify_source(path: Path, source: Source, settings: Settings, cancel: thread
                       "Re-import the original. No recipe was applied to the changed file.", 409)
     metadata = probe(path, settings, cancel)
     video = next(s for s in metadata["streams"] if s["codec_type"] == "video")
-    if (video.get("pix_fmt") != "yuv420p" or video.get("color_transfer") != "bt709"
-            or video.get("color_primaries") != "bt709" or video.get("color_space") != "bt709"
-            or video.get("color_range") != "tv" or source.width % 2 or source.height % 2):
-        raise Problem("GRADE_DOMAIN_UNSUPPORTED", "Global grading requires known 8-bit limited-range Rec.709 input.",
-                      "Use supported SDR footage. No HDR/log interpretation or precision reduction is assumed.", 422)
+    # What was recorded with the source wins, so every stage agrees with the proxies made under it; an older record
+    # without one is resolved from the file. A source that cannot be converted honestly is refused with its reason.
+    domain = color_domain.SourceDomain.from_dict(source.domain) or source_color.domain_for_stream(video, settings)
+    if not domain.gradable:
+        raise Problem("GRADE_DOMAIN_UNSUPPORTED", domain.message, domain.action, 422, reason=domain.reason)
     return metadata
 
 
@@ -138,14 +140,15 @@ def draft_size(width,height,long_side=1920):
     return max(2,round(width*scale/2)*2),max(2,round(height*scale/2)*2)
 
 
-def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,first_frame_offset=0.,fast_local=True,native_time_base=None,draft=None) -> str:
-    """draft=(w,h): scale the source and every matte to w x h first, then grade exactly as at full size."""
+def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,first_frame_offset=0.,fast_local=True,native_time_base=None,draft=None,conform='') -> str:
+    """draft=(w,h): scale the source and every matte to w x h first, then grade exactly as at full size.
+    conform: color_domain.conform_filters of the source, '' for native footage (the graph is then unchanged)."""
     operator=recipe.tone_operator if recipe else 'bounded_sigmoid_v2'
     scaled=f'scale={draft[0]}:{draft[1]}:flags=bicubic,' if draft else ''
     matte_scaled=f'scale={draft[0]}:{draft[1]}:flags=bilinear,' if draft else ''
     def treatment(p,protected=False):
         return color_processing.lut(directory,p,protected) if operator=='luminance_ocio_v3' else treatment_filter(p,operator=operator,protected=protected)
-    start='[0:v]'+scaled+'format=gbrp16le,setparams=range=full'
+    start='[0:v]'+(conform+',' if conform else '')+scaled+'format=gbrp16le,setparams=range=full'
     if recipe and recipe.proposal.mode=='localized':
         local=recipe.proposal.local
         ranges=recipe.timeline['active_frame_ranges']
@@ -251,7 +254,7 @@ def filter_graph(parameters: GradeParameters, *, recipe=None,directory=None,firs
             "[view]scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[preview]")
 
 
-def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Settings, audio_codec: str | None, *, timing_policy,filter_threads=None,fast_local=True,draft=None):
+def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Settings, audio_codec: str | None, *, timing_policy,filter_threads=None,fast_local=True,draft=None,conform=''):
     source=source.resolve();directory=directory.resolve()
     audio = "copy" if audio_codec in {"aac", "mp3", "alac"} else "aac"
     inputs=['-i',str(source)]
@@ -268,7 +271,7 @@ def render_args(source: Path, directory: Path, recipe: GradeRecipe, settings: Se
         if not (offset==offset and abs(offset)!=float('inf')):offset=0.
     args=[settings.ffmpeg, "-hide_banner", "-v", "error", "-nostdin", "-y",
             "-filter_complex_threads", str(filter_threads or min(4,max(1,(os.cpu_count() or 2)//3))), "-copyts", "-start_at_zero", *inputs,
-            "-filter_complex", filter_graph(recipe.proposal.parameters,recipe=recipe,directory=directory,first_frame_offset=offset,fast_local=fast_local,native_time_base=timing_policy['encoder_time_base'],draft=draft),
+            "-filter_complex", filter_graph(recipe.proposal.parameters,recipe=recipe,directory=directory,first_frame_offset=offset,fast_local=fast_local,native_time_base=timing_policy['encoder_time_base'],draft=draft,conform=conform),
             "-map", "[master]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "17",
             "-threads", "4", "-pix_fmt", "yuv420p", "-fps_mode", "passthrough",
             "-enc_time_base:v",timing_policy['encoder_time_base'],
@@ -308,7 +311,8 @@ def probe_grade_samples(source,directory,recipe,original,settings,cancel,selecti
     if not indices or len(indices)>12 or indices[0]<0 or indices[-1]>=len(manifest['times']):
         raise Problem('GRADE_PREFLIGHT_SELECTION','The preflight selection is invalid or exceeds its sample budget.',
                       'Rebuild bounded source evidence before rendering.',422)
-    args=render_args(source,directory,recipe,settings,original.audio_codec,timing_policy=policy)
+    args=render_args(source,directory,recipe,settings,original.audio_codec,timing_policy=policy,
+        conform=source_color.chain_for_file(source,settings,cancel,recorded=original.domain))
     spatial_graph=args[args.index('-filter_complex')+1].split(',split=2[master][view];',1)[0]+'[master]'
     key=fingerprint({'source':original.sha256,'indices':indices,'spatial_graph':spatial_graph,
         'tone_operator':recipe.tone_operator,'color_domain':recipe.color_domain,'working_pixel_format':recipe.working_pixel_format,
@@ -379,7 +383,8 @@ def _render(source,directory,recipe,original,settings,cancel,on_stage,qc_mode,pr
     profile['filter_threads']=min(4,max(1,(os.cpu_count() or 2)//3)) if qc_mode=='optimized' else 2
     if on_stage:on_stage('render_local_grade' if recipe.proposal.mode=='localized' else 'render_grade')
     args=render_args(source,directory,recipe,settings,original.audio_codec,
-        timing_policy=policy,filter_threads=profile['filter_threads'],fast_local=qc_mode=='optimized',draft=draft)
+        timing_policy=policy,filter_threads=profile['filter_threads'],fast_local=qc_mode=='optimized',draft=draft,
+        conform=source_color.chain_for_file(source,settings,cancel,recorded=original.domain))
     progress_path=directory.resolve()/'encode-progress.log'
     from uuid import uuid4
     for name in ['grade.partial.mp4','preview.partial.webm','grade.mp4','preview.webm','encode-progress.log']:

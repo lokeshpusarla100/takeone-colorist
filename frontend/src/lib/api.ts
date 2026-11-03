@@ -49,7 +49,9 @@ export type BackendState = {
   stage:string;filename:string;request:string;answered_count:number;max_questions:number;model_calls:number;
   source:null|{name:string;bytes:number;sha256:string;width:number;height:number;duration:number;
     video_codec:string;audio_codec:string|null;technical_notes:string[];
-    pixel_format?:string|null;color_space?:string|null;color_primaries?:string|null;color_transfer?:string|null;rotation?:number|null};
+    pixel_format?:string|null;color_space?:string|null;color_primaries?:string|null;color_transfer?:string|null;rotation?:number|null;
+    /** How the colors are read and converted (takeone/color_domain.py); absent for sessions saved before it existed. */
+    domain?:unknown};
   preview:null|{url:string;width:number;height:number;duration:number;bytes:number};
   analysis:null|{summary:string;caveats:string[]};
   question:Question|null;pending_questions?:Question[];brief:Brief|null;events:SessionEvent[];
@@ -81,6 +83,7 @@ export type Health = {
   max_upload_bytes:number;max_duration_seconds:number;max_questions:number;grading_connected:boolean;
   sam_model?:string;segmentation_connected?:boolean;look_previews_connected?:boolean;native_mask_timing_connected?:boolean;
   pricing?:unknown;
+  source_conversion?:{zscale:boolean;tonemap:boolean;hdr_to_sdr:boolean};
 };
 const record=(value:unknown):value is Record<string,unknown>=>typeof value==='object'&&value!==null;
 const text=(value:unknown)=>typeof value==='string';

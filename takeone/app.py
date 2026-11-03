@@ -13,6 +13,7 @@ from pydantic import Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from takeone_rubric_v1.rubric import Answer, StrictModel
+from . import color_domain
 from .config import Settings
 from .contracts import Event, State
 from .errors import Problem, safe_problem
@@ -118,6 +119,8 @@ def create_app(settings: Settings | None = None, provider=None, sam_provider=Non
             "native_mask_timing_connected": True,
             "sam_model":settings.sam_model,"segmentation_connected":True,
             "pricing": settings.pricing(),
+            # Whether footage that is not Rec.709 as recorded (10-bit, full range, untagged, HDR phone video) can be converted here.
+            "source_conversion": {**color_domain.converter_tools(settings.ffmpeg), "hdr_to_sdr": settings.hdr_to_sdr},
         }
 
     @application.post("/api/projects", status_code=202)

@@ -2,6 +2,7 @@ import Icon from './Icon';
 import { parseEnvelope, safeguards, colorName, codecName, megabytes, seconds, sizeName } from '../lib/briefVisual';
 import type { Fact } from '../lib/briefVisual';
 import type { BackendState } from '../lib/api';
+import { colorTile, parseDomain } from '../lib/sourceColor';
 
 /** Facts from the prepared source when the backend sent them as data; the sentence form is only a fallback. */
 function sourceFacts(source: BackendState['source'], parsed: Fact[]): Fact[] {
@@ -12,8 +13,13 @@ function sourceFacts(source: BackendState['source'], parsed: Fact[]): Fact[] {
     { label: 'Codec', value: codecName(source.video_codec) },
   ];
   if (source.pixel_format) facts.push({ label: 'Pixel format', value: source.pixel_format });
-  const color = colorName(source.color_space ?? source.color_primaries);
-  if (color) facts.push({ label: 'Color space', value: color });
+  const domain = parseDomain(source.domain);
+  const tile = colorTile(domain);
+  if (tile) facts.push({ label: 'Color', value: tile.value, note: tile.note });
+  else {
+    const color = colorName(source.color_space ?? source.color_primaries);
+    if (color) facts.push({ label: 'Color space', value: color });
+  }
   facts.push({ label: 'File size', value: megabytes(source.bytes) });
   return facts;
 }

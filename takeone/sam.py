@@ -22,6 +22,7 @@ from . import mask_decode
 mask_decode.install()
 
 from .errors import Problem
+from . import color_domain, source_color
 from .media import command, display_size, probe, rotation_supported
 from .provider import MuseProvider
 
@@ -105,12 +106,15 @@ def mapping(directory,source,settings,cancel):
         except (ValueError,ZeroDivisionError):rate=Fraction(30)
         if not 1<=rate<=120:rate=Fraction(30)
         proxy=directory/'tracking.mp4';receipt=directory/'tracking-identity.json'
-        identity={'source':source.sha256,'rate':str(rate),'version':1}
+        # A source that is converted into Rec.709 gets its tracking proxy from the converted frames; the conversion is
+        # part of the cache identity so an unconverted proxy is never reused. Native footage: identity and filter unchanged.
+        conform=source_color.chain_for_file(original,settings,cancel,recorded=source.domain)
+        identity={'source':source.sha256,'rate':str(rate),'version':1,**({'conform':conform} if conform else {})}
         cached=json.loads(receipt.read_text()) if receipt.exists() else {}
         if not proxy.exists() or cached.get('identity')!=identity or cached.get('sha256')!=checksum(proxy):
             temporary=directory/'tracking.partial.mp4'
             command([settings.ffmpeg,'-v','error','-nostdin','-y','-threads','4','-i',str(original),'-an',
-                '-vf',f"scale=w='min(640,iw)':h='min(640,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,settb={rate.denominator}/{rate.numerator},setpts=N",
+                '-vf',f"scale=w='min(640,iw)':h='min(640,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1,"+(conform+','+color_domain.tagged_709()+',' if conform else '')+f"settb={rate.denominator}/{rate.numerator},setpts=N",
                 '-c:v','libx264','-preset','veryfast','-crf','26','-pix_fmt','yuv420p','-fps_mode','passthrough',
                 '-enc_time_base:v',str(1/rate),str(temporary)],cancel,180)
             temporary.replace(proxy);atomic(receipt,{'identity':identity,'sha256':checksum(proxy)})

@@ -12,7 +12,7 @@ import subprocess
 import cv2
 import numpy as np
 
-from . import sam
+from . import sam, source_color
 from .errors import Problem
 from .media import command, probe
 
@@ -365,7 +365,7 @@ def _judge_output(measured,plan,limits,adaptive):
 
 def check_output(original,graded,source,evidence,records,plan,settings,cancel,*,limits=None,adaptive=False):
     mapping=evidence['frame_map'];_output_timing(graded,mapping,settings,cancel)
-    a,b=cv2.VideoCapture(str(original)),cv2.VideoCapture(str(graded))
+    a,b=source_color.open_pair(original,graded,settings,cancel,recorded=getattr(source,'domain',None),size=(mapping['proxy']['width'],mapping['proxy']['height']))
     return _judge_output(_measure_output(a,b,mapping,records,cancel),plan,limits,adaptive)
 
 
@@ -377,12 +377,12 @@ class PendingOutputCheck:
     integrity decode. finish() then runs the same timing check, measurement and judgement, in the same
     order of precedence as check_output, so results and errors are identical; abort() stops it early."""
 
-    def __init__(self,original,graded,evidence,records,plan,settings,cancel,limits,adaptive):
+    def __init__(self,original,graded,evidence,records,plan,settings,cancel,limits,adaptive,recorded_domain=None):
         global _CHECK_RUNNER
         self.mapping=evidence['frame_map'];self.plan,self.settings,self.cancel=plan,settings,cancel
         self.limits,self.adaptive=limits,adaptive;self.stop=threading.Event()
         # Opened now: the open files survive the render's later rename of the partial output.
-        a,b=cv2.VideoCapture(str(original)),cv2.VideoCapture(str(graded))
+        a,b=source_color.open_pair(original,graded,settings,cancel,recorded=recorded_domain,size=(self.mapping['proxy']['width'],self.mapping['proxy']['height']))
         if not a.isOpened() or not b.isOpened():
             a.release();b.release();self.future=None;return
         if _CHECK_RUNNER is None:_CHECK_RUNNER=ThreadPoolExecutor(max_workers=1,thread_name_prefix='takeone-output-check')

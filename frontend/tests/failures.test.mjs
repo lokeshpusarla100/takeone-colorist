@@ -21,6 +21,7 @@ const {safeguards,parseEnvelope,headline,codecName,sizeName,seconds,megabytes}=a
 const {parseMarkdown,inline}=await load('markdown');
 const {CONTROLS,cellFor,layersOf,activeControls}=await load('recipeView');
 const {runSteps,stepProgress}=await load('stepper');
+const {parseDomain,colorNotice,colorTile,differences,canGrade}=await load('sourceColor');
 test('proportional playback previews can be compared without claiming master resolution',()=>{
   const source={width:3840,height:2160,duration:24.695222};
   assert.deepEqual(validateRenderImport(source,{width:1280,height:720,duration:24.797}),{previewOnly:true});
@@ -753,4 +754,36 @@ test('the caption and overall bar count the same rows the list shows',()=>{
   assert.equal(stepProgress([row('prepare','done'),row('clarify','waiting',{name:'Questions'})]).text,'Step 2 of 2: Questions (waiting for you)');
   assert.equal(stepProgress([row('prepare','done'),row('render','failed',{name:'Render'})]).text,'Step 2 of 2: Render (stopped)');
   assert.equal(stepProgress([row('prepare','active',{name:'Prepare source'})]).text,'Step 1 of 1: Prepare source');
+});
+
+test('how a phone video is described to the person: converted, tone-mapped or not gradable, in plain words',()=>{
+  const android=parseDomain({kind:'convert',matrix:'smpte170m',primaries:'bt470bg',transfer:'smpte170m',range:'full',bit_depth:10,assumed:[],steps:['Color matrix BT.601 is converted to Rec.709.']});
+  assert.deepEqual(differences(android),['10-bit','Full range','BT.601 matrix','BT.470BG colors']);
+  const notice=colorNotice(android);
+  assert.equal(notice.tone,'info');assert.match(notice.title,/Converted to Rec\.709/);assert.match(notice.lead,/never changed/);assert.deepEqual(notice.steps,['Color matrix BT.601 is converted to Rec.709.']);
+  assert.deepEqual(colorTile(android),{value:'BT.601 → Rec.709',note:'converted'});
+  const untagged=parseDomain({kind:'convert',matrix:'bt709',primaries:'bt709',transfer:'bt709',range:'limited',bit_depth:8,assumed:['matrix','range','primaries','transfer']});
+  assert.ok(differences(untagged).includes('Color tags missing'));assert.equal(colorTile(untagged).note,'assumed from the file');
+  const hlg=colorNotice(parseDomain({kind:'tonemap',hdr:'HLG',bit_depth:10,steps:['x']}));
+  assert.equal(hlg.tone,'warn');assert.match(hlg.title,/HLG video: converted to standard SDR/);assert.match(hlg.lead,/approximation/);assert.match(hlg.lead,/delivered as SDR/);
+  assert.deepEqual(colorTile(parseDomain({kind:'tonemap',hdr:'PQ'})),{value:'PQ → SDR',note:'tone-mapped'});
+  const log=parseDomain({kind:'unsupported',reason:'LOG_OR_LINEAR_TRANSFER',message:'Log footage needs a conversion.',action:'Convert it to Rec.709 and import that.'});
+  const refused=colorNotice(log);
+  assert.equal(refused.tone,'bad');assert.equal(refused.lead,'Log footage needs a conversion.');assert.equal(refused.action,'Convert it to Rec.709 and import that.');assert.equal(canGrade(log),false);
+  assert.equal(colorNotice(parseDomain({kind:'native'})),null);assert.deepEqual(colorTile(parseDomain({kind:'native'})),{value:'Rec.709'});
+});
+test('a missing, old or malformed color record says nothing and never breaks the interface',()=>{
+  for(const junk of [undefined,null,0,'text',[],{},{kind:'weird'},{kind:7}]){assert.equal(parseDomain(junk),null);assert.equal(colorNotice(parseDomain(junk)),null);assert.equal(colorTile(parseDomain(junk)),null);assert.equal(canGrade(parseDomain(junk)),true);}
+  const odd=parseDomain({kind:'convert',steps:[1,null,'ok',''],assumed:'nope',bit_depth:'10',matrix:5});
+  assert.deepEqual(odd.steps,['ok']);assert.deepEqual(odd.assumed,[]);assert.equal(odd.bit_depth,null);assert.equal(odd.matrix,null);
+  assert.doesNotThrow(()=>colorNotice(odd));assert.doesNotThrow(()=>colorTile(odd));
+});
+
+test('a source that cannot be graded is never described as ready to start',()=>{
+  const base={source:{domain:{kind:'unsupported',message:'m',action:'a'}},preview:{},status:'ready',stage:'ready',analysis:null,brief:null,answered_count:0,max_questions:5,events:[]};
+  const refused=runProgress(base);
+  assert.equal(refused.heading,'This video can’t be graded yet');assert.doesNotMatch(refused.note,/start the analysis/);assert.match(refused.note,/notice above the player/);
+  const fine=runProgress({...base,source:{domain:{kind:'convert'}}});
+  assert.equal(fine.heading,'Source ready');assert.match(fine.note,/start the analysis/);
+  assert.equal(runProgress({...base,source:{}}).heading,'Source ready');   // sessions saved before color domains are unaffected
 });

@@ -1,5 +1,6 @@
 import { activeJob, stageLabel } from './api';
 import type { BackendState } from './api';
+import { canGrade, parseDomain } from './sourceColor';
 
 export function mutationLocked(state?:BackendState,localBusy=false,requestPending=false,pendingSource?:BackendState){
   return localBusy||requestPending||!!(state&&activeJob(state))||!!(pendingSource&&activeJob(pendingSource));
@@ -54,6 +55,8 @@ export function runProgress(state?:BackendState,localBusy=false,localProgress?:s
     state?.status==='ready'?'Your video is ready. Describe the look you want, then start the analysis.':
     'Percentages shown are measured (encoding, tracking). Other stages show their elapsed time.';
   if(failed)note=state.error?.action??'Saved source and answers remain available for an explicit retry.';
+  // A source that cannot be graded must not be described as ready to start: the notice above the player says why.
+  if(state?.source&&!working&&!canGrade(parseDomain(state.source.domain))){heading='This video can’t be graded yet';note='See the notice above the player for the reason and what to do.';}
   if(state?.status==='segmenting')note='Manual subject tracking on the verified proxy. Missing masks remain explicit gaps.';
   if(state?.status==='rendering'&&latest?.recipe?.proposal.mode==='localized'&&masking)note='Automatic localized pipeline: required masks must pass alignment, completeness and stability checks before compositing.';
   if(state?.status==='reviewing')note='Muse compares the rendered candidate with the original and the current brief. Final creative approval remains yours.';

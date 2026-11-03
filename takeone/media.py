@@ -9,6 +9,7 @@ from pathlib import Path
 from .config import Settings
 from .contracts import Source, Preview
 from .errors import Problem
+from . import color_domain
 
 
 def command(args: list[str], cancel: threading.Event, timeout: float | None = 180, *, binary=False,cwd=None,progress_path=None,stall_timeout=None,on_progress=None):
@@ -101,24 +102,18 @@ def inspect_source(path: Path, name: str, digest: str, settings: Settings, cance
                       "Use a clip up to " + str(settings.max_duration) + " seconds and up to 4K.", 422,
                       duration=duration, width=width, height=height)
     rotation = display_rotation(video)
-    notes = []
-    transfer = video.get("color_transfer")
-    if transfer in {"smpte2084", "arib-std-b67"}:
-        raise Problem("HDR_UNSUPPORTED", "This source is HDR; SDR preview conversion is not verified yet.",
-                      "Use an explicitly converted SDR copy. The original upload has been preserved.", 422,
-                      color_transfer=transfer)
-    if not transfer or not video.get("color_primaries"):
-        notes.append("Source color interpretation is uncertain; global grading is unavailable until clarified.")
-    if video.get("pix_fmt") not in {"yuv420p", "yuvj420p", "yuv422p", "yuv444p", "rgb24", "bgr24"}:
-        notes.append("Preview is 8-bit. The original precision is retained; final grading is not enabled for this pixel format.")
     if abs(rotation) % 180 == 90:
         width, height = height, width
+    # How the colors are read and converted into the Rec.709 SDR domain the grade works in; every conversion
+    # parameter is resolved here, once, from the probed stream (takeone/color_domain.py).
+    domain = color_domain.resolve(video, width=width, height=height, hdr=settings.hdr_to_sdr, tools=color_domain.converter_tools(settings.ffmpeg))
+    notes = [*domain.steps] if domain.gradable else [domain.message + ' ' + domain.action]
     return Source(
         name=name, bytes=path.stat().st_size, sha256=digest, width=width, height=height, duration=duration,
         video_codec=video["codec_name"], audio_codec=audio["codec_name"] if audio else None,
-        pixel_format=video.get("pix_fmt", "unknown"), color_transfer=transfer,
+        pixel_format=video.get("pix_fmt", "unknown"), color_transfer=video.get("color_transfer"),
         color_primaries=video.get("color_primaries"), color_space=video.get("color_space"),
-        start_time=float(video.get("start_time") or 0), rotation=rotation, technical_notes=notes,
+        start_time=float(video.get("start_time") or 0), rotation=rotation, technical_notes=notes, domain=domain.to_dict(),
     ), raw
 
 
@@ -131,7 +126,13 @@ def make_previews(directory: Path, source: Source, project_id: str, settings: Se
     native_video=next(s for s in probe(directory/'source.bin',settings,cancel)['streams'] if s['codec_type']=='video')
     # Decode the original once and feed both existing preview encoders. Quality,
     # geometry and per-output cadence policies are unchanged.
-    graph='[0:v:0]split=2[displayin][analysisin];[displayin]'+geometry+'[display];[analysisin]'+geometry.replace('1280','640')+',setpts=PTS-STARTPTS[analysis]'
+    # Converted sources (not Rec.709 as recorded) are brought into Rec.709 SDR here so the browser preview, what Muse sees and
+    # every later decode of these proxies are in the domain the grade works in. The frames are shrunk first and converted
+    # second: previews are small, so converting the full-size frames would be most of the work thrown away. Native sources
+    # add nothing, and their graph is exactly what it was.
+    conform = color_domain.conform_filters(color_domain.SourceDomain.from_dict(source.domain))
+    tail = (',' + conform + ',' + color_domain.tagged_709()) if conform else ''
+    graph='[0:v:0]split=2[displayin][analysisin];[displayin]'+geometry+tail+'[display];[analysisin]'+geometry.replace('1280','640')+',setpts=PTS-STARTPTS'+tail+'[analysis]'
     command(base + ["-filter_complex_threads","2","-filter_complex",graph,
                     "-map", "[display]", "-map", "0:a:0?", "-c:v", "libvpx-vp9",
                     "-deadline", "realtime", "-cpu-used", "6", "-crf", "32", "-b:v", "0", "-pix_fmt", "yuv420p",
@@ -161,7 +162,7 @@ def make_previews(directory: Path, source: Source, project_id: str, settings: Se
                    bytes=(directory / "preview.webm").stat().st_size,
                    url="/api/projects/" + project_id + "/preview",
                    analysis_url="/api/projects/" + project_id + "/analysis-proxy",
-                   source_start_time=source.start_time, preview_start_time=float(v.get("start_time") or 0))
+                   source_start_time=source.start_time, preview_start_time=float(v.get("start_time") or 0), conformed=True)
 
 
 def global_grade(directory: Path, settings: Settings, cancel: threading.Event, *, contrast=1.0, saturation=1.0, gamma=1.0):
@@ -197,7 +198,10 @@ def rotation_supported(rotation: float) -> bool:
 
 
 def capabilities(source: Source):
-    supported = source.pixel_format == "yuv420p" and source.color_transfer == "bt709" and source.color_primaries == "bt709"
+    domain = color_domain.SourceDomain.from_dict(source.domain)
+    # Sources saved before color domains existed keep the rule they were judged by; a recorded domain decides otherwise.
+    supported = (domain.gradable if domain is not None
+                 else source.pixel_format == "yuv420p" and source.color_transfer == "bt709" and source.color_primaries == "bt709")
     return {
         "operations": (["global_grade","regional_grade"] if rotation_supported(source.rotation) else ["global_grade"]) if supported else [],
         "limitations": [

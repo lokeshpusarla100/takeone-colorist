@@ -5,6 +5,7 @@ import RubricDialog from './RubricDialog';
 import type { AppError } from '../lib/errors';
 import Card from './Card';
 import Icon from './Icon';
+import { canGrade, parseDomain } from '../lib/sourceColor';
 
 export default function RubricPanel({state,health,online,busy,sending,hasSource,direction,onDirection,onSaveDirection,autoRender,onAutoRender,
   onStart,onAnswer,onRetry,onCancel,onPrepare,error}:{
@@ -38,6 +39,7 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
   const status=!state?undefined:working?{tone:'accent' as const,label:'Working'}:question&&!changed?{tone:'warn' as const,label:'Needs your answers',icon:'chat' as const}
     :state.status==='failed'||state.status==='cancelled'?{tone:'bad' as const,label:'Stopped'}:brief&&!changed?{tone:'ok' as const,label:'Brief saved',icon:'check' as const}:undefined;
   const tooLong=direction.length>16000;
+  const gradable=canGrade(parseDomain(state?.source?.domain));
   return <Card n={1} title="Your direction" className="direction rubric-panel" label="Creative direction consultation" status={status}>
     <label htmlFor="direction" className="field-label">Describe the look you want, and anything that must stay as it is</label>
     <textarea id="direction" value={direction} disabled={disabled} rows={4}
@@ -52,8 +54,8 @@ export default function RubricPanel({state,health,online,busy,sending,hasSource,
     {hasSource&&!state&&<div className="consultation-actions"><span>This saved video needs backend preparation.</span>
       <button disabled={busy||!online} onClick={onPrepare}>Prepare source</button></div>}
     {!working&&!(question&&!changed)&&!(brief&&!changed)&&<div className="consultation-actions"><span className="muted">
-      {hasSource?'Start sends the silent analysis video and your request to Meta.':'Import a video before starting.'}</span>
-      <button className="primary" disabled={disabled||tooLong||!state?.preview||!online||!health?.muse_configured
+      {!gradable?'This video can’t be graded yet. See the notice above the player.':hasSource?'Start sends the silent analysis video and your request to Meta.':'Import a video before starting.'}</span>
+      <button className="primary" disabled={disabled||tooLong||!gradable||!state?.preview||!online||!health?.muse_configured
         ||(!changed&&!!state&&['awaiting_answer','brief_ready','render_ready','failed','cancelled'].includes(state.status))}
         onClick={onStart}><Icon name="spark" size={18}/>{changed&&state?.request?'Start with new direction':'Start analysis'}</button></div>}
     {working&&!['rendering','segmenting','reviewing'].includes(state.status)&&<div className="consultation-status" role="status"><span className="status-text"><span className="spinner"/>{stageLabel(state.stage)}</span><button disabled={sending||!online||state.stage==='cancelling'} onClick={onCancel}>Cancel</button></div>}

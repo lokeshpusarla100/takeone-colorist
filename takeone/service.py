@@ -11,7 +11,7 @@ from takeone_rubric_v1.rubric import Answer, CapabilityManifest, Directive, Obse
 from .config import Settings
 from .contracts import Event, State, GradeRecipe, RenderCandidate, ConsultationSummary, SegmentationRun, current_feedback,now
 from .errors import Problem, safe_problem
-from .media import capabilities, inspect_source, make_previews
+from .media import capabilities, inspect_source, make_previews, probe
 from .provider import MuseProvider
 from .store import Store
 from . import rendering
@@ -29,6 +29,8 @@ from . import render_preflight
 from . import convergence
 from . import concepts as sam_concepts
 from . import sam_single_pass
+from . import color_domain
+from . import source_color
 from . import model_payload
 
 
@@ -254,6 +256,7 @@ class Service:
             self.check_revision(state, revision)
             if not state.preview or not state.source:
                 raise Problem("SOURCE_NOT_READY", "The source preview is not ready.", "Wait for source preparation or retry the failed upload.", 409)
+            self.adopt_domain(state)  # a source that cannot be graded is refused before any Muse call is made
             if not self.provider.available():
                 raise Problem("MUSE_NOT_CONFIGURED", "The Meta API key is not configured.",
                               "Set MODEL_API_KEY in the root .env file, then refresh the editor.", 503)
@@ -436,9 +439,11 @@ class Service:
             if state.status not in {"brief_ready", "render_ready"}:
                 raise Problem("RENDER_NOT_READY", "The project is not ready for a new render.",
                               "Retry the failed step or finish the current operation.", 409)
+            if state.source:
+                self.adopt_domain(state)  # raises the specific reason (log footage, Dolby Vision 5, ...) when it cannot be converted
             if not state.source or "global_grade" not in capabilities(state.source)["operations"]:
-                raise Problem("GRADE_DOMAIN_UNSUPPORTED", "This source has no supported global grading domain.",
-                              "Use known 8-bit SDR Rec.709 footage.", 422)
+                raise Problem("GRADE_DOMAIN_UNSUPPORTED", "This source cannot be graded.",
+                              "Import standard video (H.264 or HEVC, SDR or HDR phone footage).", 422)
             if not self.provider.available():
                 raise Problem("MUSE_NOT_CONFIGURED", "The Meta API key is not configured.", "Set MODEL_API_KEY in .env.", 503)
             if attempts(state,brief_hash) >= self.settings.max_render_iterations:
@@ -1214,6 +1219,8 @@ class Service:
     def run(self, project_id: str, job_id: str, kind: str, cancel: threading.Event):
         try:
             self.check_cancel(cancel)
+            if kind != "ingest":
+                self.ensure_current_source(project_id, cancel)
             if kind == "ingest":
                 self.ingest(project_id, cancel)
             elif kind == "render":
@@ -1269,6 +1276,52 @@ class Service:
             if self.cancels.get(project_id) is cancel:
                 self.cancels.pop(project_id, None)
             self.slots.release()
+
+    def adopt_domain(self, state):
+        """How this project's source colors are read: the recorded domain, or for a session saved before domains
+        existed, resolved from the file now and recorded on `state` (the caller saves it). Raises the specific
+        GRADE_DOMAIN_UNSUPPORTED reason when the source cannot be converted honestly."""
+        source = state.source
+        domain = color_domain.SourceDomain.from_dict(source.domain)
+        if domain is None:
+            path = self.store.directory(state.id) / "source.bin"
+            stream = next(v for v in probe(path, self.settings, threading.Event())["streams"] if v["codec_type"] == "video")
+            domain = source_color.domain_for_stream(stream, self.settings)
+            source.domain = domain.to_dict()
+            source.technical_notes = [*domain.steps] if domain.gradable else [domain.message + " " + domain.action]
+        if not domain.gradable:
+            raise Problem("GRADE_DOMAIN_UNSUPPORTED", domain.message, domain.action, 422, reason=domain.reason)
+        return domain
+
+    # Cached pixel evidence of the original and of its proxies. Anything here made before a source was converted
+    # was decoded in the wrong domain and is rebuilt; timing caches (*.frames-v1.json) do not depend on color.
+    STALE_WHEN_RECONVERTED = ("source.bin.frames-*x*.npz", "analysis.mp4.frames-*x*.npz", "source-evidence-*.json", "source-review-evidence-*.json",
+                              "grade-source-samples.*", "tracking.mp4", "tracking-identity.json")
+
+    def ensure_current_source(self, project_id, cancel):
+        """Before any job reads the source: a session saved before color domains existed records how its colors are
+        read, and if they need converting its preview and analysis proxy are rebuilt in the converted domain, once.
+        A no-op for every source prepared by the current code."""
+        state = self.store.get(project_id)
+        if not state.source or not state.preview:
+            return
+        if color_domain.SourceDomain.from_dict(state.source.domain) is None:
+            self.mutate(project_id, self.adopt_domain)  # records it; raises the specific reason for a source that cannot be converted
+            state = self.store.get(project_id)
+        domain = color_domain.SourceDomain.from_dict(state.source.domain)
+        if not domain.gradable or domain.kind not in {color_domain.CONVERT, color_domain.TONEMAP} or state.preview.conformed:
+            return
+        directory = self.store.directory(project_id)
+        self.mutate(project_id, lambda s: (setattr(s, "stage", "prepare_preview"),
+            self.event(s, "Converting the source to Rec.709", "This source was prepared before its colors could be converted. Its preview and analysis proxy are rebuilt "
+                       "from the original, which is unchanged.", conversion=domain.kind)))
+        for pattern in self.STALE_WHEN_RECONVERTED:
+            for stale in directory.glob(pattern):
+                stale.unlink(missing_ok=True)
+        preview = make_previews(directory, state.source, project_id, self.settings, cancel)
+        self.check_cancel(cancel)
+        self.mutate(project_id, lambda s: setattr(s, "preview", preview))
+        self.prefetch_frames(directory / "source.bin")
 
     def ingest(self, project_id, cancel):
         state = self.store.get(project_id)
@@ -1364,6 +1417,7 @@ class Service:
                 technical_envelope=[
                     f"Source: {state.source.width}x{state.source.height}, {state.source.duration:.3f}s; "
                     f"{state.source.video_codec}; {state.source.pixel_format}.",
+                    *state.source.technical_notes,
                     "Analysis used the complete silent proxy; source/proxy timing is recorded.",
                     *state.analysis.caveats,
                 ],
@@ -1676,7 +1730,7 @@ class Service:
                               candidate_id=candidate.id,supported_plan_available=True)
             if proposal.mode=='localized' and not evidence:
                 raise Problem('LOCAL_GRADE_UNAVAILABLE','The requested localized plan has no supported frame mapping.',
-                              'Use upright SDR footage with valid, frame-preserving source/proxy mapping. No global fallback was made.',422,limitation=local_limitation)
+                              'Use upright footage with valid, frame-preserving source/proxy mapping. No global fallback was made.',422,limitation=local_limitation)
             recipe = GradeRecipe(schema_version='takeone-grade-v3',prompt_version='colorist-v3',
                                  source_sha256=state.source.sha256, brief_sha256=candidate.brief_sha256,
                                  model=self.settings.model, proposal=proposal, source_samples=measurements,
@@ -1776,7 +1830,7 @@ class Service:
             # Start measuring protected areas while the render runs its own integrity decode.
             if records is not None:
                 pending_check.append(local_grading.PendingOutputCheck(original,master,evidence,records,recipe.proposal.local,self.settings,cancel,
-                    recipe.proposal.execution_limits,recipe.tone_operator=='luminance_ocio_v3'))
+                    recipe.proposal.execution_limits,recipe.tone_operator=='luminance_ocio_v3',state.source.domain))
         try:
             result = rendering.render(original, output, recipe, state.source, self.settings, cancel,on_stage=render_stage,tier=candidate.tier,
                                       after_encode=after_encode,on_progress=encoding)

@@ -65,6 +65,9 @@ class Source(StrictModel):
     start_time: float
     rotation: float
     technical_notes: list[str]
+    # How the file's colors are interpreted and converted (takeone/color_domain.py). None for sources saved before
+    # it existed; they are resolved from the file when next used.
+    domain: dict | None = None
 
 
 class Preview(StrictModel):
@@ -76,6 +79,9 @@ class Preview(StrictModel):
     analysis_url: str
     source_start_time: float
     preview_start_time: float
+    # True when the browser preview and analysis proxy were built under the color-domain rules (takeone/color_domain.py);
+    # False for sessions saved before that, whose proxies are rebuilt when they need a conversion.
+    conformed: bool = False
 
 
 class GradeParameters(StrictModel):

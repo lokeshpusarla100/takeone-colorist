@@ -13,6 +13,7 @@ import numpy as np
 from .errors import Problem
 from . import tonal
 from .media import command, display_size
+from . import source_color
 
 
 def decoded_manifest(path,settings,cancel,metadata):
@@ -73,9 +74,12 @@ def decoded_evidence(path,settings,cancel,metadata,selection,*,also=()):
         frame_set=sorted(set(frame_set));w,h=sample_size(shown_width,shown_height,limit)
         if frame_set and frame_set[-1]<len(selection['manifest']['times']) and len(frame_set)*w*h*3<=settings.sample_memory_bytes:
             extra.append((frame_set,limit,w,h))
+    # The same conversion extract() applies, so these frames equal a stand-alone extraction of the same file. It is empty for
+    # everything this reads in production (rendered outputs are Rec.709), so those graphs are exactly as they were.
+    chain=source_color.chain_for_file(path,settings,cancel);convert=','+chain if chain else ''
     graph=(f'[0:v:0]split={2+len(extra)}[full][samplein]'+''.join(f'[extra{k}]' for k in range(len(extra)))
-           +f';[samplein]select={selected},scale={width}:{height}[samples]'
-           +''.join(f";[extra{k}]select={'+'.join(fr'eq(n,{i})' for i in s)},scale={w}:{h}[extraout{k}]".replace('eq(n,',r'eq(n\,')
+           +f';[samplein]select={selected},scale={width}:{height}{convert}[samples]'
+           +''.join(f";[extra{k}]select={'+'.join(fr'eq(n,{i})' for i in s)},scale={w}:{h}{convert}[extraout{k}]".replace('eq(n,',r'eq(n\,')
                     for k,(s,_l,w,h) in enumerate(extra)))
     with tempfile.TemporaryDirectory(prefix='takeone-qc-') as directory:
         sample_path=Path(directory)/'selected.rgb'
@@ -180,7 +184,10 @@ def extract(path,manifest,indices,settings,cancel,width=256):
     if missing:
         selection='+'.join(fr'eq(n\,{i})' for i in missing)
         # -threads 0: all-core decode, byte-identical pixels to the previous fixed 4 threads, ~2.5x faster.
-        raw=command([settings.ffmpeg,'-v','error','-nostdin','-threads','0','-i',str(path),'-an','-vf',f'select={selection},scale={w}:{h}',
+        # A source that is not Rec.709 as recorded is converted after the selection and the shrink to evidence size, so only a few
+        # small frames pay for it; native footage, proxies and rendered outputs get '' and the filter is exactly what it always was.
+        chain=source_color.chain_for_file(path,settings,cancel)
+        raw=command([settings.ffmpeg,'-v','error','-nostdin','-threads','0','-i',str(path),'-an','-vf',f'select={selection},scale={w}:{h}'+(','+chain if chain else ''),
             '-frames:v',str(len(missing)),'-fps_mode','passthrough','-pix_fmt','rgb24','-f','rawvideo','-'],cancel,60,binary=True)
         if len(raw)!=len(missing)*w*h*3:raise Problem('EVIDENCE_DECODE_FAILED','Decoded evidence does not match the selected frame identities.',
                                            'Inspect frame timing/decoder diagnostics; no model input was accepted.',422)

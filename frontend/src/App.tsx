@@ -24,6 +24,7 @@ import { mutationLocked } from './lib/workflow';
 import { loadAutoRender, saveAutoRender } from './lib/autoRender';
 import { useRunModel } from './lib/useRunModel';
 import RunStrip from './components/RunStrip';
+import SourceNotice from './components/SourceNotice';
 
 export default function App() {
   const w=useWorkspace();
@@ -63,7 +64,7 @@ export default function App() {
   const pricing=parsePricing(consultation.health?.pricing);
   const cost=projectCost(project.backend?.events??[],pricing);
   const limits=consultation.health;
-  const uploadHint=limits?`Up to ${Math.round(limits.max_upload_bytes/1048576)} MB${limits.max_duration_seconds?` and ${Math.round(limits.max_duration_seconds)} seconds`:''} · MP4, MOV, MKV or M4V. You can also drop a file here.`:undefined;
+  const uploadHint=limits?`Up to ${Math.round(limits.max_upload_bytes/1048576)} MB${limits.max_duration_seconds?` and ${Math.round(limits.max_duration_seconds)} seconds`:''} · MP4, MOV, MKV or M4V · phone video works, including 10-bit and HDR (HDR is converted to SDR). You can also drop a file here.`:undefined;
   const fileChange=(e:ChangeEvent<HTMLInputElement>,kind:'source'|'rendered')=>{
     const file=e.target.files?.[0];e.target.value='';if(file&&!locked)void w.importVideo(file,kind);
   };
@@ -131,6 +132,7 @@ export default function App() {
             <li>{project.source.width} × {project.source.height}</li><li>{formatTime(project.source.duration)}</li>
             {project.backend?.source&&<li>{formatBytes(project.backend.source.bytes)}</li>}
           </ul>}
+          <SourceNotice source={project.backend?.source}/>
           <Viewer source={viewerSource} selectedVersion={selected} selectedAsset={asset} busy={locked} hint={uploadHint}
             onChooseVideo={()=>sourceInput.current?.click()} onDropVideo={file=>void w.importVideo(file,'source')} onError={viewerError}
             onPreviewReady={()=>{if(error?.details.stage==='media.playback')w.clearError();}}

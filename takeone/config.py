@@ -65,6 +65,9 @@ class Settings:
     sam_single_pass_window: int = 50
     sam_single_pass_min_frames: int = 150
     sam_single_pass_min_areas: int = 3
+    # HDR (HLG/PQ) sources are tone-mapped to SDR before analysis and grading (takeone/color_domain.py). That is an
+    # approximation, always disclosed to the user; turn it off to refuse HDR sources instead.
+    hdr_to_sdr: bool = True
     # Meta Model API list prices in USD, used only to ESTIMATE what a video cost from the usage the provider
     # reported (it is not a bill). Source: https://dev.meta.ai/docs/pricing-rate-limits, read 2026-11-03.
     # Cached input is billed at its own rate; reasoning tokens are part of the output count. A SAM video request
@@ -119,6 +122,7 @@ class Settings:
             rubric_skip_closing=os.getenv('TAKEONE_RUBRIC_SKIP_CLOSING','').strip().lower() in {'1','true','yes'},
             sam_single_pass=os.getenv('TAKEONE_SAM_SINGLE_PASS','').strip().lower() in {'1','true','yes'},
             sam_single_pass_gate=min(.99,max(.5,_rate('TAKEONE_SAM_SINGLE_PASS_GATE',.85))),
+            hdr_to_sdr=os.getenv('TAKEONE_HDR_TO_SDR','1').strip().lower() not in {'0','false','no','off'},
             price_muse_input_per_m=_rate('TAKEONE_PRICE_MUSE_INPUT_PER_M', 1.25),
             price_muse_cached_input_per_m=_rate('TAKEONE_PRICE_MUSE_CACHED_INPUT_PER_M', 0.15),
             price_muse_output_per_m=_rate('TAKEONE_PRICE_MUSE_OUTPUT_PER_M', 4.25),

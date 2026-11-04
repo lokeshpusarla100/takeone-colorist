@@ -30,17 +30,19 @@ export default function InputProfileCard({ state, online, sending, onApply }: {
   const picker = useRef<HTMLInputElement>(null);
   const look = useRef<AbortController | null>(null);
 
-  // What the backend offers for this project; asked again whenever the project settles or its profile changes.
+  // What the backend offers for this project; asked again whenever the project's stage or its profile changes.
   useEffect(() => {
     setInfo(null); setChoice({ kind: 'none' }); setLut(null); setStills(null); setProblem(null); setOpen(null);
   }, [id]);
   useEffect(() => {
-    if (!id || !online || status !== 'ready') return;
+    if (!id || !online || status === 'ingesting') return;   // also after analysis, when the answer is that the choice is locked
     const aborter = new AbortController();
     colorApi.getInfo(id, aborter.signal).then(value => { if (!aborter.signal.aborted) setInfo(value); }).catch(() => { /* the card simply stays hidden */ });
     return () => aborter.abort();
   }, [id, online, status, applied]);
-  useEffect(() => { setChoice({ kind: info?.profile?.kind ?? 'none' }); setStills(null); }, [applied]);
+  // The selection follows what the backend says is applied (not the project's copy, which can arrive first).
+  const appliedNow = info?.profile?.signature ?? '';
+  useEffect(() => { setChoice({ kind: info?.profile?.kind ?? 'none' }); setStills(null); }, [appliedNow]);
 
   if (!state || !id) return null;
   const view = cardView(info, status);
@@ -100,7 +102,7 @@ export default function InputProfileCard({ state, online, sending, onApply }: {
     {expanded && <>
       {bar && info.levels && <figure className="range" aria-label={levelsSentence(info.levels)}>
         <div className="range-track" aria-hidden="true"><i style={{ left: bar.left + '%', width: bar.width + '%' }} /></div>
-        <figcaption><span>Dark</span><span>{levelsSentence(info.levels)}</span><span>Bright</span></figcaption>
+        <figcaption><span>Dark</span><span>{view.tone === 'ok' ? 'As recorded: ' : ''}{levelsSentence(info.levels)}</span><span>Bright</span></figcaption>
       </figure>}
       {error && <Callout tone="bad" title="That didn’t work"><p>{error.message}</p>{error.action && <p className="help"><strong>What to do: </strong>{error.action}</p>}</Callout>}
       <div className="profile-options" role="radiogroup" aria-label="How to read this video’s colors">

@@ -4,6 +4,8 @@
 
 Built for the Meta Global AI Developer Hackathon, on Meta's Muse Spark and SAM models.
 
+**Demo video (2 min 24 s):** [watch on YouTube](https://youtu.be/VKJ8r17Odsc). Every scene is a real run of the app.
+
 ## What Meta's models do
 
 | Model (Meta Model API) | Its job in Take One |

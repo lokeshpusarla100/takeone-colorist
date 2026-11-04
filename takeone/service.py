@@ -15,7 +15,7 @@ from .media import capabilities, inspect_source, make_previews, probe
 from .provider import MuseProvider
 from .store import Store
 from . import rendering
-from .preferences import FeedbackEvidence, PreferenceStore, PromptMemoryGate
+from .preferences import MAX_WORDING, FeedbackEvidence, PreferenceStore, PromptMemoryGate
 from .preferences import context_values
 from .usage import usage_details
 from . import sam
@@ -287,7 +287,7 @@ class Service(ColorMixin):
             event = self.event(state, "Creative direction submitted", request or "Use a conservative direction.", actor="user")
             if request:
                 self.queue_memory(state,FeedbackEvidence(event_id=event.id,project_id=state.id,kind="feedback",
-                    original_wording=request,preference_key="initial_request",context=state.preference_context))
+                    original_wording=request[:MAX_WORDING],preference_key="initial_request",context=state.preference_context))   # the full direction stays in the brief
             self.submit(state, "analysis")
             self.drain_memory(state)
             return state

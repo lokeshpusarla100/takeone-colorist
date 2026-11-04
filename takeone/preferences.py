@@ -31,12 +31,15 @@ class PreferenceScope(StrictModel):
     conditions: dict[str, str] = Field(default_factory=dict)
 
 
+MAX_WORDING = 4000   # the longest wording one preference record keeps; a longer direction is kept whole in the project, not here
+
+
 class FeedbackEvidence(StrictModel):
     event_id: str = Field(min_length=1, max_length=180)
     project_id: str | None = None
     kind: Literal["rubric_answer", "feedback", "version_selected", "version_rejected",
                   "manual_adjustment", "manual_lock", "reusable_instruction"]
-    original_wording: str = Field(default="", max_length=4000)
+    original_wording: str = Field(default="", max_length=MAX_WORDING)
     dimension: Dimension = Dimension.APPEARANCE
     preference_key: str = Field(default="appearance", min_length=1, max_length=160)
     question_id: str | None = None

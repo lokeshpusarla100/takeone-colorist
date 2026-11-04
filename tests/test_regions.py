@@ -11,6 +11,25 @@ from tests.test_backend import settings, start, upload  # noqa: F401
 from tests.test_local_grading import Planner, generate, parameters, pixels, scene  # noqa: F401
 from tests.test_sam import parsed
 
+NEUTRAL = dict(contrast=1., saturation=1., gamma=1.)
+
+
+def sky_treatment(ceiling=.62, cooling=.12, gain=.9, saturation=.9):
+    return GradeParameters(contrast=1.05, saturation=saturation, gamma=.95, brightness_gain=gain, cooling=cooling, highlight_ceiling=ceiling)
+
+
+def sky_only_proposal(duration, concept='sky', treatment=None):
+    """Sky as the localized layer, everything else (and outside the interval) untouched."""
+    return GradeProposal(
+        mode='localized', parameters=GradeParameters(**NEUTRAL),
+        local={'concept': concept, 'selection': 'all_matches', 'intervals': [{'start': 0, 'end': duration}],
+               'foreground': treatment or sky_treatment(), 'background': GradeParameters(**NEUTRAL),
+               'preserve_subject_color': False, 'feather_px': 1.5},
+        summary=f'Grade only the {concept}; all other pixels unchanged.', limitations=['Isolation test, not a full grade.'],
+        decisions=[{'parameter': 'local_treatment', 'reason': f'Isolate {concept} to test SAM tracking and highlight_ceiling.', 'source_ids': ['user_request']}],
+        intent={'description': f'Darker, cooler {concept} only.', 'highlight_policy': 'subdue', 'shadow_policy': 'preserve_detail'},
+        review_required=False)
+
 # Proxy-space boxes (192x108 scene): the subject is the red block at x 60..131, y 24..83.
 SUBJECT = (60, 24, 131, 83)
 BOXES = {'red subject': SUBJECT, 'sky': (0, 0, 191, 19), 'upper band': (0, 0, 191, 39), 'lower band': (0, 70, 191, 99)}
@@ -176,17 +195,13 @@ def test_region_layers_go_through_the_highlight_gate():
     assert result['proposal'] is None and result['report']['highlights']['violations'] == ['region:sky']
 
 
-def test_sky_only_experiment_renders_the_sky_and_leaves_everything_else(settings, scene):
-    """Experiment 6 through the unchanged single-concept path: sky as the localized layer, the rest neutral."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location('sky_only', __file__.replace('tests/test_regions.py', 'scripts/sky_only_experiment.py'))
-    experiment = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(experiment)
+def test_sky_only_grade_renders_the_sky_and_leaves_everything_else(settings, scene):
+    """A sky-only grade through the single-concept path: sky as the localized layer, the rest neutral."""
 
     class SkyOnly(Planner):
         def grade(self, brief, analysis, source, *args, **kwargs):
             super().grade(brief, analysis, source, *args, **kwargs)
-            return experiment.sky_only_proposal(source.duration, 'sky', experiment.sky_treatment(ceiling=.62)), {}
+            return sky_only_proposal(source.duration, 'sky', sky_treatment(ceiling=.62)), {}
 
     masks = ConceptMasks()
     with TestClient(create_app(settings, SkyOnly(), masks), base_url='http://127.0.0.1') as client:

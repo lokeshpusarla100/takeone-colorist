@@ -44,7 +44,7 @@ class Settings:
     # the version finally chosen is rendered once in full resolution. 0 disables drafts.
     draft_long_side: int = 1920
     # 'rows' (one object per frame, the verified default) or 'columns' (field names once, same facts):
-    # columns needs ~29% fewer JSON tokens; enable only after scripts/critic_layout_ab.py shows equal reviews.
+    # columns needs ~29% fewer JSON tokens; enable only after it is shown to give equal reviews.
     critic_table_layout: str = 'rows'
     # SAM requests for the subject and each region of one render run concurrently (their time is network
     # latency); 1 restores strictly sequential requests.

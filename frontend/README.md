@@ -46,15 +46,15 @@ The Run dashboard defaults to Progress, with a separate Session log tab and shar
 
 Question flow is one at a time: saving an answer triggers a fresh relevance check with prior decisions and cached observations. Zero questions remains valid for sufficiently specified requests; a short completion explanation is requested and stored separately from the brief directives. Existing sessions without that explanation remain compatible.
 
-Muse owns question relevance, order and semantic repetition. Python no longer ranks or drops creative questions by keywords or topic overlap. Data/tool-reference errors fail visibly for retry. Session exports include full structured question proposals, selected IDs and contract errors; historical completed sessions retain their original logs. See [the rule-based inventory](../docs/RULE_BASED_LOGIC.md).
+Muse owns question relevance, order and semantic repetition. Python no longer ranks or drops creative questions by keywords or topic overlap. Data/tool-reference errors fail visibly for retry. Session exports include full structured question proposals, selected IDs and contract errors; historical completed sessions retain their original logs.
 
 Conflicting workspace changes and model commands disable while local work, backend jobs, selections or cancellation commands are pending. Repeated submit/cancel/selection requests are also guarded in the consultation hook. Playback, tab navigation and exports remain available. Mutating controls unlock after success/failure/cancellation; editing a brief does not mark an earlier rendered version as a render of the new brief.
 
-Phase 2 adds a reviewing job state, rendered/source evidence review and targeted revision lineage. A selected candidate shows its own Muse opinion, evidence references and stop reason. Review is cached for unchanged output/brief identities; repeated network attempts are capped. Review failure retains the valid render. Opinions explicitly remain model judgements, not objective quality or user approval. Source/user feedback precedence uses a request epoch so older corrections do not override a newly submitted direction. See [Phase 2](../docs/PHASE2_ADAPTIVE_INTELLIGENCE.md).
+Phase 2 adds a reviewing job state, rendered/source evidence review and targeted revision lineage. A selected candidate shows its own Muse opinion, evidence references and stop reason. Review is cached for unchanged output/brief identities; repeated network attempts are capped. Review failure retains the valid render. Opinions explicitly remain model judgements, not objective quality or user approval. Source/user feedback precedence uses a request epoch so older corrections do not override a newly submitted direction.
 
 Health and job status come from the backend. No simulated questions, progress or usage are included in normal startup. Generate graded video asks Muse for a global/localized plan. Localized plans automatically request SAM masks, validate them, and composite distinct subject/background treatments on the original; global plans bypass SAM. Progress shows planning, segmentation, mask validation, compositing and output checks. A failed local step is never displayed as a successful global replacement. Automatic aesthetic approval and physical relighting remain unavailable.
 
-The manual Subject masks panel defaults to a five-second excerpt and remains a diagnostic tool. Automatic generation uses the planner's required intervals and reports linked mask runs. Completed candidates show their mode, separate subject/background settings, scope and technical checks. Older selected renders are explicitly identified when the newest attempt fails. See [automatic grading](../docs/AUTOMATIC_GRADING.md) and [SAM persistence](../docs/SAM_INTEGRATION.md).
+The manual Subject masks panel defaults to a five-second excerpt and remains a diagnostic tool. Automatic generation uses the planner's required intervals and reports linked mask runs. Completed candidates show their mode, separate subject/background settings, scope and technical checks. Older selected renders are explicitly identified when the newest attempt fails.
 
 Legacy browser-only sessions can use Prepare source. Existing saved recipe drafts remain readable.
 
@@ -64,7 +64,7 @@ Preferences opens the profile-based memory view. It starts empty and shows **Rec
 
 Submitted direction, rubric answers, feedback and explicit version choices are captured through backend APIs. Selecting a version records that choice; it does not imply approval of all its adjustments. Current-video feedback revises the brief even when capture is paused. Saving feedback does not automatically render a new version.
 
-Reusable records live on the backend, separate from IndexedDB and project artifacts. See [the memory contract](../docs/PREFERENCE_MEMORY.md) for endpoints, deletion semantics and the prepared future application gate.
+Reusable records live on the backend, separate from IndexedDB and project artifacts.
 
 The selected profile and category/scene/purpose labels are next-upload defaults only. Existing videos retain their bound profile. Automatic entries are tentative and project-scoped; reusable scope and confirmation require explicit management. Deleting an entry prevents replay resurrection while retaining the separate feedback audit. Capture errors are shown alongside the current-video workflow; an outbox retry endpoint is documented in the contract.
 

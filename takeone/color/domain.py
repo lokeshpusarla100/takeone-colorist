@@ -45,7 +45,7 @@ HDR_TRANSFERS = {'arib-std-b67': 'HLG', 'smpte2084': 'PQ'}
 UNSUPPORTED_TRANSFERS = {'linear', 'log100', 'log316', 'smpte428', 'iec61966-2-4', 'bt1361e'}
 PRIMARIES_FOR_MATRIX = {'bt709': 'bt709', 'bt470bg': 'bt470bg', 'smpte170m': 'smpte170m', 'smpte240m': 'smpte240m', 'bt2020nc': 'bt2020'}
 
-# Tone-mapping policy per HDR transfer (measured on HLG/PQ ramps, see docs/SOURCE_COLOR.md):
+# Tone-mapping policy per HDR transfer (measured on HLG/PQ ramps):
 #  HLG is designed to look right on SDR, and Hable follows that backward-compatible look with a smooth shoulder
 #  (mid-grey 0.50 -> 124/255 against 128 for a plain reinterpretation); Mobius lifts HLG midtones to 185.
 #  PQ carries absolute light, and Mobius keeps its reference white (PQ 0.58, 203 nits) near SDR white (234/255)

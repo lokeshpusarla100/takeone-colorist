@@ -37,6 +37,7 @@ coverage/
 
 # Local project media, model outputs, session exports, and temporary artifacts
 /workspace/
+/docs/
 /outputs/
 /media/
 /uploads/
@@ -64,3 +65,4 @@ coverage/
 .DS_Store
 Thumbs.db
 .idea/
+.vscode/

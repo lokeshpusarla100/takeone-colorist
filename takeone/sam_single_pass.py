@@ -3,7 +3,7 @@
 A localized grade names several areas (the subject, sky, water, ...). Today each area is its own SAM request and each
 request is billed for every frame it tracks, so five areas cost five times the frames. SAM also accepts *object
 prompts*: a box and points for each object, each under an id of our choosing, many objects per request, answered
-under the same ids (scripts/sam_single_pass_probe.py measured this on a real clip: 16 objects in one request, all
+under the same ids (measured on a real clip: 16 objects in one request, all
 answered under their ids, billed once for the frames).
 
 The flow built from these helpers (service.py, only when enabled):

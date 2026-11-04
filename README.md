@@ -1,5 +1,88 @@
 # Take One
 
+**An AI colorist you direct in plain words.** Upload a video and say what you want ("warmer evening feel, keep skin natural, make the sky moodier"). Take One asks only the questions that matter, plans an executable color grade, masks the parts of the picture that need their own treatment, and renders a graded video at the original resolution. You compare it with the original, revise it, and download it.
+
+Built for the Meta Global AI Developer Hackathon, on Meta's Muse Spark and SAM models.
+
+## What Meta's models do
+
+| Model (Meta Model API) | Its job in Take One |
+|---|---|
+| **Muse Spark 1.3** (`muse-spark-1.3`) | Watches the video, chooses which questions are worth asking you (an adaptive creative-direction rubric), writes the grade as a structured plan that the backend validates against a schema, and reviews renders against measured evidence. It can ask for a bounded revision (at most three renders by default). |
+| **SAM 3.1** (`sam-3.1`) | Finds and tracks the subject and extra regions (sky, wall, water...) frame by frame, so each can be graded separately. Take One checks the masks for geometry, completeness and temporal stability, and stops rather than quietly falling back to a global grade. |
+
+The models decide *what* to do; they never touch pixels. FFmpeg and OpenColorIO do all pixel work, from the original file, in 16-bit.
+
+## How it works
+
+    original video ─► ffprobe / FFmpeg ─► browser preview + small silent analysis proxy
+                                                   │
+        Muse Spark ◄───────────────────────────────┘  sees the proxy and your request
+            │  asks the few questions that matter  ─► creative brief you can read and edit
+            ▼
+        Muse plans the grade: global, or localized with regions   (schema-validated)
+            │
+            ├─ localized ─► SAM 3.1 masks ─► validated mattes (coverage, edges, stability)
+            ▼
+        FFmpeg + OpenColorIO render from the ORIGINAL pixels ─► H.264 master + preview
+            ▼
+        measured checks (timing, frame count, clipping, protected areas) + Muse review
+            ▼
+        compare with the original · revise · download
+
+## What it does today
+
+- **Plain-words direction with adaptive questions.** Zero to three questions by default (five at most), each chosen by Muse from your request and earlier answers; a clear request gets none.
+- **Global and localized grades.** A localized grade treats a subject plus up to four more regions separately, with soft edges and short fades at the start and end of each active interval.
+- **Works with real phone footage.** 10-bit HEVC, full-range, untagged and BT.2020 clips are converted to Rec.709 before grading, and HLG/PQ HDR is tone-mapped to SDR, always disclosed as an approximation.
+- **Flat or log footage.** A clip that looks flat is detected and *suggested*, never changed on its own. You choose a quick contrast fix (approximate, labelled so) or upload the camera maker's `.cube` LUT (exact), after seeing before/after stills.
+- **No silent fallbacks.** If masks have gaps, a source cannot be converted honestly, or a render fails its checks, the app says what is wrong and what to do, and keeps the original and earlier versions.
+- **Cost per video.** An estimate in US dollars from the usage Meta reports, for Muse and SAM together.
+- **Your footage stays yours.** The original is never modified; audio and frame timing are preserved and checked.
+
+## Quick start
+
+You need Python 3.12, Node.js 20.19+ (or 22.12+), FFmpeg and FFprobe on `PATH`, and a Meta Model API key.
+
+    python3.12 -m venv .venv
+    .venv/bin/python -m pip install -r requirements-lock.txt
+    npm --prefix frontend ci
+    cp .env.example .env          # then set MODEL_API_KEY in .env
+
+    .venv/bin/python -m uvicorn takeone.app:app --host 127.0.0.1 --port 8000     # terminal 1
+    npm --prefix frontend run dev                                               # terminal 2
+
+Open http://127.0.0.1:5173/. Importing and preparing a video needs no key. Muse and SAM calls need one and incur usage on your Meta account; the interface shows a running estimate from the usage Meta reports. The key is read only by the backend and never reaches the browser.
+
+Run the checks (no key needed; the model calls are replaced by a fixture):
+
+    .venv/bin/python -m pytest -q tests takeone_rubric_v1
+    npm --prefix frontend test
+    npm --prefix frontend run build
+
+**Verified.** 562 backend tests pass (they run real FFmpeg and FFprobe, with a fixture standing in for Meta's models), as do 75 frontend tests and the production build, and a fresh clone of this repository installs and builds by the steps above. The color conversion is checked against OpenColorIO's reference camera transforms, and the app has been run end to end, including in a real browser, on real 4K phone footage.
+
+## Known limitations
+
+- **Output is SDR Rec.709.** HDR sources are tone-mapped, which is an approximation.
+- **Camera log is exact only with the maker's LUT.** The built-in contrast fix stretches the clip's own darkest and brightest points in a straight line, so shadows can sit slightly deeper than the camera's own transform would put them.
+- **Localized grades are slow at full resolution.** A 30-second 3840x1644 clip with three graded areas takes about five minutes for the render step on the 12-thread development machine (measured); planning and mask tracking add to that.
+- **One local user.** One backend process and one media worker per workspace; there is no authentication, so keep it on localhost.
+- **Models can be wrong.** Mask checks are technical, not a judgment of semantic accuracy, and Muse's opinion of a render is shown apart from the measurements. The final decision on the look is yours.
+- **Not built:** relighting, scene reconstruction, shot matching, personalization from stored preferences (preferences are captured only), and a built-in library of per-camera log transforms.
+
+## Built with
+
+Third-party software is used as dependencies and is not copied into this repository; see each project for its license. Back end: FastAPI, Pydantic, Uvicorn, NumPy, SciPy, OpenCV, OpenColorIO, the OpenAI-compatible Python client (to call the Meta Model API) and Meta's SAM parser package. Front end: React, Vite, Tailwind CSS, TypeScript. Media: FFmpeg and FFprobe, run as separate programs.
+
+---
+
+# Reference
+
+The rest of this file is the detailed reference: configuration, behavior, recovery, limits and troubleshooting.
+
+## Overview
+
 Local video preparation, a React editor, Muse-powered creative direction, and capture-only editing preference memory.
 
     Upload original → prepare preview → enter request → Start analysis
@@ -8,7 +91,7 @@ Local video preparation, a React editor, Muse-powered creative direction, and ca
 
 **Generate graded video** asks Muse Spark 1.3 to choose an executable global or localized SDR/Rec.709 plan from the saved brief and latest feedback. Global correction bypasses SAM. Localized treatment automatically obtains SAM 3.1 masks, validates them, and composites separate foreground/background adjustments with FFmpeg. Manual SAM diagnostics remain available. Physical relighting, reconstruction, shot matching and automatic aesthetic approval remain unavailable.
 
-Phase 2 adds bounded content-adaptive evidence, luminance-preserving tone with OpenColorIO CDL colour operations, and rendered-evidence creative review. Substantive candidates may receive a targeted revision, capped at three renders by default. Muse opinions are shown separately from technical measurements; final aesthetic approval remains yours. See [Phase 2 implementation and verification](docs/PHASE2_ADAPTIVE_INTELLIGENCE.md).
+Phase 2 adds bounded content-adaptive evidence, luminance-preserving tone with OpenColorIO CDL colour operations, and rendered-evidence creative review. Substantive candidates may receive a targeted revision, capped at three renders by default. Muse opinions are shown separately from technical measurements; final aesthetic approval remains yours.
 
 ## Configure
 
@@ -57,7 +140,7 @@ Default question budget: three, with a hard maximum of five. A clear request can
 
 Questions are adaptive: one question → save your answer → reevaluate remaining choices → ask one useful follow-up or finish. Follow-ups reuse cached video observations and include earlier questions, alternatives and chosen outcomes. The app does not ask five questions in one batch or render after every answer. Broad look words do not automatically settle treatment strength or preservation tradeoffs.
 
-Creative question selection belongs to Muse. Python keyword/family inference and aesthetic ranking remain removed. Repetition checks now validate scope-specific model decision IDs and verbatim question/option repeats; a genuinely finer clarification needs an explicit parent and new-information reason. New outputs request zero or one question. Invalid contracts fail for retry rather than silently completing the consultation. Full structured proposals and errors remain exported. See [the rule-based logic inventory](docs/RULE_BASED_LOGIC.md).
+Creative question selection belongs to Muse. Python keyword/family inference and aesthetic ranking remain removed. Repetition checks now validate scope-specific model decision IDs and verbatim question/option repeats; a genuinely finer clarification needs an explicit parent and new-information reason. New outputs request zero or one question. Invalid contracts fail for retry rather than silently completing the consultation. Full structured proposals and errors remain exported.
 
 Existing browser-only sessions remain compatible. Use **Prepare source** to upload their saved original and connect to the backend.
 
@@ -80,13 +163,13 @@ Browser sessions depend on the exact host/port. Localhost and 127.0.0.1, and por
 ## Limits
 
 - Default: 256 MiB per upload, 120 seconds, up to 4K.
-- For larger generated masters, set `TAKEONE_MAX_UPLOAD_MB=512` in the local `.env` and restart the backend. The editor checks the running server's limit before sending the file; server-side limits still apply. The local development configuration was raised to 512 MiB for the 455.5 MiB `V2-graded.mp4` import. This does not change duration, codec or geometry restrictions.
-- HDR conversion and non-square-pixel sources are rejected explicitly until verified.
-- Source color interpretation remains known/unknown. Global grading capabilities are restricted to supported source metadata.
+- For larger generated masters, set `TAKEONE_MAX_UPLOAD_MB=512` in the local `.env` and restart the backend. The editor checks the running server's limit before sending the file; server-side limits still apply. This does not change duration, codec or geometry restrictions.
+- HDR (HLG/PQ) is tone-mapped to SDR and disclosed as an approximation (`TAKEONE_HDR_TO_SDR=0` refuses it instead). Non-square-pixel sources are rejected explicitly.
+- Phone formats that are not Rec.709 as recorded are converted before grading; files tagged as log or linear, and a few other cases, are refused with a reason; flat or log footage tagged as ordinary video is handled through the input profile.
 - Browser previews are compressed 8-bit working views. Original precision is retained in the upload.
-- Global rendering preserves source presentation timestamps, including near-CFR jitter and VFR. Encoder/MP4 time bases are explicit; decoded frame counts, per-frame timing and the master's audio/video origin are validated. See [timing policy and RENDER_TIMING_CHANGED diagnosis](docs/RENDER_TIMING.md).
+- Global rendering preserves source presentation timestamps, including near-CFR jitter and VFR. Encoder/MP4 time bases are explicit; decoded frame counts, per-frame timing and the master's audio/video origin are validated.
 - Scene understanding uses the complete silent proxy; it is not a calibrated color measurement.
-- Tools support bounded contrast, saturation, gamma, brightness gain and explicit red/blue cooling in the SDR/Rec.709 display domain. Local execution supports one segmentation concept with foreground/background controls and up to twelve requested intervals, split at detected cuts. Upright CFR, near-CFR and VFR sources use verified frame identity and complete unambiguous masks. Original timestamps remain unchanged; only the separate tracking proxy has uniform timing. Physical relighting, reconstruction and shot matching are unavailable.
+- Tools support bounded contrast, saturation, gamma, brightness gain and explicit red/blue cooling in the SDR/Rec.709 display domain. Local execution supports a subject plus up to four additional regions, each with its own treatment, and up to twelve requested intervals, split at detected cuts. Upright CFR, near-CFR and VFR sources use verified frame identity and complete unambiguous masks. Original timestamps remain unchanged; only the separate tracking proxy has uniform timing. Physical relighting, reconstruction and shot matching are unavailable.
 - Imported renders can be compared when duration matches and framing is identical or a proportional downscale (with bounded encoder rounding). Lower-resolution imports are labeled preview-only; they do not acquire backend recipe provenance or become full-resolution masters. Cropped, stretched, upscaled or duration-mismatched imports remain rejected. Use the app's **Download video** button for the master MP4; saving the browser player downloads its smaller WebM preview.
 - Local mask gaps, ambiguity, instability or preservation failures stop the candidate with no silent global fallback. Technical checks and mask-core statistics do not establish semantic mask accuracy or aesthetic success; moving-video approval remains yours.
 
@@ -98,7 +181,7 @@ Each progress step shows elapsed backend time, with separate planning/render/che
 
 Initial source preparation creates both the browser display preview (VP9/Opus, up to 1280px) and the silent analysis proxy (H.264, up to 640px). Both now share one source decode; encoder quality/cadence settings remain unchanged. Render retry does not upload or prepare the source again. In the supplied Nov 2 session export, initial preparation took about 22 seconds; its completed timer was retained, not rerun on render retry. No full-4K speedup for the combined preparation command is claimed without a fresh measurement.
 
-Declared global clipping bounds now receive a source-sample mathematical check and an original-resolution encoded preflight before a long render. A supported input-level correction creates a separate candidate, preserving the earlier plan and all limits. Impossible plans stop early; full output QC still runs. See [clipping RCA, measured performance and offline test scripts](docs/RENDER_RECOVERY.md).
+Declared global clipping bounds now receive a source-sample mathematical check and an original-resolution encoded preflight before a long render. A supported input-level correction creates a separate candidate, preserving the earlier plan and all limits. Impossible plans stop early; full output QC still runs.
 
 Rubric questions appear one at a time in an automatic popup. **Answer question** reopens a pending question; **Review Q&A** shows saved questions and answers. Closing or pressing Escape leaves the question unanswered and preserves the current draft while the page stays open. The direction field and completed Creative Brief remain in the editor.
 
@@ -108,7 +191,7 @@ Importing/replacing media, switching sessions, renaming, changing versions/prefe
 
 After the brief is ready, use **Subject masks · SAM**. Enter one subject phrase, such as motorcycle, choose **First 5 seconds** (default) or **Full clip**, and click **Track subject**. It uses the existing MODEL_API_KEY with hosted sam-3.1 and may incur per-frame usage. No local model weights or second API key are required.
 
-The backend verifies source/proxy frame counts and scale-only geometry before upload. For irregular footage, a separate CFR tracking proxy preserves one frame per original frame. SAM IDs map back to native source PTS; the renderer schedules masks on that native clock. The original video/audio timing is never normalized. Gaps remain gaps. Manual diagnostics show every match without selecting an editing target. Automatic grading requires one unambiguous ID per shot interval, or an explicitly planned all-matches concept. Valid masks are refined into an original-resolution matte and consumed by FFmpeg's masked merge. See [native timing support](docs/NATIVE_MASK_TIMING.md).
+The backend verifies source/proxy frame counts and scale-only geometry before upload. For irregular footage, a separate CFR tracking proxy preserves one frame per original frame. SAM IDs map back to native source PTS; the renderer schedules masks on that native clock. The original video/audio timing is never normalized. Gaps remain gaps. Manual diagnostics show every match without selecting an editing target. Automatic grading requires one unambiguous ID per shot interval, or an explicitly planned all-matches concept. Valid masks are refined into an original-resolution matte and consumed by FFmpeg's masked merge.
 
 Incomplete single-subject coverage now gets bounded recovery: at most two requests per original track,
 each limited to 300 proxy frames including up to 15 overlap frames. Known masks supply explicit boxes
@@ -120,9 +203,9 @@ be reused as standalone tracks. Full geometry, stability, completeness and rende
 apply. Recovery never assumes absence, paints missing masks, or substitutes a global grade. A normal
 Retry may incur the bounded SAM recovery usage; verified repairs are reused without another call.
 
-Network events are saved before local decoding, so a completed response can be replayed after a decode/overlay failure without another SAM request. Incomplete streams remain failed and require an explicit new remote attempt. Local decoding can take substantially longer than downloading the response. See [SAM integration and validation](docs/SAM_INTEGRATION.md) for APIs, limits and the bounded live test.
+Network events are saved before local decoding, so a completed response can be replayed after a decode/overlay failure without another SAM request. Incomplete streams remain failed and require an explicit new remote attempt. Local decoding can take substantially longer than downloading the response.
 
-See [automatic grading architecture and validation](docs/AUTOMATIC_GRADING.md) for planner activation, safe tonal processing, cache rules, frame alignment, quality gates and the actual-footage validation boundary.
+
 
 ## Token usage
 
@@ -196,16 +279,13 @@ To manage preferences:
 Deleted entries cannot return through replay of previously processed events. Their raw supporting feedback remains in the separate audit history. Capturing, confirming or repeating preferences never enables application, and explicit version selection never proves approval of every adjustment.
 
 Records live in the ignored .takeone-memory/ directory, separate from project artifacts.
-Existing interactions are not backfilled. See [the memory contract](docs/PREFERENCE_MEMORY.md)
-and Section 26 of the project plan for persistence, deletion semantics, APIs, prepared future
-opt-in interfaces and verification boundaries.
+Existing interactions are not backfilled.
 
 ## Repository
 
 - [Frontend notes](frontend/README.md)
-- [Original project plan](Take_One_Hackathon_Project_Plan.md)
+- [Original project plan](Take_One_Hackathon_Project_Plan.md) (written on 31 October as a plan; this README describes what is actually built)
 - [Creative-direction rubric](takeone_rubric_v1/README.md)
-- [Preference memory contract and API](docs/PREFERENCE_MEMORY.md)
 - takeone/: FastAPI application, media tools, Muse integration, jobs and persistence
 - requirements-lock.txt: existing pinned Python dependencies
 

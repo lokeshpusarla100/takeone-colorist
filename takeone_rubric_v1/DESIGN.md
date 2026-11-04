@@ -96,7 +96,7 @@ offered options are chosen, no follow-up is needed) and `completion_reason_if_fi
 `closing_prediction: {predicted_final, actual_final}` on every closing call. With
 `TAKEONE_RUBRIC_SKIP_CLOSING=1` the closing call is skipped when the prediction holds and every answer of the
 round was an offered option (free text, skip or delegate always get the call). Leave it off until
-`scripts/rubric_replay.py` reports that predictions agree with the closing calls.
+predictions are shown to agree with the closing calls.
 
 **Request content.** `previous_decisions` carries every answer (question ID, response type, response,
 target key, question, alternatives, chosen outcome); the former separate `answers` and
@@ -167,7 +167,7 @@ The application records editing evidence and scoped interpretations separately i
 
 PromptMemoryGate filters the actual rubric context. With application disabled, remembered defaults and memory-derived directives are excluded while the current request, current-video answers and feedback remain available. The same boundary covers colorist context; future critic/look-selection/preview builders must use it as well.
 
-Prepared future fields include Candidate.memory_refs and memory_conflict, Proposal.memory_used_ids, and memory-provenance brief directives/influence records. Relevant confirmed defaults may be advisory only after explicit new-project opt-in and the other application gates. Current instructions, constraints and tool limits take precedence; memory never grants permission. Existing frozen briefs are not rewritten when stored entries change. See [the application memory contract](../docs/PREFERENCE_MEMORY.md) for exact rollout limits.
+Prepared future fields include Candidate.memory_refs and memory_conflict, Proposal.memory_used_ids, and memory-provenance brief directives/influence records. Relevant confirmed defaults may be advisory only after explicit new-project opt-in and the other application gates. Current instructions, constraints and tool limits take precedence; memory never grants permission. Existing frozen briefs are not rewritten when stored entries change.
 
 ## Verification status
 

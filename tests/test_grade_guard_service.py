@@ -136,8 +136,10 @@ def test_nonzero_local_start_is_normalized_by_mapping_not_rejected(settings,tmp_
              'frames':[{'index':i,'source_pts':2.0+i/12,'proxy_pts':i/12,'time':i/12} for i in range(3)],
              'normalization':{'method':'first_decoded_frame_pts','source_offset_seconds':2.0,'proxy_offset_seconds':0.0}}
     monkeypatch.setattr(sam,'mapping',lambda *args,**kwargs:mapping)
+    # timeline() also reads the proxy's own frame times and the source duration; the proxy here is not a real video.
+    monkeypatch.setattr(sam,'frame_info',lambda *args,**kwargs:{'pts':[i/12 for i in range(3)],'normalized':[i/12 for i in range(3)]})
     monkeypatch.setattr(local_grading,'command',lambda *args,**kwargs:'')
-    result=local_grading.timeline(tmp_path,SimpleNamespace(start_time=2.0,sha256='source'),settings,threading.Event())
+    result=local_grading.timeline(tmp_path,SimpleNamespace(start_time=2.0,sha256='source',duration=2.25),settings,threading.Event())
     assert result['frame_map']['normalization']['source_offset_seconds']==2.0
     assert [f['time'] for f in result['frame_map']['frames']]==[0,1/12,2/12]
     assert result['shots'][0]['first_frame']==0

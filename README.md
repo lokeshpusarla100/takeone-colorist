@@ -42,7 +42,9 @@ The models decide *what* to do; they never touch pixels. FFmpeg and OpenColorIO 
 
 ## Quick start
 
-You need Python 3.12, Node.js 20.19+ (or 22.12+), FFmpeg and FFprobe on `PATH`, and a Meta Model API key.
+You need Python 3.12, Node.js 20.19+ (or 22.12+), FFmpeg and FFprobe on `PATH`, and a Meta Model API key. OpenColorIO is installed by `pip` (no system package needed).
+
+FFmpeg must be built with `libx264`, `libvpx` (VP9), `libopus` and `libzimg` (the `zscale` filter). It was developed and tested with FFmpeg n9.0.2. Check your build with `ffmpeg -encoders | grep -E "libx264|libvpx|libopus"` and `ffmpeg -filters | grep zscale`; without `zscale`, phone footage that needs color conversion is refused with a message.
 
     python3.12 -m venv .venv
     .venv/bin/python -m pip install -r requirements-lock.txt
@@ -60,7 +62,16 @@ Run the checks (no key needed; the model calls are replaced by a fixture):
     npm --prefix frontend test
     npm --prefix frontend run build
 
-**Verified.** 562 backend tests pass (they run real FFmpeg and FFprobe, with a fixture standing in for Meta's models), as do 75 frontend tests and the production build, and a fresh clone of this repository installs and builds by the steps above. The color conversion is checked against OpenColorIO's reference camera transforms, and the app has been run end to end, including in a real browser, on real 4K phone footage.
+**Verified.** 562 backend tests pass (they run real FFmpeg and FFprobe, with a fixture standing in for Meta's models), as do 75 frontend tests and the production build, and a fresh clone of this repository installs and builds by the steps above. Converted phone footage is tested to grade the same as the same picture recorded natively in Rec.709, the camera-LUT path is held to camera transforms from OpenColorIO's built-in library, and the app has been run end to end, including in a real browser, on real 4K phone footage.
+
+## Security and privacy
+
+- **Local first.** The backend listens on 127.0.0.1 and answers only requests whose `Host` is `localhost`, `127.0.0.1` or `::1` (a guard against DNS rebinding). There is no authentication, so do not expose it on a network.
+- **Your Meta key stays on the server.** It is read from `.env` (git-ignored), used only by the backend, and is not in the browser bundle, the health response or error responses.
+- **What leaves your machine.** Importing and preparing a video sends nothing. When you start analysis or generate a grade, the small silent analysis video, sampled frames, measured diagnostics and your request go to Meta's hosted Muse and SAM.
+- **Uploads.** Size and duration are limited (256 MiB and 120 s by default), the file is stored as `source.bin`, the original filename is sanitized, and every project, version and mask ID is a UUID, so request paths cannot reach other files.
+- **Local data.** Uploads, renders, masks and preferences live in `workspace/`, `outputs/` and `.takeone-memory/`, all git-ignored.
+- **Model output is untrusted.** A plan is validated against a schema with bounded values before anything runs, and external programs are started with argument lists, never through a shell.
 
 ## Known limitations
 
@@ -73,7 +84,7 @@ Run the checks (no key needed; the model calls are replaced by a fixture):
 
 ## Built with
 
-Third-party software is used as dependencies and is not copied into this repository; see each project for its license. Back end: FastAPI, Pydantic, Uvicorn, NumPy, SciPy, OpenCV, OpenColorIO, the OpenAI-compatible Python client (to call the Meta Model API) and Meta's SAM parser package. Front end: React, Vite, Tailwind CSS, TypeScript. Media: FFmpeg and FFprobe, run as separate programs.
+Third-party software is used as dependencies and is not copied into this repository; see each project for its license. Back end: FastAPI, Pydantic, Uvicorn, NumPy, SciPy, OpenCV, OpenColorIO, the OpenAI-compatible Python client (to call the Meta Model API) and Meta's SAM parser package. Front end: React, Vite, Tailwind CSS, TypeScript. Media: FFmpeg and FFprobe, run as separate programs and not bundled (builds that include libx264 are GPL-licensed). Meta's SAM parser package is used under Meta's SAM License and is not redistributed here.
 
 ---
 
@@ -179,7 +190,7 @@ The sidebar has **Progress** and **Session log** tabs. Progress shows real sourc
 
 Each progress step shows elapsed backend time, with separate planning/render/check timings and a compact square showing the current stage and **Current attempt** timer. Retry/new generation resets its affected step timers and attempt total; completed source/analysis work keeps its prior time. Earlier attempts remain in the log and **All attempts** total. Timers survive refresh and exclude idle waits/upload transfer. Older untimed stages show **—**. Interrupted/offline timing is explicitly qualified.
 
-Initial source preparation creates both the browser display preview (VP9/Opus, up to 1280px) and the silent analysis proxy (H.264, up to 640px). Both now share one source decode; encoder quality/cadence settings remain unchanged. Render retry does not upload or prepare the source again. In the supplied Nov 2 session export, initial preparation took about 22 seconds; its completed timer was retained, not rerun on render retry. No full-4K speedup for the combined preparation command is claimed without a fresh measurement.
+Initial source preparation creates both the browser display preview (VP9/Opus, up to 1280px) and the silent analysis proxy (H.264, up to 640px). Both now share one source decode; encoder quality/cadence settings remain unchanged. Render retry does not upload or prepare the source again.
 
 Declared global clipping bounds now receive a source-sample mathematical check and an original-resolution encoded preflight before a long render. A supported input-level correction creates a separate candidate, preserving the earlier plan and all limits. Impossible plans stop early; full output QC still runs.
 
@@ -204,8 +215,6 @@ apply. Recovery never assumes absence, paints missing masks, or substitutes a gl
 Retry may incur the bounded SAM recovery usage; verified repairs are reused without another call.
 
 Network events are saved before local decoding, so a completed response can be replayed after a decode/overlay failure without another SAM request. Incomplete streams remain failed and require an explicit new remote attempt. Local decoding can take substantially longer than downloading the response.
-
-
 
 ## Token usage
 
@@ -243,7 +252,7 @@ An additional opt-in generated-footage check exercises Phase 2 planning/render/r
 
     .venv/bin/python -m takeone.verify --phase2 --live
 
-This can incur Meta usage and is never part of ordinary tests. Verification preferences/workspaces are temporary, so synthetic evidence does not populate real user memory. No new live Phase 2 check was run for the offline motorcycle replay described in the Phase 2 report.
+This can incur Meta usage and is never part of ordinary tests. Verification preferences/workspaces are temporary, so synthetic evidence does not populate real user memory.
 
 ## Troubleshooting
 
@@ -284,9 +293,8 @@ Existing interactions are not backfilled.
 ## Repository
 
 - [Frontend notes](frontend/README.md)
-- [Original project plan](Take_One_Hackathon_Project_Plan.md) (written on 31 October as a plan; this README describes what is actually built)
 - [Creative-direction rubric](takeone_rubric_v1/README.md)
 - takeone/: FastAPI application, media tools, Muse integration, jobs and persistence
 - requirements-lock.txt: existing pinned Python dependencies
 
-Credentials, working media, workspace state, dependencies, builds and caches are ignored by Git. Keep media and exports under workspace/ or outputs/. Source, schemas, documentation and lockfiles remain eligible for version control.
+Credentials, working media, workspace state, dependencies, builds and caches are ignored by Git. Keep media and exports under workspace/ or outputs/. Source, schemas and lockfiles remain eligible for version control.

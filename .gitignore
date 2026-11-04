@@ -9,6 +9,12 @@
 *.local
 *.pem
 *.key
+*.p12
+*.pfx
+credentials*.json
+.npmrc
+.pypirc
+.claude/
 
 # Python environments, caches, and generated packages
 .venv/
@@ -38,6 +44,7 @@ coverage/
 # Local project media, model outputs, session exports, and temporary artifacts
 /workspace/
 /docs/
+/Take_One_Hackathon_Project_Plan.md
 /outputs/
 /media/
 /uploads/

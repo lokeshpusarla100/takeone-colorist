@@ -335,7 +335,7 @@ def test_provider_errors_do_not_expose_secrets(settings, video):
     class BrokenProvider(FakeMuse):
         def analyze(self, *args):
             raise RuntimeError("private-key-must-not-leak")
-    with client(replace(settings, api_key="private-key-must-not-leak"), BrokenProvider()) as c:
+    with client(replace(settings, api_key="private-key-must-not-leak"), BrokenProvider()) as c:  # pragma: allowlist secret  # gitleaks:allow
         state = start(c, upload(c, video))
         assert state["status"] == "failed"
         assert "private-key-must-not-leak" not in str(state)
@@ -405,7 +405,7 @@ def test_initial_key_setup_is_detected_without_restart(settings, tmp_path):
     key_file = tmp_path / ".env"
     provider = MuseProvider(replace(settings, key_file=key_file))
     assert provider.available() is False
-    key_file.write_text("MODEL_API_KEY=offline-key-placeholder\n")
+    key_file.write_text("MODEL_API_KEY=offline-key-placeholder\n")  # pragma: allowlist secret  # gitleaks:allow
     assert provider.available() is True
     # The public health response exposes a boolean, never the key itself.
     with client(replace(settings, key_file=key_file), None) as c:

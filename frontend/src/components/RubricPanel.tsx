@@ -5,7 +5,7 @@ import RubricDialog from './RubricDialog';
 import type { AppError } from '../lib/errors';
 import Card from './Card';
 import Icon from './Icon';
-import { canGrade, parseDomain } from '../lib/sourceColor';
+import { canGrade, parseDomain } from '../features/color/sourceColor';
 
 export default function RubricPanel({state,health,online,busy,sending,hasSource,direction,onDirection,onSaveDirection,autoRender,onAutoRender,
   onStart,onAnswer,onRetry,onCancel,onPrepare,error}:{

@@ -5,8 +5,8 @@ import subprocess
 import numpy as np
 import pytest
 
-from takeone import color_domain as cd
-from takeone.color_domain import CONVERT, NATIVE, TONEMAP, UNSUPPORTED, resolve
+from takeone.color import domain as cd
+from takeone.color.domain import CONVERT, NATIVE, TONEMAP, UNSUPPORTED, resolve
 
 pytestmark = pytest.mark.filterwarnings('ignore')
 TOOLS = cd.converter_tools('ffmpeg')

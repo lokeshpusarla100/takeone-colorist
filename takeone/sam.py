@@ -22,7 +22,8 @@ from . import mask_decode
 mask_decode.install()
 
 from .errors import Problem
-from . import color_domain, source_color
+from .color import domain as color_domain
+from .color import files as source_color
 from .media import command, display_size, probe, rotation_supported
 from .provider import MuseProvider
 

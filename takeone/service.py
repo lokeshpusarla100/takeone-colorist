@@ -29,8 +29,9 @@ from . import render_preflight
 from . import convergence
 from . import concepts as sam_concepts
 from . import sam_single_pass
-from . import color_domain
-from . import source_color
+from .color import domain as color_domain
+from .color import files as source_color
+from .color.service import ColorMixin
 from . import model_payload
 
 
@@ -56,7 +57,7 @@ HIGHLIGHT_REPLAN_INSTRUCTION=('Revise the executable plan using the actual image
     'Keep intent.highlight_policy faithful to the brief: subdue when it asks for darker or controlled highlights, intentional_lift only if brighter highlights are genuinely wanted. Do not call this a review of a completed candidate.')
 
 
-class Service:
+class Service(ColorMixin):
     def __init__(self, settings: Settings, provider=None, sam_provider=None):
         self.settings = settings
         self._early_pool = None
@@ -212,12 +213,12 @@ class Service:
         cancel = threading.Event()
         state.active_job = job_id
         state.job_kind = kind
-        state.status = "ingesting" if kind == "ingest" else "rendering" if kind == "render" else "segmenting" if kind=="segment" else 'reviewing' if kind=='review' else "analyzing"
-        state.stage = ("inspect_source" if kind == "ingest" else "plan_grade" if kind == "render"
+        state.status = "ingesting" if kind in {"ingest", "reprepare"} else "rendering" if kind == "render" else "segmenting" if kind=="segment" else 'reviewing' if kind=='review' else "analyzing"
+        state.stage = ("inspect_source" if kind == "ingest" else "prepare_preview" if kind == "reprepare" else "plan_grade" if kind == "render"
                        else 'creative_review' if kind=='review' else "verify_segmentation_input" if kind=="segment"
                        else "select_looks" if kind=="looks" else "analyze_scene" if not state.analysis else "select_question")
         state.error = None
-        self.event(state, "Preparing source" if kind == "ingest" else "Grade queued" if kind == "render" else "Segmentation queued" if kind=="segment" else "Look previews queued" if kind=="looks" else "Analysis queued",
+        self.event(state, "Preparing source" if kind == "ingest" else "Input profile queued" if kind == "reprepare" else "Grade queued" if kind == "render" else "Segmentation queued" if kind=="segment" else "Look previews queued" if kind=="looks" else "Analysis queued",
                    progress_job=job_id,progress_retry=retry)
         try:
             self.store.save(state)
@@ -1223,6 +1224,8 @@ class Service:
                 self.ensure_current_source(project_id, cancel)
             if kind == "ingest":
                 self.ingest(project_id, cancel)
+            elif kind == "reprepare":
+                self.run_reprepare(project_id, cancel)
             elif kind == "render":
                 self.render_grade(project_id, cancel)
             elif kind == "segment":
@@ -1277,52 +1280,6 @@ class Service:
                 self.cancels.pop(project_id, None)
             self.slots.release()
 
-    def adopt_domain(self, state):
-        """How this project's source colors are read: the recorded domain, or for a session saved before domains
-        existed, resolved from the file now and recorded on `state` (the caller saves it). Raises the specific
-        GRADE_DOMAIN_UNSUPPORTED reason when the source cannot be converted honestly."""
-        source = state.source
-        domain = color_domain.SourceDomain.from_dict(source.domain)
-        if domain is None:
-            path = self.store.directory(state.id) / "source.bin"
-            stream = next(v for v in probe(path, self.settings, threading.Event())["streams"] if v["codec_type"] == "video")
-            domain = source_color.domain_for_stream(stream, self.settings)
-            source.domain = domain.to_dict()
-            source.technical_notes = [*domain.steps] if domain.gradable else [domain.message + " " + domain.action]
-        if not domain.gradable:
-            raise Problem("GRADE_DOMAIN_UNSUPPORTED", domain.message, domain.action, 422, reason=domain.reason)
-        return domain
-
-    # Cached pixel evidence of the original and of its proxies. Anything here made before a source was converted
-    # was decoded in the wrong domain and is rebuilt; timing caches (*.frames-v1.json) do not depend on color.
-    STALE_WHEN_RECONVERTED = ("source.bin.frames-*x*.npz", "analysis.mp4.frames-*x*.npz", "source-evidence-*.json", "source-review-evidence-*.json",
-                              "grade-source-samples.*", "tracking.mp4", "tracking-identity.json")
-
-    def ensure_current_source(self, project_id, cancel):
-        """Before any job reads the source: a session saved before color domains existed records how its colors are
-        read, and if they need converting its preview and analysis proxy are rebuilt in the converted domain, once.
-        A no-op for every source prepared by the current code."""
-        state = self.store.get(project_id)
-        if not state.source or not state.preview:
-            return
-        if color_domain.SourceDomain.from_dict(state.source.domain) is None:
-            self.mutate(project_id, self.adopt_domain)  # records it; raises the specific reason for a source that cannot be converted
-            state = self.store.get(project_id)
-        domain = color_domain.SourceDomain.from_dict(state.source.domain)
-        if not domain.gradable or domain.kind not in {color_domain.CONVERT, color_domain.TONEMAP} or state.preview.conformed:
-            return
-        directory = self.store.directory(project_id)
-        self.mutate(project_id, lambda s: (setattr(s, "stage", "prepare_preview"),
-            self.event(s, "Converting the source to Rec.709", "This source was prepared before its colors could be converted. Its preview and analysis proxy are rebuilt "
-                       "from the original, which is unchanged.", conversion=domain.kind)))
-        for pattern in self.STALE_WHEN_RECONVERTED:
-            for stale in directory.glob(pattern):
-                stale.unlink(missing_ok=True)
-        preview = make_previews(directory, state.source, project_id, self.settings, cancel)
-        self.check_cancel(cancel)
-        self.mutate(project_id, lambda s: setattr(s, "preview", preview))
-        self.prefetch_frames(directory / "source.bin")
-
     def ingest(self, project_id, cancel):
         state = self.store.get(project_id)
         directory = self.store.directory(project_id)
@@ -1340,8 +1297,10 @@ class Service:
         self.mutate(project_id, preparing)
         preview = make_previews(directory, source, project_id, self.settings, cancel)
         self.check_cancel(cancel)
+        levels = self.measure_source_levels(directory, cancel)  # how flat the clip is: offered to the person, never applied by itself
         def ready(state):
             state.preview = preview
+            state.source.levels = levels
             state.status, state.stage, state.active_job = "ready", "ready", None
             self.event(state, "Preview ready", "VP9 display preview and a silent analysis proxy were prepared. No media has been sent to Meta.")
         self.mutate(project_id, ready)

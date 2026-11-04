@@ -65,7 +65,7 @@ class Settings:
     sam_single_pass_window: int = 50
     sam_single_pass_min_frames: int = 150
     sam_single_pass_min_areas: int = 3
-    # HDR (HLG/PQ) sources are tone-mapped to SDR before analysis and grading (takeone/color_domain.py). That is an
+    # HDR (HLG/PQ) sources are tone-mapped to SDR before analysis and grading (takeone/color/domain.py). That is an
     # approximation, always disclosed to the user; turn it off to refuse HDR sources instead.
     hdr_to_sdr: bool = True
     # Meta Model API list prices in USD, used only to ESTIMATE what a video cost from the usage the provider

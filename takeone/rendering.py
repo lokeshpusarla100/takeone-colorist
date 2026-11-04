@@ -21,8 +21,8 @@ from .media import command, probe
 from . import evidence
 from . import color_processing
 from . import timing
-from . import color_domain
-from . import source_color
+from .color import domain as color_domain
+from .color import files as source_color
 
 
 _BUILD_IDENTITIES={}

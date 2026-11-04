@@ -12,7 +12,8 @@ import subprocess
 import cv2
 import numpy as np
 
-from . import sam, source_color
+from . import sam
+from .color import files as source_color
 from .errors import Problem
 from .media import command, probe
 

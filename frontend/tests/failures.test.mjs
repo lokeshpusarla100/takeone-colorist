@@ -22,6 +22,7 @@ const {parseMarkdown,inline}=await load('markdown');
 const {CONTROLS,cellFor,layersOf,activeControls}=await load('recipeView');
 const {runSteps,stepProgress}=await load('stepper');
 const {parseDomain,colorNotice,colorTile,differences,canGrade}=await load('sourceColor');
+const {parseLevels,parseSummary,parseInfo,parseLut,parseStills,parseProblem,percent,levelsSentence,levelsBar,canNormalize,options:profileOptions,cardView,readiness}=await load('inputProfile');
 test('proportional playback previews can be compared without claiming master resolution',()=>{
   const source={width:3840,height:2160,duration:24.695222};
   assert.deepEqual(validateRenderImport(source,{width:1280,height:720,duration:24.797}),{previewOnly:true});
@@ -786,4 +787,63 @@ test('a source that cannot be graded is never described as ready to start',()=>{
   const fine=runProgress({...base,source:{domain:{kind:'convert'}}});
   assert.equal(fine.heading,'Source ready');assert.match(fine.note,/start the analysis/);
   assert.equal(runProgress({...base,source:{}}).heading,'Source ready');   // sessions saved before color domains are unaffected
+});
+
+const levels=(black,white,flat)=>({black,white,p1:black+.01,median:(black+white)/2,p99:white-.01,flat,samples:24});
+const info=(over={})=>({levels:levels(.15,.77,true),profile:null,error:null,applicable:true,applicable_reason:'',locked:null,suggest:'normalize',...over});
+test('the interface reads the input-profile answers defensively',()=>{
+  for(const junk of [undefined,null,0,'x',[],{},{applicable:'yes'}])assert.equal(parseInfo(junk),null);
+  for(const junk of [undefined,null,{},{black:1},{...levels(.1,.8,true),flat:'yes'},{...levels(.1,.8,true),black:NaN}])assert.equal(parseLevels(junk),null);
+  assert.equal(parseSummary({kind:'bogus',label:'x',signature:'s'}),null);assert.equal(parseSummary({kind:'lut',label:'',signature:'s'}),null);
+  assert.deepEqual(parseSummary({kind:'lut',label:'Camera LUT: A',signature:'s',steps:['one',3,''],lut_name:'a.cube',extra:1}),{kind:'lut',label:'Camera LUT: A',steps:['one'],signature:'s',lut_name:'a.cube',black:null,white:null});
+  const parsed=parseInfo({levels:levels(.15,.77,true),profile:null,error:{code:'X',message:'bad'},applicable:true,suggest:'normalize',locked:null});
+  assert.equal(parsed.suggest,'normalize');assert.equal(parsed.error.message,'bad');assert.equal(parsed.error.action,'');assert.equal(parsed.locked,null);
+  assert.equal(parseInfo({applicable:true,suggest:'anything else'}).suggest,null);
+  assert.equal(parseProblem({code:'C'}),null);
+  assert.equal(parseLut({lut_id:'0123456789abcdef',name:'a.cube',kind:'3d',size:33,title:''}).size,33);assert.equal(parseLut({lut_id:'x',name:'a',kind:'4d',size:3}),null);
+  const jpeg='data:image/jpeg;base64,AAAA';
+  assert.equal(parseStills({before:jpeg,after:jpeg,after_levels:null,warnings:['w',2]}).warnings.length,1);
+  assert.equal(parseStills({before:'http://evil/x.png',after:jpeg}),null);assert.equal(parseStills({before:jpeg}),null);   // only inline JPEG stills are ever put on the page
+});
+test('the range is described and drawn from the measurement',()=>{
+  const l=levels(.146,.772,true);
+  assert.equal(percent(.146),'15%');assert.equal(percent(2),'100%');assert.equal(percent(-1),'0%');
+  assert.equal(levelsSentence(l),'Its darkest areas are about 15% bright and its brightest about 77%.');
+  const bar=levelsBar(l);assert.ok(Math.abs(bar.left-14.6)<1e-9&&Math.abs(bar.width-62.6)<1e-9);
+  assert.deepEqual(levelsBar(levels(0,1,false)),{left:0,width:100});assert.ok(levelsBar(levels(.5,.5,false)).width>=1);
+});
+test('normalizing is offered only when it would do something, and the reason is given when not',()=>{
+  assert.equal(canNormalize(levels(.15,.77,true)).ok,true);
+  assert.match(canNormalize(levels(.01,.99,false)).reason,/already uses the full range/);
+  assert.match(canNormalize(levels(.5,.6,false)).reason,/too narrow/);assert.match(canNormalize(levels(.1,.3,false)).reason,/too narrow/);
+  assert.match(canNormalize(null).reason,/could not be measured/);
+  const offered=profileOptions(info());assert.deepEqual(offered.map(o=>o.kind),['none','lut','normalize']);
+  assert.equal(offered[1].badge,'Most accurate');assert.equal(offered[2].badge,'Suggested');assert.equal(offered[2].disabled,undefined);
+  const plain=profileOptions(info({levels:levels(.01,.99,false),suggest:null}));assert.equal(plain[2].badge,undefined);assert.match(plain[2].disabled,/full range/);
+});
+test('the card appears where it helps and nowhere else',()=>{
+  const flat=cardView(info(),'ready');
+  assert.equal(flat.mode,'choose');assert.equal(flat.tone,'warn');assert.equal(flat.open,true);assert.equal(flat.title,'This video looks flat');
+  assert.match(flat.lead,/darkest areas are about 15%/);assert.match(flat.lead,/keep it as it is/);
+  const ordinary=cardView(info({levels:levels(.01,.99,false),suggest:null}),'ready');
+  assert.equal(ordinary.mode,'choose');assert.equal(ordinary.open,false);assert.equal(ordinary.tone,'info');       // a quiet, closed row, not a warning
+  const applied=cardView(info({profile:{kind:'normalize',label:'Contrast normalized (approximate)',steps:['Stretched.'],signature:'s',lut_name:null,black:.15,white:.77},suggest:null}),'ready');
+  assert.equal(applied.tone,'ok');assert.equal(applied.current,'normalize');assert.match(applied.title,/Contrast normalized/);assert.equal(applied.lead,'Stretched.');
+  assert.equal(cardView(null,'ready').mode,'hidden');
+  assert.equal(cardView(info({applicable:false}),'ready').mode,'hidden');            // HDR: nothing to choose
+  assert.equal(cardView(info(),'ingesting').mode,'hidden');assert.equal(cardView(info(),'awaiting_answer').mode,'hidden');
+  assert.equal(cardView(info({locked:'Already analysed.'}),'brief_ready').mode,'hidden');
+  const chosen={kind:'lut',label:'Camera LUT: A',steps:[],signature:'s',lut_name:'a.cube',black:null,white:null};
+  const locked=cardView(info({locked:'Already analysed.',profile:chosen}),'brief_ready');
+  assert.equal(locked.mode,'locked');assert.equal(locked.profile.label,'Camera LUT: A');          // after analysis the choice is shown, not offered
+});
+test('applying needs a real choice that changes something, and a look at the result first',()=>{
+  const stills={before:'b',after:'a',afterLevels:null,warnings:[]};
+  assert.equal(readiness({kind:'lut'},info(),null).ok,false);assert.match(readiness({kind:'lut'},info(),null).reason,/Choose the LUT file/);
+  assert.equal(readiness({kind:'lut',lut_id:'0123456789abcdef'},info(),null).ok,false);          // still working out what it looks like
+  assert.equal(readiness({kind:'lut',lut_id:'0123456789abcdef'},info(),stills).ok,true);
+  assert.equal(readiness({kind:'normalize'},info(),stills).ok,true);
+  assert.equal(readiness({kind:'none'},info(),null).ok,false);assert.match(readiness({kind:'none'},info(),null).reason,/already how/);   // nothing to undo
+  const applied=info({profile:{kind:'normalize',label:'x',steps:[],signature:'s',lut_name:null,black:.15,white:.77}});
+  assert.equal(readiness({kind:'none'},applied,null).ok,true);assert.equal(readiness({kind:'normalize'},applied,stills).ok,false);
 });

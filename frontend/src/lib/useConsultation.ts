@@ -4,6 +4,8 @@ import { AppError } from './errors';
 import * as api from './api';
 import { withRenderedVersions } from './renderedVersions';
 import { autoRenderKey, consultationRunning, shouldAutoRender } from './autoRender';
+import * as colorApi from '../features/color/api';
+import type { Choice } from '../features/color/inputProfile';
 
 export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Project)=>void,
   reportError:(cause:unknown,stage:string)=>void,auto?:{enabled:boolean;direction:string}) {
@@ -79,6 +81,21 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
       return false;
     }finally{inFlight.current=false;setSending(false);setRefresh(n=>n+1);}
   };
+  // Changing how the footage's colors are read re-prepares the preview, so it follows the same one-at-a-time rules as every command.
+  const changeInputProfile=async(choice:Choice)=>{
+    const source=current.current;
+    if(!source?.backend||inFlight.current||selectionInFlight.current||cancelInFlight.current||api.activeJob(source.backend))return false;
+    inFlight.current=true;setSending(true);
+    const id=source.backend.id;
+    try{
+      const state=await colorApi.setProfile(id,source.backend.revision,choice);
+      if(current.current?.backend?.id===id)apply(state);
+      return true;
+    }catch(cause){
+      if(current.current?.backend?.id===id)reportError(cause,'backend.input-profile');
+      return false;
+    }finally{inFlight.current=false;setSending(false);setRefresh(n=>n+1);}
+  };
   // When the consultation hands over its brief, start the first grade by itself (see autoRender.ts for the rules).
   useEffect(()=>{
     const state=project?.backend;
@@ -126,6 +143,7 @@ export function useConsultation(project:Project|null,update:(fn:(p:Project)=>Pro
       }catch(cause){if(current.current?.backend?.id===source.backend.id)reportError(cause,'memory.selection');}
       finally{selectionInFlight.current=false;setSelecting(false);}
     },
+    changeInputProfile,
     refresh:()=>setRefresh(n=>n+1),
     unavailable:()=>reportError(new AppError('SOURCE_NOT_PREPARED','Prepare the source before analysis.',
       'Upload the original video to the local backend first.'),'backend.source'),

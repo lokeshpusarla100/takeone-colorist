@@ -1,7 +1,7 @@
-import { colorNotice, parseDomain } from '../lib/sourceColor';
-import type { BackendState } from '../lib/api';
-import Callout from './Callout';
-import Chip from './Chip';
+import { colorNotice, parseDomain } from './sourceColor';
+import type { BackendState } from '../../lib/api';
+import Callout from '../../components/Callout';
+import Chip from '../../components/Chip';
 
 /** Under the video: what Take One does with this footage's colors, or why it can't be graded, in plain words. */
 export default function SourceNotice({ source }: { source?: BackendState['source'] }) {

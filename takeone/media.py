@@ -9,7 +9,8 @@ from pathlib import Path
 from .config import Settings
 from .contracts import Source, Preview
 from .errors import Problem
-from . import color_domain
+from .color import domain as color_domain
+from .color import profile as color_profile
 
 
 def command(args: list[str], cancel: threading.Event, timeout: float | None = 180, *, binary=False,cwd=None,progress_path=None,stall_timeout=None,on_progress=None):
@@ -105,7 +106,7 @@ def inspect_source(path: Path, name: str, digest: str, settings: Settings, cance
     if abs(rotation) % 180 == 90:
         width, height = height, width
     # How the colors are read and converted into the Rec.709 SDR domain the grade works in; every conversion
-    # parameter is resolved here, once, from the probed stream (takeone/color_domain.py).
+    # parameter is resolved here, once, from the probed stream (takeone/color/domain.py).
     domain = color_domain.resolve(video, width=width, height=height, hdr=settings.hdr_to_sdr, tools=color_domain.converter_tools(settings.ffmpeg))
     notes = [*domain.steps] if domain.gradable else [domain.message + ' ' + domain.action]
     return Source(
@@ -130,7 +131,10 @@ def make_previews(directory: Path, source: Source, project_id: str, settings: Se
     # every later decode of these proxies are in the domain the grade works in. The frames are shrunk first and converted
     # second: previews are small, so converting the full-size frames would be most of the work thrown away. Native sources
     # add nothing, and their graph is exactly what it was.
-    conform = color_domain.conform_filters(color_domain.SourceDomain.from_dict(source.domain))
+    # An input profile the person chose for flat or log footage replaces/extends this conversion (takeone/color/profile.py); it is
+    # saved next to the original, so this and every other reader of the original find the same one.
+    saved = color_profile.read(directory / 'source.bin')
+    conform = color_profile.conform_chain(color_domain.SourceDomain.from_dict(source.domain), saved, directory / 'source.bin')
     tail = (',' + conform + ',' + color_domain.tagged_709()) if conform else ''
     graph='[0:v:0]split=2[displayin][analysisin];[displayin]'+geometry+tail+'[display];[analysisin]'+geometry.replace('1280','640')+',setpts=PTS-STARTPTS'+tail+'[analysis]'
     command(base + ["-filter_complex_threads","2","-filter_complex",graph,
@@ -162,7 +166,8 @@ def make_previews(directory: Path, source: Source, project_id: str, settings: Se
                    bytes=(directory / "preview.webm").stat().st_size,
                    url="/api/projects/" + project_id + "/preview",
                    analysis_url="/api/projects/" + project_id + "/analysis-proxy",
-                   source_start_time=source.start_time, preview_start_time=float(v.get("start_time") or 0), conformed=True)
+                   source_start_time=source.start_time, preview_start_time=float(v.get("start_time") or 0), conformed=True,
+                   conform_sig=color_profile.signature(saved))
 
 
 def global_grade(directory: Path, settings: Settings, cancel: threading.Event, *, contrast=1.0, saturation=1.0, gamma=1.0):

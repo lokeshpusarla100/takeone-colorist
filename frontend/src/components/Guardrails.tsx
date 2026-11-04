@@ -2,7 +2,7 @@ import Icon from './Icon';
 import { parseEnvelope, safeguards, colorName, codecName, megabytes, seconds, sizeName } from '../lib/briefVisual';
 import type { Fact } from '../lib/briefVisual';
 import type { BackendState } from '../lib/api';
-import { colorTile, parseDomain } from '../lib/sourceColor';
+import { colorTile, parseDomain } from '../features/color/sourceColor';
 
 /** Facts from the prepared source when the backend sent them as data; the sentence form is only a fallback. */
 function sourceFacts(source: BackendState['source'], parsed: Fact[]): Fact[] {

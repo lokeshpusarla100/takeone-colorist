@@ -50,9 +50,11 @@ export type BackendState = {
   source:null|{name:string;bytes:number;sha256:string;width:number;height:number;duration:number;
     video_codec:string;audio_codec:string|null;technical_notes:string[];
     pixel_format?:string|null;color_space?:string|null;color_primaries?:string|null;color_transfer?:string|null;rotation?:number|null;
-    /** How the colors are read and converted (takeone/color_domain.py); absent for sessions saved before it existed. */
-    domain?:unknown};
-  preview:null|{url:string;width:number;height:number;duration:number;bytes:number};
+    /** How the colors are read and converted (takeone/color/domain.py); absent for sessions saved before it existed. */
+    domain?:unknown;
+    /** The clip's measured brightness range, the input profile the person chose, and why the last change failed (takeone/color/). */
+    levels?:unknown;profile?:unknown;profile_error?:unknown};
+  preview:null|{url:string;width:number;height:number;duration:number;bytes:number;conform_sig?:string};
   analysis:null|{summary:string;caveats:string[]};
   question:Question|null;pending_questions?:Question[];brief:Brief|null;events:SessionEvent[];
   brief_sha256?:string|null;request_started_at?:string|null;

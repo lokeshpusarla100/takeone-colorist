@@ -38,7 +38,7 @@ The **output is always 8-bit Rec.709 SDR**. The 10-bit or HDR original is kept u
 
 ## How it works
 
-`takeone/color_domain.py` (pure) resolves a probed stream into a `SourceDomain` once, at ingest, and records it with the source
+`takeone/color/domain.py` (pure) resolves a probed stream into a `SourceDomain` once, at ingest, and records it with the source
 (`Source.domain`). Every conversion parameter is then passed to ffmpeg's `zscale` **explicitly**, so nothing depends on the
 file having been tagged correctly or on a decoder's default. (An early experiment showed why: a file whose transfer tag was
 missing could not be converted at all until the input was stated.)
@@ -50,7 +50,7 @@ missing could not be converted at all until the input was stated.)
   lifts HLG midtones to 185; Mobius keeps PQ reference white (0.58, 203 nits) near SDR white (234/255) where Hable renders it dark (192).
 
 A native source gets an **empty** conversion, so its filter graphs are byte-identical to what they were (tested for the preview
-graph and the render graph). The same conversion is used wherever the original's pixels are read, through `takeone/source_color.py`:
+graph and the render graph). The same conversion is used wherever the original's pixels are read, through `takeone/color/files.py`:
 
 | Reader | Where the conversion sits |
 |---|---|
@@ -72,11 +72,11 @@ failing Android session now grades.
 
 ## Verified
 
-* `tests/test_color_domain.py` encodes known colors in each phone-style format, probes the file as ingest does, converts, and compares
+* `tests/color/test_domain.py` encodes known colors in each phone-style format, probes the file as ingest does, converts, and compares
   with an independent numpy reference (display-referred, BT.1886-like gamma): maximum 3/255 and mean 1.5/255 over eight formats. A
   separate test shows those bounds are tight enough to fail on a wrong matrix, range or primaries. HDR ramps are checked for
   monotonic mapping, black staying black, the peak reaching white, neutrals staying neutral and saturated colors keeping their hue.
-* `tests/test_source_conversion.py` runs phone footage through the real service: previews in Rec.709 with the conversion recorded, a
+* `tests/color/test_phone_footage.py` runs phone footage through the real service: previews in Rec.709 with the conversion recorded, a
   global grade equal to the same footage recorded natively, a localized grade passing the matte checks, refusals before any billed
   call, HDR graded as disclosed SDR, old sessions upgraded once, native sources untouched.
 * Real file: the Android clip that failed (3840x1644 HEVC 10-bit, 30 s) now renders: 910 of 910 frames, audio copied, fully decoded.
@@ -85,10 +85,47 @@ Two regressions the existing suite caught while building this are fixed and now 
 convert exactly as the standalone extractor does, and the converted-source QC reader must open its file in-process so it survives
 the render renaming its partial output.
 
+## Log and flat footage: the input profile
+
+Camera log (Apple Log, S-Log3, V-Log, O-Log, Canon Log, LogC, ...) is ordinary video as far as the file is concerned: the
+container says Rec.709 or nothing, and the picture is simply flat. No reader can know that from metadata, which is why
+DaVinci Resolve and Premiere also ask the person for an input color space or LUT. Take One does the same, in two ways
+(`takeone/color/profile.py`, applied by the same chain as the automatic conversion, so every reader of the original agrees):
+
+| Choice | What it does | Accuracy |
+|---|---|---|
+| **Camera LUT** (`.cube`, 3D or 1D) | The camera maker's own transform, applied to the file's RGB with no other conversion before it | Exact: the camera's own picture |
+| **Fix the contrast automatically** | Stretches the clip's own measured black and white (0.5th / 99.5th percentile of luma) to the full range | Approximate, and labelled so everywhere |
+
+* **Flat footage is only ever suggested.** At import the analysis proxy is measured (`color/levels.py`). Blacks lifted to 7% or more,
+  a span of 75% or less and whites below 90% mean "looks flat" (ordinary phone clips measure 0 to 3% and 93 to 100%; the OnePlus 12R
+  clip measured 14.6% and 77.2%). A dark or foggy clip can be flat on purpose, so nothing is applied until the person chooses, after
+  seeing a before/after still of their own footage. A LUT that gives an almost black, almost white or still-flat result is flagged.
+* **LUT files are untrusted input.** They are parsed completely before ffmpeg sees them: size limits, row count, finite numbers,
+  domain, unknown keywords. Every refusal has its own code and message. Paths are escaped for both levels of ffmpeg's filter
+  syntax (tested with spaces, commas, colons, quotes, brackets, semicolons, backslashes and non-ASCII).
+* **Where it is saved.** `source.bin.color.json` beside the original (plus `input-lut-<sha16>.cube`, content-addressed). Every decoder
+  is handed that path, so no reader can forget the profile. The state keeps a display copy (`Source.profile`), the measured levels
+  (`Source.levels`), the last failure (`Source.profile_error`) and the signature the proxies were built under (`Preview.conform_sig`).
+* **Safe to change.** The profile is saved first, the preview and analysis proxy are rebuilt, and the old profile is restored if that
+  fails. If the process stops half way, the next job sees the proxies do not match the saved profile and rebuilds them.
+* **Locked after analysis.** Once Muse has seen the footage (or a brief, look or grade exists) the colors can not change
+  (`409 INPUT_PROFILE_LOCKED`): import the video again to try another profile.
+* **Not for HDR.** HDR is already converted from its own tags, so a profile would be applied twice (`INPUT_PROFILE_NOT_APPLICABLE`).
+* **Endpoints.** `GET /api/projects/{id}/input-profile`, `POST .../lut` (upload and validate), `POST .../preview` (two stills, saves
+  nothing), `PUT .../input-profile` (apply or `kind: none`). The card lives in `frontend/src/features/color/`.
+
+Verified against real camera transforms: V-Log, S-Log3, Canon Log 3, RED Log3G10 and ARRI LogC3 to Rec.709 from OpenColorIO's
+built-in library, exported as 65-point `.cube` files and run through the real chain, in limited and full range
+(`tests/color/test_input_profile.py`): mean error 0.2 to 1.2 of 255 against OpenColorIO itself, and the same tolerance fails a range
+misread. A flat clip graded under either profile equals the same footage already corrected at the source.
+
 ## Not covered
 
-* **Apple Log and other camera log** that is tagged as ordinary video cannot be recognised from metadata. Only explicit log and
-  linear transfer tags are refused.
+* **No built-in camera library yet.** A camera's log is recognised only if the person supplies its LUT (or accepts the approximate
+  contrast fix). Shipping verified per-camera transforms (for example from OpenColorIO's library) is the next layer.
+* The automatic contrast fix is a linear stretch, not the camera's log curve: shadows and highlights are not shaped like the maker's
+  transform.
 * **HDR is delivered as SDR.** There is no HDR output, and the tone mapping is an approximation of an HDR display, not an exact match.
 * RGB/gray/alpha video, odd frame sizes and non-square pixels are refused (the last was already).
 * Needs an ffmpeg build with `zscale` (libzimg) and, for HDR, `tonemap`; `GET /api/health` reports `source_conversion`, and a missing

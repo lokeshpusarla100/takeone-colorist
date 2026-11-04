@@ -13,7 +13,7 @@ import numpy as np
 from .errors import Problem
 from . import tonal
 from .media import command, display_size
-from . import source_color
+from .color import files as source_color
 
 
 def decoded_manifest(path,settings,cancel,metadata):

@@ -1,6 +1,6 @@
 """The color conversion, applied at every place that reads the original's pixels.
 
-color_domain.py decides what a source is and what conversion it needs (pure). This module is the small amount of glue
+color/domain.py decides what a source is and what conversion it needs (pure). This module is the small amount of glue
 each decoder shares, so the render, evidence frames, tracking proxy and matte QC cannot disagree about it:
 
   * `domain_for_file` / `domain_for_stream`  resolve a file's domain (a recorded one wins, so every stage of a project
@@ -19,9 +19,10 @@ import threading
 
 import numpy as np
 
-from . import color_domain
-from .errors import Problem
-from .media import display_size, probe
+from . import domain as color_domain
+from . import profile as color_profile
+from ..errors import Problem
+from ..media import display_size, probe
 
 
 def _gradable(domain: color_domain.SourceDomain) -> color_domain.SourceDomain:
@@ -57,7 +58,9 @@ def domain_for_file(path, settings, cancel: threading.Event | None = None, *, re
 
 
 def chain_for_file(path, settings, cancel=None, *, recorded: dict | None = None) -> str:
-    return color_domain.conform_filters(domain_for_file(path, settings, cancel, recorded=recorded))
+    """The ffmpeg filters that bring the file into Rec.709: the automatic conversion of its domain, and the input profile
+    saved next to it, if the person chose one. '' for native footage with no profile."""
+    return color_profile.conform_chain(domain_for_file(path, settings, cancel, recorded=recorded), color_profile.read(path), path)
 
 
 class FfmpegCapture:
@@ -111,8 +114,8 @@ def open_pair(original, graded, settings, cancel=None, *, recorded: dict | None 
     """(original, graded) readers for the matte QC: OpenCV for native footage as always, ffmpeg for converted footage.
     `size` is the (width, height) the caller will work at; converted footage is read at that size."""
     import cv2
-    domain = domain_for_file(original, settings, cancel, recorded=recorded)
-    if domain.kind == color_domain.NATIVE:
+    chain = chain_for_file(original, settings, cancel, recorded=recorded)
+    if not chain:
         return cv2.VideoCapture(str(original)), cv2.VideoCapture(str(graded))
-    return (FfmpegCapture(original, color_domain.conform_filters(domain), settings, cancel, size),
+    return (FfmpegCapture(original, chain, settings, cancel, size),
             FfmpegCapture(graded, '', settings, cancel, size))

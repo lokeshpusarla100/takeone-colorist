@@ -556,3 +556,23 @@ label { font-size: 15px; }
   .meter-fill, .overall span, .meter-bar span { background: Highlight; }
   .cost-bar li { forced-color-adjust: none; }
 }
+
+/* Footage color: how to read log / flat footage (features/color/InputProfileCard.tsx) */
+.profile-card .range { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.range-track { position: relative; height: 12px; border-radius: 6px; background: linear-gradient(90deg, #000, #fff); border: 1px solid var(--line-2); overflow: hidden; }
+.range-track i { position: absolute; top: -1px; bottom: -1px; border: 2px solid var(--accent-bright); border-radius: 4px; background: rgba(144, 133, 233, .28); }
+.range figcaption { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; line-height: 1.45; color: var(--text-2); }
+.range figcaption span:nth-child(2) { text-align: center; flex: 1; }
+.profile-options { display: flex; flex-direction: column; gap: 8px; }
+.profile-option { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: var(--surface-2); cursor: pointer; }
+.profile-option.selected { border-color: var(--accent-line); background: var(--accent-soft); }
+.profile-option.disabled { opacity: .6; cursor: not-allowed; }
+.profile-option input { margin-top: 4px; width: 18px; height: 18px; accent-color: var(--accent); flex: none; }
+.profile-option-text { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
+.profile-option-text .help { flex-basis: 100%; }
+.profile-lut { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+.profile-stills { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.profile-stills figure { margin: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.profile-stills img { width: 100%; height: auto; border-radius: var(--radius-sm); border: 1px solid var(--line-2); background: #000; display: block; }
+.profile-stills figcaption { font-size: 14px; color: var(--text-2); }
+@media (max-width: 640px) { .profile-stills { grid-template-columns: 1fr; } }

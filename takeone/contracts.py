@@ -65,9 +65,15 @@ class Source(StrictModel):
     start_time: float
     rotation: float
     technical_notes: list[str]
-    # How the file's colors are interpreted and converted (takeone/color_domain.py). None for sources saved before
+    # How the file's colors are interpreted and converted (takeone/color/domain.py). None for sources saved before
     # it existed; they are resolved from the file when next used.
     domain: dict | None = None
+    # Measured levels of the clip before any input profile (takeone/color/levels.py), the input profile the person chose
+    # for footage that cannot be recognised from its tags (takeone/color/profile.py), and why the last attempt to change
+    # it failed. All None for a source that has none.
+    levels: dict | None = None
+    profile: dict | None = None
+    profile_error: dict | None = None
 
 
 class Preview(StrictModel):
@@ -79,9 +85,12 @@ class Preview(StrictModel):
     analysis_url: str
     source_start_time: float
     preview_start_time: float
-    # True when the browser preview and analysis proxy were built under the color-domain rules (takeone/color_domain.py);
+    # True when the browser preview and analysis proxy were built under the color-domain rules (takeone/color/domain.py);
     # False for sessions saved before that, whose proxies are rebuilt when they need a conversion.
     conformed: bool = False
+    # Signature of the input profile the proxies were built under ('' for none). When it differs from the saved profile the
+    # proxies are rebuilt before anything reads them.
+    conform_sig: str = ''
 
 
 class GradeParameters(StrictModel):

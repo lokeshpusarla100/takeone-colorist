@@ -24,7 +24,8 @@ import { mutationLocked } from './lib/workflow';
 import { loadAutoRender, saveAutoRender } from './lib/autoRender';
 import { useRunModel } from './lib/useRunModel';
 import RunStrip from './components/RunStrip';
-import SourceNotice from './components/SourceNotice';
+import SourceNotice from './features/color/SourceNotice';
+import InputProfileCard from './features/color/InputProfileCard';
 
 export default function App() {
   const w=useWorkspace();
@@ -147,6 +148,8 @@ export default function App() {
             </>}/>
         </div>
         <div className="flow">
+        <PanelBoundary name="Footage color" resetKey={project.backend?.revision}><InputProfileCard state={project.backend??null} online={consultation.online}
+          sending={sending||busy||!!project.pendingBackend} onApply={choice=>{w.clearError();return consultation.changeInputProfile(choice);}}/></PanelBoundary>
         <PanelBoundary name="Direction and questions" resetKey={project.backend?.revision}><RubricPanel key={'rubric:'+project.id} state={project.backend} health={consultation.health} online={consultation.online} busy={busy||!!project.pendingBackend} error={error}
           sending={sending} hasSource={!!project.source} direction={direction} onDirection={setDirection}
           autoRender={autoRender} onAutoRender={on=>{setAutoRender(on);saveAutoRender(on);}}

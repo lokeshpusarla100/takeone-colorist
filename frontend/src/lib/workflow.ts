@@ -1,6 +1,6 @@
 import { activeJob, stageLabel } from './api';
 import type { BackendState } from './api';
-import { canGrade, parseDomain } from './sourceColor';
+import { canGrade, parseDomain } from '../features/color/sourceColor';
 
 export function mutationLocked(state?:BackendState,localBusy=false,requestPending=false,pendingSource?:BackendState){
   return localBusy||requestPending||!!(state&&activeJob(state))||!!(pendingSource&&activeJob(pendingSource));

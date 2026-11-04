@@ -7,12 +7,13 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from takeone import color_domain as cd, rendering, source_color
+from takeone import rendering
+from takeone.color import domain as cd, files as source_color
 from takeone.app import create_app
 from takeone.config import Settings
 from takeone.contracts import GradeParameters
 from tests.test_backend import FakeMuse, client, settings, start, upload, wait  # noqa: F401
-from tests.test_color_domain import (T, XYZ, encode, ffmpeg, needs_tonemap, needs_zscale, probe_stream)
+from tests.color.test_domain import (T, XYZ, encode, ffmpeg, needs_tonemap, needs_zscale, probe_stream)
 from tests.test_local_grading import Masks, Planner, generate, pixels
 
 pytestmark = [needs_zscale, pytest.mark.filterwarnings('ignore')]
@@ -34,7 +35,7 @@ def make_scene(path, size, matrix, rng, pix, codec, tags, strip=False, red=RED):
     frames = np.repeat(scene_image(width, height, red)[None], 12, 0).tobytes()
     ffmpeg(['-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{width}x{height}', '-r', '12', '-i', '-', '-vf', vf, '-c:v', codec, '-pix_fmt', pix, *lossless, str(path)], frames)
     if strip:
-        from tests.test_color_domain import strip_color_tags
+        from tests.color.test_domain import strip_color_tags
         strip_color_tags(path, codec)
     return path
 

@@ -13,12 +13,13 @@ from pydantic import Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from takeone_rubric_v1.rubric import Answer, StrictModel
-from . import color_domain
+from .color import domain as color_domain
 from .config import Settings
 from .contracts import Event, State
 from .errors import Problem, safe_problem
 from .service import Service
 from .preference_api import install_preferences
+from .color.api import install_color
 from .preferences import context_values
 
 
@@ -104,6 +105,7 @@ def create_app(settings: Settings | None = None, provider=None, sam_provider=Non
         return application.state.service
 
     install_preferences(application,service)
+    install_color(application,service)
 
     @application.get("/api/health")
     def health():

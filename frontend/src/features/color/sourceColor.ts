@@ -1,7 +1,7 @@
-import type { IconName } from '../components/Icon';
+import type { IconName } from '../../components/Icon';
 
 /**
- * How the backend reads a source's colors (takeone/color_domain.py), turned into words for the person using the app.
+ * How the backend reads a source's colors (takeone/color/domain.py), turned into words for the person using the app.
  * Everything here tolerates a missing or odd record: sessions saved before color domains existed have none, and the
  * interface then simply says nothing about color.
  */
